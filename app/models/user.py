@@ -2,9 +2,33 @@ from __future__ import annotations
 
 from typing import Optional
 from datetime import datetime
+import random
 
 from sqlmodel import Field, Relationship, SQLModel
 from .enums import MeetingPlatform
+
+# Distinct colors for user calendar display
+USER_COLORS = [
+    "#3B82F6",  # Blue
+    "#EF4444",  # Red
+    "#10B981",  # Green
+    "#F59E0B",  # Amber
+    "#8B5CF6",  # Violet
+    "#EC4899",  # Pink
+    "#14B8A6",  # Teal
+    "#F97316",  # Orange
+    "#6366F1",  # Indigo
+    "#84CC16",  # Lime
+    "#06B6D4",  # Cyan
+    "#F43F5E",  # Rose
+    "#A855F7",  # Purple
+    "#22C55E",  # Green
+    "#FACC15",  # Yellow
+]
+
+def get_random_user_color() -> str:
+    """Return a random color from the predefined user colors list."""
+    return random.choice(USER_COLORS)
 
 
 class UserBase(SQLModel):
@@ -16,7 +40,7 @@ class UserBase(SQLModel):
     preferred_meeting_platform: Optional[MeetingPlatform] = None
     profile_completed: bool = False
     profile_picture: Optional[str] = None  # Path to profile picture file
-    calendar_color: Optional[str] = Field(default="#3B82F6")  # Default blue color for calendar display
+    calendar_color: Optional[str] = Field(default_factory=get_random_user_color)  # Random color for calendar display
 
 
 class User(UserBase, table=True):
