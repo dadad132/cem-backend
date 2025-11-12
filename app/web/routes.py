@@ -3797,7 +3797,7 @@ async def web_calendar(
             .where(Assignment.task_id == task.id)
         )).scalars().all()
         if task_assignments:
-            task_users[task.id] = task_assignments[0]  # Use first assigned user's color
+            task_users[task.id] = list(task_assignments)  # Store all assigned users
     
     project_users = {}
     for project in projects:

@@ -172,17 +172,25 @@
               </div>
             </a>
           {% else %}
-            {% set task_user = task_users.get(item.id) %}
-            {% set user_color = task_user.calendar_color if task_user else None %}
+            {% set assigned_users = task_users.get(item.id) %}
+            {% set is_collaboration = assigned_users and assigned_users|length > 1 %}
+            {% set primary_user = assigned_users[0] if assigned_users else None %}
+            {% set user_color = primary_user.calendar_color if primary_user else None %}
             {% set overdue = (item.due_date and item.due_date < today and item.status != TaskStatus.done) %}
             {% set display_color = user_color if user_color else '#3B82F6' %}
             {% if overdue %}
               {% set display_color = '#6B7280' %}
             {% endif %}
-            <a href="/web/tasks/{{ item.id }}" class="flex items-center gap-3 p-3 rounded-lg border-l-4 transition shadow-sm hover:shadow-md" style="border-left-color: {{ display_color }}; background: linear-gradient(to right, {{ display_color }}25, {{ display_color }}10);">
-              <div class="text-2xl">
-                {% if task_user %}
-                  <span class="w-3 h-3 rounded-full inline-block" style="background-color: {{ user_color }};"></span>
+            {% set tooltip_users = ', '.join([u.full_name or u.username for u in assigned_users]) if assigned_users else 'Unassigned' %}
+            <a href="/web/tasks/{{ item.id }}" class="flex items-center gap-3 p-3 rounded-lg border-l-4 transition shadow-sm hover:shadow-md" style="border-left-color: {{ display_color }}; background: linear-gradient(to right, {{ display_color }}25, {{ display_color }}10);" title="{{ tooltip_users }}">
+              <div class="text-2xl flex items-center gap-1">
+                {% if assigned_users %}
+                  {% for user in assigned_users[:3] %}
+                    <span class="w-3 h-3 rounded-full inline-block" style="background-color: {{ user.calendar_color }};"></span>
+                  {% endfor %}
+                  {% if assigned_users|length > 3 %}
+                    <span class="text-sm">+{{ assigned_users|length - 3 }}</span>
+                  {% endif %}
                 {% else %}
                   📋
                 {% endif %}
@@ -190,8 +198,10 @@
               <div class="flex-1">
                 <div class="font-semibold text-gray-800">{{ item.title }}</div>
                 <div class="text-sm text-gray-600">
-                  {% if task_user %}
-                    {{ task_user.full_name or task_user.username }}
+                  {% if is_collaboration %}
+                    👥 {{ primary_user.full_name or primary_user.username }} and {{ assigned_users|length - 1 }} other{{ 's' if assigned_users|length > 2 else '' }}
+                  {% elif primary_user %}
+                    {{ primary_user.full_name or primary_user.username }}
                   {% else %}
                     Unassigned
                   {% endif %}
@@ -262,17 +272,35 @@
             {% endfor %}
             
             {% for t in tasks_by_day.get(day, []) %}
-              {% set task_user = task_users.get(t.id) %}
-              {% set user_color = task_user.calendar_color if task_user else None %}
+              {% set assigned_users = task_users.get(t.id) %}
+              {% set is_collaboration = assigned_users and assigned_users|length > 1 %}
+              {% set primary_user = assigned_users[0] if assigned_users else None %}
+              {% set user_color = primary_user.calendar_color if primary_user else None %}
               {% set overdue = (t.due_date and t.due_date < today and t.status != TaskStatus.done) %}
               {% set display_color = user_color if user_color else '#3B82F6' %}
               {% if overdue %}
                 {% set display_color = '#6B7280' %}
               {% endif %}
-              <a href="/web/tasks/{{ t.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ display_color }}; background: linear-gradient(to right, {{ display_color }}35, {{ display_color }}18);" title="{{ t.title }}{% if t.due_time %} at {{ t.due_time.strftime('%I:%M %p') }}{% endif %}{% if task_user %} - {{ task_user.full_name or task_user.username }}{% endif %}">
+              {% set tooltip_users = ', '.join([u.full_name or u.username for u in assigned_users]) if assigned_users else 'Unassigned' %}
+              <a href="/web/tasks/{{ t.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ display_color }}; background: linear-gradient(to right, {{ display_color }}35, {{ display_color }}18);" title="{{ t.title }}{% if t.due_time %} at {{ t.due_time.strftime('%I:%M %p') }}{% endif %} - {{ tooltip_users }}">
                 <div class="flex items-center gap-1 font-semibold text-gray-800">
-                  {% if task_user %}<span class="w-1.5 h-1.5 rounded-full flex-shrink-0" style="background-color: {{ user_color }};"></span>{% endif %}
-                  <span class="text-xs truncate">{{ task_user.full_name or task_user.username if task_user else 'Unassigned' }}</span>
+                  {% if assigned_users %}
+                    {% for user in assigned_users[:3] %}
+                      <span class="w-1.5 h-1.5 rounded-full flex-shrink-0" style="background-color: {{ user.calendar_color }};"></span>
+                    {% endfor %}
+                    {% if assigned_users|length > 3 %}
+                      <span class="text-xs">+{{ assigned_users|length - 3 }}</span>
+                    {% endif %}
+                  {% endif %}
+                  <span class="text-xs truncate">
+                    {% if is_collaboration %}
+                      👥 {{ primary_user.full_name or primary_user.username }} +{{ assigned_users|length - 1 }}
+                    {% elif primary_user %}
+                      {{ primary_user.full_name or primary_user.username }}
+                    {% else %}
+                      Unassigned
+                    {% endif %}
+                  </span>
                   <span class="text-xs ml-auto">{% if t.due_time %}{{ t.due_time.strftime('%H:%M') }}{% else %}All day{% endif %}</span>
                 </div>
                 <div class="truncate text-gray-800">{{ t.title }}</div>
@@ -323,17 +351,35 @@
             {% endfor %}
             
             {% for t in tasks_by_day.get(day, []) %}
-              {% set task_user = task_users.get(t.id) %}
-              {% set user_color = task_user.calendar_color if task_user else None %}
+              {% set assigned_users = task_users.get(t.id) %}
+              {% set is_collaboration = assigned_users and assigned_users|length > 1 %}
+              {% set primary_user = assigned_users[0] if assigned_users else None %}
+              {% set user_color = primary_user.calendar_color if primary_user else None %}
               {% set overdue = (t.due_date and t.due_date < today and t.status != TaskStatus.done) %}
               {% set display_color = user_color if user_color else '#3B82F6' %}
               {% if overdue %}
                 {% set display_color = '#6B7280' %}
               {% endif %}
-              <a href="/web/tasks/{{ t.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ display_color }}; background: linear-gradient(to right, {{ display_color }}35, {{ display_color }}18);" title="{{ t.title }}{% if task_user %} - {{ task_user.full_name or task_user.username }}{% endif %}">
+              {% set tooltip_users = ', '.join([u.full_name or u.username for u in assigned_users]) if assigned_users else 'Unassigned' %}
+              <a href="/web/tasks/{{ t.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ display_color }}; background: linear-gradient(to right, {{ display_color }}35, {{ display_color }}18);" title="{{ t.title }} - {{ tooltip_users }}">
                 <div class="flex items-center gap-1 font-semibold text-gray-800">
-                  {% if task_user %}<span class="w-1.5 h-1.5 rounded-full flex-shrink-0" style="background-color: {{ user_color }};"></span>{% endif %}
-                  <span class="text-xs truncate">{{ task_user.full_name or task_user.username if task_user else 'Unassigned' }}</span>
+                  {% if assigned_users %}
+                    {% for user in assigned_users[:3] %}
+                      <span class="w-1.5 h-1.5 rounded-full flex-shrink-0" style="background-color: {{ user.calendar_color }};"></span>
+                    {% endfor %}
+                    {% if assigned_users|length > 3 %}
+                      <span class="text-xs">+{{ assigned_users|length - 3 }}</span>
+                    {% endif %}
+                  {% endif %}
+                  <span class="text-xs truncate">
+                    {% if is_collaboration %}
+                      👥 {{ primary_user.full_name or primary_user.username }} +{{ assigned_users|length - 1 }}
+                    {% elif primary_user %}
+                      {{ primary_user.full_name or primary_user.username }}
+                    {% else %}
+                      Unassigned
+                    {% endif %}
+                  </span>
                   <span class="text-xs ml-auto">{% if t.due_time %}{{ t.due_time.strftime('%H:%M') }}{% else %}All day{% endif %}</span>
                 </div>
                 <div class="truncate text-gray-800">{{ t.title }}</div>
