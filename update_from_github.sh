@@ -142,18 +142,26 @@ fi
 echo -e "${YELLOW}[8/9]${NC} Updating dependencies..."
 if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
+    echo -e "  ${BLUE}→${NC} Upgrading pip..."
     pip install --upgrade pip -q
+    echo -e "  ${BLUE}→${NC} Installing/upgrading all requirements..."
     pip install -r requirements.txt --upgrade -q
+    echo -e "${GREEN}[✓]${NC} Dependencies updated in .venv"
 elif [ -f "venv/bin/activate" ]; then
     source venv/bin/activate
+    echo -e "  ${BLUE}→${NC} Upgrading pip..."
     pip install --upgrade pip -q
+    echo -e "  ${BLUE}→${NC} Installing/upgrading all requirements..."
     pip install -r requirements.txt --upgrade -q
+    echo -e "${GREEN}[✓]${NC} Dependencies updated in venv"
 else
     # No venv found, use system Python
+    echo -e "  ${BLUE}→${NC} Upgrading pip..."
     pip3 install --upgrade pip -q --user
+    echo -e "  ${BLUE}→${NC} Installing/upgrading all requirements..."
     pip3 install -r requirements.txt --upgrade -q --user
+    echo -e "${GREEN}[✓]${NC} Dependencies updated (system Python)"
 fi
-echo -e "${GREEN}[✓]${NC} Dependencies updated"
 
 echo -e "${YELLOW}[9/11]${NC} Running database migrations..."
 python3 -c "
@@ -172,12 +180,13 @@ MIGRATION_SCRIPTS=(
     "migrate_ticket_system.py"
     "migrate_guest_tickets_combined.py"
     "migrate_processed_mail.py"
+    "migrate_calendar_features.py"
 )
 
 for script in "${MIGRATION_SCRIPTS[@]}"; do
     if [ -f "$script" ]; then
         echo -e "  ${BLUE}→${NC} Running $script..."
-        python3 "$script" 2>&1 | grep -E "✓|✅|Migration completed|already exists" || true
+        python3 "$script" 2>&1 | grep -E "✓|✅|Migration completed|already exists|Added" || true
     fi
 done
 echo -e "${GREEN}[✓]${NC} Migration scripts complete"

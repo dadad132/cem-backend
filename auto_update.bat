@@ -12,7 +12,10 @@ cd /d "%~dp0"
 echo [i] Checking for updates...
 
 REM Get current version
-FOR /F "tokens=*" %%a IN ('python3 -c "from app.core.version import VERSION; print(VERSION)"') DO SET CURRENT_VERSION=%%a
+FOR /F "tokens=*" %%a IN ('python -c "from app.core.version import VERSION; print(VERSION)" 2^>nul') DO SET CURRENT_VERSION=%%a
+if "%CURRENT_VERSION%"=="" (
+    FOR /F "tokens=*" %%a IN ('python3 -c "from app.core.version import VERSION; print(VERSION)"') DO SET CURRENT_VERSION=%%a
+)
 echo [*] Current version: %CURRENT_VERSION%
 
 REM Create backup
@@ -35,17 +38,34 @@ if exist .git (
 
 REM Update dependencies
 echo [i] Updating dependencies...
-python3 -m pip install --upgrade pip -q
-python3 -m pip install -r requirements.txt --upgrade -q
+echo    - Upgrading pip...
+python -m pip install --upgrade pip -q 2>nul || python3 -m pip install --upgrade pip -q
+echo    - Installing/upgrading all requirements...
+python -m pip install -r requirements.txt --upgrade -q 2>nul || python3 -m pip install -r requirements.txt --upgrade -q
 echo [*] Dependencies updated
 
 REM Run database migrations
-echo [i] Checking database migrations...
-python3 -c "import asyncio; from app.core.database import init_models; asyncio.run(init_models())" 2>nul
-echo [*] Database migrations complete
+echo [i] Running database migrations...
+python -c "import asyncio; from app.core.database import init_models; asyncio.run(init_models())" 2>nul || python3 -c "import asyncio; from app.core.database import init_models; asyncio.run(init_models())" 2>nul
+echo [*] Base database migrations complete
+
+REM Run migration scripts
+echo [i] Running migration scripts...
+if exist migrate_google_oauth.py python migrate_google_oauth.py 2>nul || python3 migrate_google_oauth.py 2>nul
+if exist migrate_subtasks.py python migrate_subtasks.py 2>nul || python3 migrate_subtasks.py 2>nul
+if exist migrate_notifications_interactive.py python migrate_notifications_interactive.py 2>nul || python3 migrate_notifications_interactive.py 2>nul
+if exist migrate_project_archive.py python migrate_project_archive.py 2>nul || python3 migrate_project_archive.py 2>nul
+if exist migrate_ticket_system.py python migrate_ticket_system.py 2>nul || python3 migrate_ticket_system.py 2>nul
+if exist migrate_guest_tickets_combined.py python migrate_guest_tickets_combined.py 2>nul || python3 migrate_guest_tickets_combined.py 2>nul
+if exist migrate_processed_mail.py python migrate_processed_mail.py 2>nul || python3 migrate_processed_mail.py 2>nul
+if exist migrate_calendar_features.py python migrate_calendar_features.py 2>nul || python3 migrate_calendar_features.py 2>nul
+echo [*] Migration scripts complete
 
 REM Get new version
-FOR /F "tokens=*" %%a IN ('python3 -c "from app.core.version import VERSION; print(VERSION)"') DO SET NEW_VERSION=%%a
+FOR /F "tokens=*" %%a IN ('python -c "from app.core.version import VERSION; print(VERSION)" 2^>nul') DO SET NEW_VERSION=%%a
+if "%NEW_VERSION%"=="" (
+    FOR /F "tokens=*" %%a IN ('python3 -c "from app.core.version import VERSION; print(VERSION)"') DO SET NEW_VERSION=%%a
+)
 
 echo.
 echo =========================================
