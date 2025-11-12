@@ -962,6 +962,313 @@ async def web_admin_deactivate_user(
     return RedirectResponse('/web/admin/users', status_code=303)
 
 
+# User Activity Reports
+# --------------------------
+@router.get('/admin/reports/user-activity', response_class=HTMLResponse)
+async def web_admin_user_activity_report(
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+):
+    """Admin page to generate user activity reports"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_active:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+    
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Get all users in workspace
+    users = (
+        await db.execute(
+            select(User)
+            .where(User.workspace_id == user.workspace_id)
+            .order_by(User.full_name, User.username)
+        )
+    ).scalars().all()
+    
+    return templates.TemplateResponse(
+        'admin/user_activity_report.html',
+        {
+            'request': request,
+            'user': user,
+            'users': users,
+        },
+    )
+
+
+@router.get('/admin/reports/user-activity/{target_user_id}/pdf')
+async def web_admin_generate_user_activity_pdf(
+    request: Request,
+    target_user_id: int,
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_session),
+):
+    """Generate PDF report of user activity"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_active:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+    
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Get target user
+    target_user = (await db.execute(select(User).where(User.id == target_user_id))).scalar_one_or_none()
+    if not target_user or target_user.workspace_id != user.workspace_id:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Parse date range
+    if start_date:
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+    else:
+        start_dt = datetime.now() - timedelta(days=30)
+    
+    if end_date:
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+    else:
+        end_dt = datetime.now() + timedelta(days=1)
+    
+    # Gather activity data
+    # 1. Tasks created
+    tasks_created = (await db.execute(
+        select(Task)
+        .where(Task.created_by == target_user_id)
+        .where(Task.created_at >= start_dt)
+        .where(Task.created_at < end_dt)
+        .order_by(Task.created_at.desc())
+    )).scalars().all()
+    
+    # 2. Task assignments
+    task_assignments = (await db.execute(
+        select(Task, Assignment)
+        .join(Assignment, Task.id == Assignment.task_id)
+        .where(Assignment.assignee_id == target_user_id)
+        .where(Task.created_at >= start_dt)
+        .where(Task.created_at < end_dt)
+        .order_by(Task.created_at.desc())
+    )).all()
+    
+    # 3. Task edits
+    task_edits = (await db.execute(
+        select(TaskHistory)
+        .where(TaskHistory.editor_id == target_user_id)
+        .where(TaskHistory.created_at >= start_dt)
+        .where(TaskHistory.created_at < end_dt)
+        .order_by(TaskHistory.created_at.desc())
+    )).scalars().all()
+    
+    # 4. Comments
+    comments = (await db.execute(
+        select(Comment)
+        .where(Comment.user_id == target_user_id)
+        .where(Comment.created_at >= start_dt)
+        .where(Comment.created_at < end_dt)
+        .order_by(Comment.created_at.desc())
+    )).scalars().all()
+    
+    # 5. Projects created
+    projects_created = (await db.execute(
+        select(Project)
+        .where(Project.owner_id == target_user_id)
+        .where(Project.created_at >= start_dt)
+        .where(Project.created_at < end_dt)
+        .order_by(Project.created_at.desc())
+    )).scalars().all()
+    
+    # 6. Activities logged
+    activities = (await db.execute(
+        select(Activity)
+        .where(Activity.created_by == target_user_id)
+        .where(Activity.created_at >= start_dt)
+        .where(Activity.created_at < end_dt)
+        .order_by(Activity.created_at.desc())
+    )).scalars().all()
+    
+    # Generate PDF
+    from reportlab.lib.pagesizes import letter, A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    
+    # Create PDF in memory
+    import io
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+    
+    # Container for PDF elements
+    elements = []
+    styles = getSampleStyleSheet()
+    
+    # Custom styles
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        textColor=colors.HexColor('#1F2937'),
+        spaceAfter=30,
+        alignment=TA_CENTER,
+    )
+    
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=16,
+        textColor=colors.HexColor('#374151'),
+        spaceAfter=12,
+        spaceBefore=20,
+    )
+    
+    subheading_style = ParagraphStyle(
+        'CustomSubheading',
+        parent=styles['Heading3'],
+        fontSize=12,
+        textColor=colors.HexColor('#6B7280'),
+        spaceAfter=8,
+    )
+    
+    # Title
+    elements.append(Paragraph(f"User Activity Report", title_style))
+    elements.append(Paragraph(f"{target_user.full_name or target_user.username}", heading_style))
+    elements.append(Paragraph(
+        f"Period: {start_dt.strftime('%B %d, %Y')} - {end_dt.strftime('%B %d, %Y')}",
+        subheading_style
+    ))
+    elements.append(Paragraph(
+        f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}",
+        subheading_style
+    ))
+    elements.append(Spacer(1, 0.3*inch))
+    
+    # Summary section
+    elements.append(Paragraph("Activity Summary", heading_style))
+    summary_data = [
+        ['Activity Type', 'Count'],
+        ['Tasks Created', str(len(tasks_created))],
+        ['Task Assignments', str(len(task_assignments))],
+        ['Task Edits', str(len(task_edits))],
+        ['Comments Posted', str(len(comments))],
+        ['Projects Created', str(len(projects_created))],
+        ['Activities Logged', str(len(activities))],
+    ]
+    
+    summary_table = Table(summary_data, colWidths=[4*inch, 2*inch])
+    summary_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#3B82F6')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 12),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+    ]))
+    elements.append(summary_table)
+    elements.append(Spacer(1, 0.3*inch))
+    
+    # Tasks Created
+    if tasks_created:
+        elements.append(Paragraph("Tasks Created", heading_style))
+        task_data = [['Date', 'Title', 'Priority', 'Status']]
+        for task in tasks_created[:20]:  # Limit to first 20
+            task_data.append([
+                task.created_at.strftime('%Y-%m-%d %H:%M'),
+                task.title[:50],
+                task.priority.value.title(),
+                task.status.value.replace('_', ' ').title(),
+            ])
+        
+        task_table = Table(task_data, colWidths=[1.5*inch, 2.5*inch, 1*inch, 1.5*inch])
+        task_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#10B981')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+        ]))
+        elements.append(task_table)
+        elements.append(Spacer(1, 0.2*inch))
+    
+    # Task Edits
+    if task_edits:
+        elements.append(Paragraph("Recent Task Edits", heading_style))
+        edit_data = [['Date', 'Task ID', 'Field Changed', 'Old Value', 'New Value']]
+        for edit in task_edits[:15]:  # Limit to first 15
+            edit_data.append([
+                edit.created_at.strftime('%Y-%m-%d %H:%M'),
+                str(edit.task_id),
+                edit.field.replace('_', ' ').title(),
+                (edit.old_value or 'None')[:20],
+                (edit.new_value or 'None')[:20],
+            ])
+        
+        edit_table = Table(edit_data, colWidths=[1.3*inch, 0.7*inch, 1.2*inch, 1.5*inch, 1.5*inch])
+        edit_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F59E0B')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+        ]))
+        elements.append(edit_table)
+        elements.append(Spacer(1, 0.2*inch))
+    
+    # Comments
+    if comments:
+        elements.append(Paragraph("Recent Comments", heading_style))
+        comment_data = [['Date', 'Task ID', 'Comment']]
+        for comment in comments[:10]:  # Limit to first 10
+            comment_data.append([
+                comment.created_at.strftime('%Y-%m-%d %H:%M'),
+                str(comment.task_id),
+                (comment.text or '')[:60],
+            ])
+        
+        comment_table = Table(comment_data, colWidths=[1.5*inch, 0.8*inch, 4*inch])
+        comment_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8B5CF6')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+        ]))
+        elements.append(comment_table)
+        elements.append(Spacer(1, 0.2*inch))
+    
+    # Build PDF
+    doc.build(elements)
+    buffer.seek(0)
+    
+    # Return PDF file
+    from fastapi.responses import StreamingResponse
+    filename = f"user_activity_{target_user.username}_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.pdf"
+    return StreamingResponse(
+        buffer,
+        media_type='application/pdf',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+    )
+
+
 @router.get('/admin/updates', response_class=HTMLResponse)
 async def web_admin_updates(
     request: Request,

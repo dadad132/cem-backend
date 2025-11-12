@@ -48,3 +48,6 @@ google-api-python-client==2.153.0
 
 # Development Tools (optional, can be removed for production)
 watchfiles==1.1.1
+
+# PDF Generation
+reportlab==4.2.5
