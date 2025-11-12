@@ -1,0 +1,264 @@
+﻿from __future__ import annotations
+
+from typing import Optional
+from pathlib import Path
+from datetime import date, datetime
+import calendar as pycalendar
+
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_session
+from app.core.security import verify_password, get_password_hash
+from app.core.email import send_email
+from app.models.project import Project
+from app.models.task import Task
+from app.models.user import User
+from app.models.enums import TaskStatus, TaskPriority, MeetingPlatform
+from app.models.workspace import Workspace
+from app.models.assignment import Assignment
+from app.models.comment import Comment
+from app.models.task_history import TaskHistory
+from app.models.notification import Notification
+from app.models.chat import Chat, ChatMember, Message
+from app.models.meeting import Meeting, MeetingAttendee
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
+
+router = APIRouter(tags=['web'])
+
+# --------------------------
+# Email verification gate
+# --------------------------
+async def require_verified(request: Request, db: AsyncSession = Depends(get_session)):
+    path = request.url.path or ''
+    allowed_prefixes = (
+        '/web/login', '/web/signup', '/web/logout',
+        '/web/verify-email', '/web/verify-email/request', '/web/verify-email/confirm'
+    )
+    if any(path.startswith(p) for p in allowed_prefixes):
+        return
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        request.session.clear()
+        raise HTTPException(status_code=303, headers={'Location': '/web/login'})
+    if not getattr(user, 'email_verified', False):
+        raise HTTPException(status_code=303, headers={'Location': '/web/verify-email'})
+
+router.dependencies.append(Depends(require_verified))
+
+# --------------------------
+# Auth (session-based for web)
+# --------------------------
+@router.get('/login', response_class=HTMLResponse)
+async def web_login(request: Request):
+    return templates.TemplateResponse('auth/login.html', {'request': request, 'error': None})
+
+
+@router.post('/login')
+async def web_login_post(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+    db: AsyncSession = Depends(get_session),
+):
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+    if not user or not verify_password(password, user.hashed_password):
+        return templates.TemplateResponse(
+            'auth/login.html', {'request': request, 'error': 'Invalid email or password'}, status_code=400
+        )
+    request.session['user_id'] = user.id
+    if not user.email_verified:
+        return RedirectResponse('/web/verify-email', status_code=303)
+    return RedirectResponse('/web/projects', status_code=303)
+
+
+@router.get('/signup', response_class=HTMLResponse)
+async def web_signup(request: Request):
+    return templates.TemplateResponse('auth/signup.html', {'request': request, 'error': None})
+
+
+def _generate_code() -> str:
+    import random
+    return f"{random.randint(0, 999999):06d}"
+
+
+async def _send_verification_code(db: AsyncSession, user: User) -> None:
+    from datetime import timedelta
+    code = _generate_code()
+    user.verification_code = code
+    user.verification_expires_at = datetime.utcnow() + timedelta(minutes=15)
+    await db.commit()
+    html = f"""
+    <p>Hello {(user.full_name or '').strip() or user.email},</p>
+    <p>Your verification code is: <strong>{code}</strong></p>
+    <p>This code expires in 15 minutes.</p>
+    """
+    try:
+        send_email(user.email, 'Verify your email', html, from_name='ClickUp Lite', reply_to=None)
+    except Exception as e:
+        print('Failed to send email:', e)
+
+
+@router.post('/signup')
+async def web_signup_post(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+    full_name: Optional[str] = Form(None),
+    db: AsyncSession = Depends(get_session),
+):
+    exists = await db.execute(select(User).where(User.email == email))
+    if exists.scalar_one_or_none():
+        return templates.TemplateResponse(
+            'auth/signup.html', {'request': request, 'error': 'Email already registered'}, status_code=400
+        )
+    ws = Workspace(name=f"{(full_name or '').strip() or email}'s Workspace")
+    db.add(ws)
+    await db.flush()
+    user = User(email=email, full_name=full_name or '', hashed_password=get_password_hash(password), workspace_id=ws.id)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    request.session['user_id'] = user.id
+    await _send_verification_code(db, user)
+    return RedirectResponse('/web/verify-email', status_code=303)
+
+
+@router.post('/logout')
+async def web_logout(request: Request):
+    request.session.clear()
+    return RedirectResponse('/', status_code=303)
+
+
+# --------------------------
+# Email Verification
+# --------------------------
+@router.get('/verify-email', response_class=HTMLResponse)
+async def web_verify_email(request: Request, db: AsyncSession = Depends(get_session)):
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+    return templates.TemplateResponse('auth/verify_email.html', {'request': request, 'user': user, 'error': None, 'sent': False})
+
+
+@router.post('/verify-email/request')
+async def web_verify_email_request(request: Request, db: AsyncSession = Depends(get_session)):
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+    await _send_verification_code(db, user)
+    return templates.TemplateResponse('auth/verify_email.html', {'request': request, 'user': user, 'error': None, 'sent': True})
+
+
+@router.post('/verify-email/confirm')
+async def web_verify_email_confirm(request: Request, code: str = Form(...), db: AsyncSession = Depends(get_session)):
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+    if not user.verification_code or not user.verification_expires_at:
+        return templates.TemplateResponse('auth/verify_email.html', {'request': request, 'user': user, 'error': 'No code requested yet.', 'sent': False}, status_code=400)
+    if datetime.utcnow() > user.verification_expires_at:
+        return templates.TemplateResponse('auth/verify_email.html', {'request': request, 'user': user, 'error': 'Code expired. Request a new one.', 'sent': False}, status_code=400)
+    if code.strip() != user.verification_code:
+        return templates.TemplateResponse('auth/verify_email.html', {'request': request, 'user': user, 'error': 'Invalid code.', 'sent': False}, status_code=400)
+    user.email_verified = True
+    user.verification_code = None
+    user.verification_expires_at = None
+    await db.commit()
+    return RedirectResponse('/web/projects', status_code=303)
+
+
+# --------------------------
+# Notifications (needed by layout)
+# --------------------------
+@router.get('/notifications/count', response_class=HTMLResponse)
+async def web_notifications_count(request: Request, db: AsyncSession = Depends(get_session)):
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return HTMLResponse('0')
+    result = await db.execute(select(Notification).where(Notification.user_id == user_id, Notification.read_at.is_(None)))
+    count = len(result.scalars().all())
+    return HTMLResponse(str(count))
+
+
+@router.get('/notifications/peek', response_class=HTMLResponse)
+async def web_notifications_peek(request: Request, db: AsyncSession = Depends(get_session)):
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return HTMLResponse('')
+    notif = (
+        await db.execute(
+            select(Notification)
+            .where(Notification.user_id == user_id, Notification.read_at.is_(None))
+            .order_by(Notification.created_at.desc())
+        )
+    ).scalars().first()
+    if not notif:
+        return HTMLResponse('')
+    html = """
+    <div class='fixed top-16 right-6 z-50'>
+      <div class='rounded border border-slate-200 bg-white shadow px-4 py-3 flex items-center gap-3'>
+        <div class='text-sm'>REPLACEME</div>
+      </div>
+    </div>
+    """
+
+    return HTMLResponse(html)
+
+
+# --------------------------
+# Projects (minimal)
+# --------------------------
+@router.get('/projects', response_class=HTMLResponse)
+async def web_projects(request: Request, db: AsyncSession = Depends(get_session)):
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+    result = await db.execute(
+        select(Project)
+        .where(Project.workspace_id == user.workspace_id)
+        .order_by(Project.created_at.desc())
+    )
+    projects = result.scalars().all()
+    return templates.TemplateResponse('projects/index.html', {'request': request, 'projects': projects})
+
+
+@router.post('/projects/create')
+async def web_projects_create(request: Request, name: str = Form(...), description: Optional[str] = Form(None), db: AsyncSession = Depends(get_session)):
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+    project = Project(name=name, description=description, owner_id=user_id, workspace_id=user.workspace_id)
+    db.add(project)
+    await db.commit()
+    return RedirectResponse('/web/projects', status_code=303)
+

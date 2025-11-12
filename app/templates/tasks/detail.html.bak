@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="margin-bottom: 1rem;">
+  <a href="/web/projects/{{ project.id }}" style="color: #2563eb;">← Back to {{ project.name }}</a>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+  <div class="lg:col-span-2">
+    <div class="bg-white border border-slate-200 rounded p-4">
+      <h2 class="text-lg font-semibold mb-3">{{ task.title }}</h2>
+      
+      <!-- Task Info -->
+      <div style="background: #f9fafb; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem;">
+        <p><strong>Status:</strong> {{ task.status.value.replace('_', ' ').title() }}</p>
+        <p><strong>Priority:</strong> {{ task.priority.value.title() }}</p>
+        {% if task.start_date %}<p><strong>Start:</strong> {{ task.start_date }}{% if task.start_time %} {{ task.start_time }}{% endif %}</p>{% endif %}
+        {% if task.due_date %}<p><strong>Due:</strong> {{ task.due_date }}{% if task.due_time %} {{ task.due_time }}{% endif %}</p>{% endif %}
+        {% if assignments %}
+        <p><strong>Assigned to:</strong> 
+          {% for a in assignments %}{{ a.full_name or a.username }}{% if not loop.last %}, {% endif %}{% endfor %}
+        </p>
+        {% endif %}
+      </div>
+
+      {% if task.description %}
+      <div style="margin-bottom: 1rem;">
+        <h3>Description</h3>
+        <p style="white-space: pre-wrap;">{{ task.description }}</p>
+      </div>
+      {% endif %}
+
+      <details style="margin-bottom: 1.5rem;">
+        <summary style="cursor: pointer; font-weight: bold;">✏️ Edit Task</summary>
+        <form method="post" action="/web/tasks/{{ task.id }}/update" class="space-y-3" style="margin-top: 1rem;">
+          <label>Title <input name="title" value="{{ task.title }}" required /></label>
+          <label>Description <textarea name="description" rows="5">{{ task.description or '' }}</textarea></label>
+          
+          <div class="grid grid-cols-2 gap-3">
+            <label>
+              Status
+              <select name="status" required>
+                {% for s in TaskStatus %}
+                <option value="{{ s.value }}" {% if s == task.status %}selected{% endif %}>{{ s.value.replace('_',' ').title() }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>
+              Priority
+              <select name="priority" required>
+                {% for p in TaskPriority %}
+                <option value="{{ p.value }}" {% if task.priority and p == task.priority %}selected{% endif %}>{{ p.value.title() }}</option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+          
+          <div class="grid grid-cols-2 gap-3">
+            <label>Start Date <input type="date" name="start_date_value" value="{{ task.start_date }}" /></label>
+            <label>Start Time <input type="time" name="start_time_value" value="{{ task.start_time.strftime('%H:%M') if task.start_time else '' }}" /></label>
+          </div>
+          
+          <div class="grid grid-cols-2 gap-3">
+            <label>Due Date <input type="date" name="due_date_value" value="{{ task.due_date }}" /></label>
+            <label>Due Time <input type="time" name="due_time_value" value="{{ task.due_time.strftime('%H:%M') if task.due_time else '' }}" /></label>
+          </div>
+
+          <button type="submit">💾 Save Changes</button>
+        </form>
+      </details>
+    </div>
+
+    <div class="bg-white border border-slate-200 rounded p-4 mt-6">
+      <h3 class="text-base font-semibold mb-3">💬 Comments ({{ comments|length }})</h3>
+      <form method="post" action="/web/tasks/{{ task.id }}/comment" class="mb-4">
+        <textarea name="content" rows="3" required placeholder="Write a comment..."></textarea>
+        <div class="pt-2 text-right">
+          <button type="submit">Post Comment</button>
+        </div>
+      </form>
+      <div class="space-y-3">
+        {% for comment, author in comments %}
+        <div style="border-left: 3px solid #2563eb; padding: 0.75rem; background: #f9fafb; border-radius: 0.25rem; margin-bottom: 0.75rem;">
+          <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+            <strong>{{ author.full_name or author.username }}</strong>
+            <span style="color: #6b7280; font-size: 0.875rem;">{{ comment.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+          </div>
+          <p style="white-space: pre-wrap; margin: 0;">{{ comment.content }}</p>
+        </div>
+        {% else %}
+        <div class="text-sm text-slate-500">No comments yet. Be the first to comment!</div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="bg-white border border-slate-200 rounded p-4">
+      <h3 class="text-base font-semibold mb-3">📜 Edit History</h3>
+      <div style="max-height: 600px; overflow-y: auto;">
+        {% for history_entry, editor in history %}
+        <div style="border-left: 2px solid #e5e7eb; padding-left: 0.75rem; margin-bottom: 1rem;">
+          <div style="font-size: 0.875rem; color: #6b7280; margin-bottom: 0.25rem;">
+            {{ history_entry.created_at.strftime('%Y-%m-%d %H:%M') }}
+          </div>
+          <div style="font-weight: 500; margin-bottom: 0.25rem;">
+            {{ editor.full_name or editor.username }}
+          </div>
+          <div style="font-size: 0.875rem;">
+            Changed <strong>{{ history_entry.field.replace('_', ' ') }}</strong>
+            {% if history_entry.old_value %}
+            <div style="color: #dc2626; margin-top: 0.25rem;">
+              <strong>From:</strong> {{ history_entry.old_value }}
+            </div>
+            {% endif %}
+            {% if history_entry.new_value %}
+            <div style="color: #059669; margin-top: 0.25rem;">
+              <strong>To:</strong> {{ history_entry.new_value }}
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% else %}
+        <div class="text-sm text-slate-500">No edit history yet.</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="bg-white border border-slate-200 rounded p-4 mt-4">
+      <h3 class="text-base font-semibold mb-3">⚡ Quick Actions</h3>
+      <a href="/web/calendar" style="display: block; margin-bottom: 0.5rem;">📅 View Calendar</a>
+      <a href="/web/my-tasks" style="display: block; margin-bottom: 0.5rem;">📋 My Tasks</a>
+      <a href="/web/projects/{{ project.id }}" style="display: block;">📂 Back to Project</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

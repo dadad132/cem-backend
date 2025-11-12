@@ -1,0 +1,291 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto">
+  <div class="mb-6">
+    <h1 class="text-3xl font-bold text-slate-900">System Updates</h1>
+    <p class="text-slate-600 mt-1">Manage application version and updates</p>
+  </div>
+
+  <!-- Current Version Card -->
+  <div class="bg-white rounded-lg border border-slate-200 p-6 mb-6">
+    <div class="flex items-start justify-between">
+      <div>
+        <h2 class="text-xl font-semibold text-slate-900 mb-2">Current Version</h2>
+        <div class="flex items-center gap-3">
+          <span class="text-4xl font-bold text-indigo-600">{{ version }}</span>
+          <span class="px-3 py-1 bg-green-100 text-green-700 rounded-full text-sm font-medium">
+            Running
+          </span>
+        </div>
+        <p class="text-sm text-slate-500 mt-2">Build Date: {{ build_date }}</p>
+      </div>
+      <svg class="w-16 h-16 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+      </svg>
+    </div>
+  </div>
+
+  <!-- GitHub Updates Card -->
+  {% if github_info %}
+  <div class="bg-white rounded-lg border border-slate-200 p-6 mb-6">
+    <h2 class="text-xl font-semibold text-slate-900 mb-4">GitHub Updates</h2>
+    
+    {% if github_info.update_available %}
+    <div class="p-4 bg-blue-50 border border-blue-200 rounded-lg mb-4">
+      <div class="flex items-start gap-3">
+        <svg class="w-6 h-6 text-blue-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+        </svg>
+        <div class="flex-1">
+          <h3 class="font-semibold text-blue-900 mb-1">Update Available from GitHub!</h3>
+          <div class="text-sm text-blue-800 space-y-1 mb-3">
+            <div><strong>Your version:</strong> <code class="bg-blue-100 px-2 py-0.5 rounded">{{ github_info.local_commit }}</code></div>
+            <div><strong>Latest version:</strong> <code class="bg-blue-100 px-2 py-0.5 rounded">{{ github_info.remote_commit }}</code></div>
+            <div><strong>Commits behind:</strong> {{ github_info.commits_behind }}</div>
+          </div>
+          <form method="post" action="/web/admin/updates/install-github" onsubmit="return confirm('Install update now? The system will restart automatically in ~60 seconds.');">
+            <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium">
+              Install Update from GitHub
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+    {% else %}
+    <div class="p-4 bg-green-50 border border-green-200 rounded-lg mb-4">
+      <div class="flex items-center gap-3">
+        <svg class="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        <div>
+          <h3 class="font-semibold text-green-900">Up to date!</h3>
+          <p class="text-sm text-green-700">Running commit: <code class="bg-green-100 px-2 py-0.5 rounded">{{ github_info.local_commit }}</code></p>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+    
+    <form method="post" action="/web/admin/updates/check-github">
+      <button type="submit" class="w-full px-4 py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 font-medium">
+        <span class="flex items-center justify-center gap-2">
+          <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+          </svg>
+          Check GitHub for Updates
+        </span>
+      </button>
+    </form>
+  </div>
+  {% endif %}
+
+  <!-- Update Check Card -->
+  <div class="bg-white rounded-lg border border-slate-200 p-6 mb-6">
+    <h2 class="text-xl font-semibold text-slate-900 mb-4">Check for Updates</h2>
+    
+    <div id="updateStatus" class="mb-4">
+      {% if update_info %}
+        {% if update_info.update_available %}
+          <div class="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+            <div class="flex items-start gap-3">
+              <svg class="w-6 h-6 text-yellow-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+              </svg>
+              <div class="flex-1">
+                <h3 class="font-semibold text-yellow-900 mb-1">Update Available!</h3>
+                <p class="text-yellow-800 mb-2">
+                  Version <strong>{{ update_info.latest_version }}</strong> is now available.
+                </p>
+                {% if update_info.release_notes %}
+                  <p class="text-sm text-yellow-700 mb-3">{{ update_info.release_notes }}</p>
+                {% endif %}
+                <div class="flex gap-3">
+                  <button onclick="downloadUpdate()" class="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 font-medium">
+                    Download Update
+                  </button>
+                  <a href="#update-instructions" class="px-4 py-2 bg-white border border-yellow-600 text-yellow-700 rounded-lg hover:bg-yellow-50 font-medium">
+                    View Instructions
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
+        {% else %}
+          <div class="p-4 bg-green-50 border border-green-200 rounded-lg">
+            <div class="flex items-center gap-3">
+              <svg class="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+              <div>
+                <h3 class="font-semibold text-green-900">You're up to date!</h3>
+                <p class="text-sm text-green-700">You're running the latest version.</p>
+              </div>
+            </div>
+          </div>
+        {% endif %}
+        
+        {% if update_info.last_check %}
+          <p class="text-sm text-slate-600">
+            Last checked: {{ update_info.last_check.strftime('%d/%m/%Y at %I:%M %p') }}
+          </p>
+        {% endif %}
+      {% endif %}
+    </div>
+
+    <button onclick="checkForUpdates()" id="checkButton" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium">
+      <span class="flex items-center justify-center gap-2">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+        </svg>
+        Check for Updates Now
+      </span>
+    </button>
+  </div>
+
+  <!-- Update Instructions -->
+  <div id="update-instructions" class="bg-slate-50 rounded-lg border border-slate-200 p-6 mb-6">
+    <h2 class="text-xl font-semibold text-slate-900 mb-4">How to Update</h2>
+    
+    <div class="space-y-4">
+      <div>
+        <h3 class="font-semibold text-slate-900 mb-2">🐧 Ubuntu/Linux Servers</h3>
+        <div class="bg-slate-900 text-slate-100 p-4 rounded-lg font-mono text-sm">
+          <code>
+            cd ~/crm-backend<br>
+            chmod +x auto_update.sh<br>
+            ./auto_update.sh
+          </code>
+        </div>
+        <p class="text-sm text-slate-600 mt-2">
+          The update script will automatically backup your database, pull the latest code, update dependencies, and restart the service.
+        </p>
+      </div>
+
+      <div>
+        <h3 class="font-semibold text-slate-900 mb-2">🪟 Windows Servers</h3>
+        <div class="bg-slate-900 text-slate-100 p-4 rounded-lg font-mono text-sm">
+          <code>
+            cd C:\path\to\crm-backend<br>
+            auto_update.bat
+          </code>
+        </div>
+        <p class="text-sm text-slate-600 mt-2">
+          After running the batch file, manually restart the server using <code class="px-1 py-0.5 bg-slate-200 rounded text-xs">python3 start_server.py</code>
+        </p>
+      </div>
+
+      <div>
+        <h3 class="font-semibold text-slate-900 mb-2">📦 Manual Update (Git)</h3>
+        <div class="bg-slate-900 text-slate-100 p-4 rounded-lg font-mono text-sm">
+          <code>
+            git pull origin main<br>
+            pip install -r requirements.txt --upgrade<br>
+            sudo systemctl restart crm-backend
+          </code>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- System Info -->
+  <div class="bg-white rounded-lg border border-slate-200 p-6">
+    <h2 class="text-xl font-semibold text-slate-900 mb-4">System Information</h2>
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <p class="text-sm text-slate-500">Application</p>
+        <p class="font-medium text-slate-900">CRM Backend</p>
+      </div>
+      <div>
+        <p class="text-sm text-slate-500">Version</p>
+        <p class="font-medium text-slate-900">{{ version }}</p>
+      </div>
+      <div>
+        <p class="text-sm text-slate-500">Build Date</p>
+        <p class="font-medium text-slate-900">{{ build_date }}</p>
+      </div>
+      <div>
+        <p class="text-sm text-slate-500">Status</p>
+        <p class="font-medium text-green-600">● Running</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+async function checkForUpdates() {
+  const button = document.getElementById('checkButton');
+  const statusDiv = document.getElementById('updateStatus');
+  
+  button.disabled = true;
+  button.innerHTML = '<span class="flex items-center justify-center gap-2"><svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>Checking...</span>';
+  
+  try {
+    const response = await fetch('/api/system/updates/check');
+    const data = await response.json();
+    
+    if (data.update_available) {
+      statusDiv.innerHTML = `
+        <div class="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+          <div class="flex items-start gap-3">
+            <svg class="w-6 h-6 text-yellow-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+            </svg>
+            <div class="flex-1">
+              <h3 class="font-semibold text-yellow-900 mb-1">Update Available!</h3>
+              <p class="text-yellow-800 mb-2">Version <strong>${data.latest_version}</strong> is now available.</p>
+              ${data.release_notes ? `<p class="text-sm text-yellow-700 mb-3">${data.release_notes}</p>` : ''}
+              <div class="flex gap-3">
+                <button onclick="downloadUpdate()" class="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 font-medium">
+                  Download Update
+                </button>
+                <a href="#update-instructions" class="px-4 py-2 bg-white border border-yellow-600 text-yellow-700 rounded-lg hover:bg-yellow-50 font-medium">
+                  View Instructions
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="text-xs text-slate-500 mt-2">Just now</p>
+      `;
+    } else {
+      statusDiv.innerHTML = `
+        <div class="p-4 bg-green-50 border border-green-200 rounded-lg">
+          <div class="flex items-center gap-3">
+            <svg class="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <div>
+              <h3 class="font-semibold text-green-900">You're up to date!</h3>
+              <p class="text-sm text-green-700">You're running the latest version (${data.current_version}).</p>
+            </div>
+          </div>
+        </div>
+        <p class="text-xs text-slate-500 mt-2">Just now</p>
+      `;
+    }
+  } catch (error) {
+    statusDiv.innerHTML = `
+      <div class="p-4 bg-red-50 border border-red-200 rounded-lg">
+        <div class="flex items-center gap-3">
+          <svg class="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          <div>
+            <h3 class="font-semibold text-red-900">Update Check Failed</h3>
+            <p class="text-sm text-red-700">Unable to connect to update server. Please try again later.</p>
+          </div>
+        </div>
+      </div>
+    `;
+  } finally {
+    button.disabled = false;
+    button.innerHTML = '<span class="flex items-center justify-center gap-2"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>Check for Updates Now</span>';
+  }
+}
+
+function downloadUpdate() {
+  window.open('https://github.com/yourusername/crm-backend/releases', '_blank');
+}
+</script>
+
+{% endblock %}

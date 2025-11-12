@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="max-w-2xl mx-auto">
+  <div class="bg-white rounded-xl shadow-lg border border-slate-200 overflow-hidden">
+    <!-- Header -->
+    <div class="bg-gradient-to-r from-red-600 to-red-700 p-6 text-white">
+      <div class="flex items-center gap-4">
+        <div class="relative group">
+          {% if user.profile_picture %}
+            <img src="/web{{ user.profile_picture }}" alt="{{ user.full_name or user.username }}" class="w-20 h-20 rounded-full object-cover border-4 border-white/30">
+          {% else %}
+            <div class="w-20 h-20 rounded-full bg-white/20 backdrop-blur-sm flex items-center justify-center text-3xl font-bold border-4 border-white/30">
+              {{ user.full_name[:1] if user.full_name else user.username[:1].upper() }}
+            </div>
+          {% endif %}
+          <button onclick="document.getElementById('profilePictureInput').click()" class="absolute bottom-0 right-0 w-8 h-8 bg-white text-red-600 rounded-full flex items-center justify-center shadow-lg opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/>
+            </svg>
+          </button>
+        </div>
+        <div>
+          <h1 class="text-2xl font-bold">{{ user.full_name or user.username }}</h1>
+          <p class="text-white/80 text-sm">{{ user.email or 'No email set' }}</p>
+          <div class="flex items-center gap-2 mt-2">
+            {% if user.is_admin %}
+              <span class="px-2 py-1 bg-white/20 rounded text-xs font-medium">Admin</span>
+            {% endif %}
+            <span class="px-2 py-1 bg-white/20 rounded text-xs font-medium">@{{ user.username }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Hidden Profile Picture Upload Form -->
+    <form id="profilePictureForm" method="post" action="/web/profile/picture" enctype="multipart/form-data" style="display: none;">
+      <input type="file" id="profilePictureInput" name="profile_picture" accept="image/jpeg,image/png,image/gif,image/webp" onchange="document.getElementById('profilePictureForm').submit()">
+    </form>
+
+    <!-- Messages -->
+    {% if error %}
+      <div class="mx-6 mt-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">
+        <div class="flex items-center gap-2">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          {{ error }}
+        </div>
+      </div>
+    {% endif %}
+
+    {% if success or request.query_params.get('success') %}
+      <div class="mx-6 mt-6 p-4 bg-green-50 border border-green-200 rounded-lg text-green-800 text-sm">
+        <div class="flex items-center gap-2">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          {% if request.query_params.get('success') == 'picture' %}
+            Profile picture updated successfully
+          {% else %}
+            {{ success }}
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+
+    <!-- Form -->
+    <form method="post" action="/web/profile" class="p-6 space-y-6">
+      <div>
+        <label class="block text-sm font-semibold text-slate-700 mb-2">Username</label>
+        <input 
+          type="text" 
+          value="{{ user.username }}" 
+          disabled
+          class="w-full px-4 py-2.5 rounded-lg border border-slate-300 bg-slate-50 text-slate-500 cursor-not-allowed"
+        />
+        <p class="text-xs text-slate-500 mt-1">Username cannot be changed</p>
+      </div>
+
+      <div>
+        <label for="full_name" class="block text-sm font-semibold text-slate-700 mb-2">
+          Full Name <span class="text-red-500">*</span>
+        </label>
+        <input 
+          type="text" 
+          id="full_name" 
+          name="full_name" 
+          value="{{ user.full_name or '' }}" 
+          required
+          class="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+          placeholder="John Doe"
+        />
+      </div>
+
+      <div>
+        <label for="email" class="block text-sm font-semibold text-slate-700 mb-2">
+          Email Address <span class="text-red-500">*</span>
+        </label>
+        <input 
+          type="email" 
+          id="email" 
+          name="email" 
+          value="{{ user.email or '' }}" 
+          required
+          class="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+          placeholder="john@example.com"
+        />
+      </div>
+
+      <div>
+        <label for="preferred_meeting_platform" class="block text-sm font-semibold text-slate-700 mb-2">
+          Preferred Meeting Platform
+        </label>
+        <select 
+          id="preferred_meeting_platform" 
+          name="preferred_meeting_platform"
+          class="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+        >
+          <option value="">Select a platform...</option>
+          <option value="zoom" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'zoom' %}selected{% endif %}>Zoom</option>
+          <option value="teams" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'teams' %}selected{% endif %}>Microsoft Teams</option>
+          <option value="meet" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'meet' %}selected{% endif %}>Google Meet</option>
+          <option value="webex" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'webex' %}selected{% endif %}>Webex</option>
+        </select>
+      </div>
+
+      <div>
+        <label for="calendar_color" class="block text-sm font-semibold text-slate-700 mb-2">
+          Calendar Color
+        </label>
+        <div class="flex items-center gap-3">
+          <input 
+            type="color" 
+            id="calendar_color" 
+            name="calendar_color" 
+            value="{{ user.calendar_color or '#3B82F6' }}"
+            class="w-16 h-10 rounded border border-slate-300 cursor-pointer"
+          />
+          <span class="text-sm text-slate-600">Choose a color for your tasks and projects on the calendar</span>
+        </div>
+      </div>
+
+      <div class="pt-4 border-t border-slate-200 flex items-center gap-3">
+        <button 
+          type="submit" 
+          class="px-6 py-2.5 gradient-primary text-white font-medium rounded-lg hover:shadow-lg transition-all duration-200"
+        >
+          Save Changes
+        </button>
+        <a 
+          href="/web/projects" 
+          class="px-6 py-2.5 border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-all"
+        >
+          Cancel
+        </a>
+      </div>
+    </form>
+
+    <!-- Additional Info -->
+    <div class="px-6 pb-6 space-y-4">
+      <div class="border-t border-slate-200 pt-6">
+        <h3 class="text-sm font-semibold text-slate-700 mb-3">Account Information</h3>
+        <div class="space-y-2 text-sm">
+          <div class="flex justify-between">
+            <span class="text-slate-500">Account Status:</span>
+            <span class="font-medium text-green-600">Active</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-500">Role:</span>
+            <span class="font-medium">{{ 'Administrator' if user.is_admin else 'Team Member' }}</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-500">Member Since:</span>
+                      <div class="text-sm text-slate-600">
+            <span class="font-medium">{{ user.created_at.strftime('%d/%m/%Y') if user.created_at else 'N/A' }}</span>
+          </div>
+        </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Google Integration Section -->
+      <div class="border-t border-slate-200 pt-6">
+        <h3 class="text-sm font-semibold text-slate-700 mb-3">Google Integration</h3>
+        
+        {% if user.google_id %}
+          <div class="flex items-center justify-between p-4 bg-green-50 border border-green-200 rounded-lg">
+            <div class="flex items-center gap-3">
+              <svg class="w-8 h-8" viewBox="0 0 48 48">
+                <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+              </svg>
+              <div>
+                <p class="font-medium text-green-800">Google Calendar Connected</p>
+                <p class="text-xs text-green-600 mt-1">Your Google Calendar is linked</p>
+              </div>
+            </div>
+            <form method="post" action="/web/auth/google/unlink" onsubmit="return confirm('Are you sure you want to unlink your Google account?');">
+              <button type="submit" class="px-4 py-2 text-sm font-medium text-red-700 bg-white border border-red-300 rounded-lg hover:bg-red-50 transition-all">
+                Unlink
+              </button>
+            </form>
+          </div>
+        {% else %}
+          <div class="p-4 bg-slate-50 border border-slate-200 rounded-lg">
+            <div class="flex items-start gap-3 mb-4">
+              <svg class="w-8 h-8 flex-shrink-0" viewBox="0 0 48 48">
+                <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+              </svg>
+              <div>
+                <p class="text-sm font-medium text-slate-700">Connect your Google Calendar</p>
+                <p class="text-xs text-slate-500 mt-1">Sync your meetings with Google Calendar and access calendar events</p>
+              </div>
+            </div>
+            <a href="/web/auth/google/link" class="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-all">
+              <svg class="w-5 h-5" viewBox="0 0 24 24">
+                <path fill="currentColor" d="M19,4H18V2H16V4H8V2H6V4H5A2,2 0 0,0 3,6V20A2,2 0 0,0 5,22H19A2,2 0 0,0 21,20V6A2,2 0 0,0 19,4M19,20H5V10H19V20M19,8H5V6H19V8M12,13H17V18H12V13Z"/>
+              </svg>
+              Link Google Account
+            </a>
+          </div>
+        {% endif %}
+        
+        {% if request.query_params.get('success') == 'google_linked' %}
+          <div class="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg text-green-800 text-sm">
+            ✓ Google Calendar linked successfully!
+          </div>
+        {% elif request.query_params.get('success') == 'google_unlinked' %}
+          <div class="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-blue-800 text-sm">
+            Google Calendar has been unlinked
+          </div>
+        {% elif request.query_params.get('error') == 'google_denied' %}
+          <div class="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">
+            Google Calendar linking was cancelled
+          </div>
+        {% elif request.query_params.get('error') == 'google_failed' %}
+          <div class="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">
+            Failed to link Google Calendar. Please try again.
+          </div>
+        {% elif request.query_params.get('error') == 'google_config' %}
+          <div class="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">
+            Google integration is not configured. Please contact administrator.
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

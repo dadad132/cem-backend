@@ -1,0 +1,231 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="mb-5">
+  <h1 class="text-2xl font-semibold">Database Backup & Restore Management</h1>
+  <p class="text-sm text-slate-600 mt-1">Full backups include database + all attachments. Download to local storage for disaster recovery. Upload local backups to restore after server failure.</p>
+</div>
+
+{% if request.query_params.get('success') == 'backup_created' %}
+<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded text-green-800">✅ Backup created successfully</div>
+{% elif request.query_params.get('success') == 'restore_complete' %}
+<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded text-green-800">✅ Database restored successfully. Please refresh the page.</div>
+{% elif request.query_params.get('success') == 'backup_uploaded' %}
+<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded text-green-800">✅ Backup uploaded successfully from local machine</div>
+{% elif request.query_params.get('error') == 'backup_failed' %}
+<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ Backup creation failed</div>
+{% elif request.query_params.get('error') == 'restore_failed' %}
+<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ Database restore failed</div>
+{% elif request.query_params.get('error') == 'invalid_file' %}
+<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ Invalid file type. Only .db or .zip files are allowed</div>
+{% elif request.query_params.get('error') == 'upload_failed' %}
+<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ Backup upload failed</div>
+{% endif %}
+
+<div class="grid grid-cols-1 md:grid-cols-6 gap-4 mb-6">
+  <div class="bg-white rounded-lg border border-slate-200 p-4">
+    <div class="text-sm text-slate-600">Total Backups</div>
+    <div class="text-2xl font-bold mt-1">{{ stats.count }}</div>
+  </div>
+  
+  <div class="bg-white rounded-lg border border-blue-200 p-4">
+    <div class="text-sm text-slate-600">Automatic</div>
+    <div class="text-2xl font-bold mt-1 text-blue-600">{{ stats.auto_count }}</div>
+    <div class="text-xs text-slate-500 mt-1">Auto-deleted after 10</div>
+  </div>
+  
+  <div class="bg-white rounded-lg border border-green-200 p-4">
+    <div class="text-sm text-slate-600">Manual</div>
+    <div class="text-2xl font-bold mt-1 text-green-600">{{ stats.manual_count }}</div>
+    <div class="text-xs text-slate-500 mt-1">Kept forever</div>
+  </div>
+  
+  <div class="bg-white rounded-lg border border-purple-200 p-4">
+    <div class="text-sm text-slate-600">Full Backups</div>
+    <div class="text-2xl font-bold mt-1 text-purple-600">{{ stats.full_count }}</div>
+    <div class="text-xs text-slate-500 mt-1">DB + Attachments</div>
+  </div>
+  
+  <div class="bg-white rounded-lg border border-slate-200 p-4">
+    <div class="text-sm text-slate-600">Total Size</div>
+    <div class="text-2xl font-bold mt-1">{{ stats.total_size_mb }} MB</div>
+  </div>
+  
+  <div class="bg-white rounded-lg border border-slate-200 p-4">
+    <div class="text-sm text-slate-600">Latest Backup</div>
+    <div class="text-sm font-medium mt-1">{% if stats.latest_time %}{{ stats.latest_time }}{% else %}Never{% endif %}</div>
+  </div>
+</div>
+
+<div class="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
+  <div class="flex items-start gap-3">
+    <div class="text-blue-600 text-xl">ℹ️</div>
+    <div class="flex-1">
+      <h3 class="font-semibold text-blue-900 mb-1">Backup & Restore System</h3>
+      <ul class="text-sm text-blue-800 space-y-1">
+        <li>• <strong>Full backups</strong> include database + all attachments (comments, chat messages) in a ZIP file</li>
+        <li>• <strong>DB-only backups</strong> include just the database without attachment files</li>
+        <li>• <strong>Automatic backups</strong> are created every 12 hours (keeps last 10, auto-deleted)</li>
+        <li>• <strong>Manual backups are kept forever</strong> and never auto-deleted</li>
+        <li>• <strong>Download backups</strong> to your local machine for external storage and disaster recovery</li>
+        <li>• <strong>Upload backups</strong> from local machine when server needs to be restored after failure</li>
+        <li>• On startup, database is automatically checked and restored from latest backup if corrupted</li>
+        <li>• Create manual backups before major changes to preserve that state forever</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+  <div class="bg-white rounded-lg border border-slate-200 p-4">
+    <h3 class="font-semibold mb-3">Create New Backup</h3>
+    <form method="post" action="/web/admin/backups/create" class="space-y-3">
+      <div class="flex items-center gap-2">
+        <input type="checkbox" id="include_attachments" name="include_attachments" checked class="rounded">
+        <label for="include_attachments" class="text-sm text-slate-700">Include attachments (comments, chat messages)</label>
+      </div>
+      <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 w-full">
+        💾 Create Backup Now
+      </button>
+      <p class="text-xs text-slate-500">Creates a manual backup that will be kept forever. Includes database and all attachments if checked.</p>
+    </form>
+  </div>
+  
+  <div class="bg-white rounded-lg border border-slate-200 p-4">
+    <h3 class="font-semibold mb-3">Upload Backup from Local Machine</h3>
+    <form method="post" action="/web/admin/backups/upload" enctype="multipart/form-data" class="space-y-3">
+      <div>
+        <input type="file" name="backup_file" accept=".db,.zip" required class="w-full text-sm text-slate-700 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-purple-50 file:text-purple-700 hover:file:bg-purple-100">
+      </div>
+      <button type="submit" class="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 w-full">
+        📤 Upload Backup File
+      </button>
+      <p class="text-xs text-slate-500">Upload a .db or .zip backup file from your local machine. This allows disaster recovery when server fails.</p>
+    </form>
+  </div>
+</div>
+
+<div class="bg-white rounded-lg border border-slate-200">
+  <div class="px-4 py-3 border-b border-slate-200">
+    <h2 class="text-lg font-medium">Available Backups</h2>
+  </div>
+  
+  {% if backups %}
+    <div class="overflow-x-auto">
+      <table class="w-full">
+        <thead class="bg-slate-50">
+          <tr>
+            <th class="px-4 py-3 text-left text-sm font-semibold text-slate-700">Type</th>
+            <th class="px-4 py-3 text-left text-sm font-semibold text-slate-700">Filename</th>
+            <th class="px-4 py-3 text-left text-sm font-semibold text-slate-700">Contents</th>
+            <th class="px-4 py-3 text-left text-sm font-semibold text-slate-700">Created</th>
+            <th class="px-4 py-3 text-left text-sm font-semibold text-slate-700">Size</th>
+            <th class="px-4 py-3 text-right text-sm font-semibold text-slate-700">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-200">
+          {% for backup in backups %}
+            <tr class="hover:bg-slate-50">
+              <td class="px-4 py-3 text-sm">
+                {% if backup.type == 'MANUAL' %}
+                  <span class="px-2 py-1 bg-green-100 text-green-800 text-xs rounded font-medium">MANUAL</span>
+                {% elif backup.type == 'AUTO' %}
+                  <span class="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded font-medium">AUTO</span>
+                {% else %}
+                  <span class="px-2 py-1 bg-purple-100 text-purple-800 text-xs rounded font-medium">UPLOADED</span>
+                {% endif %}
+              </td>
+              <td class="px-4 py-3 text-sm font-mono text-xs">{{ backup.filename }}</td>
+              <td class="px-4 py-3 text-sm">
+                {% if backup.includes_attachments %}
+                  <span class="px-2 py-1 bg-green-50 text-green-700 text-xs rounded">📦 Full (DB + Files)</span>
+                {% else %}
+                  <span class="px-2 py-1 bg-slate-100 text-slate-700 text-xs rounded">🗄️ DB Only</span>
+                {% endif %}
+              </td>
+              <td class="px-4 py-3 text-sm text-slate-600">{{ backup.created }}</td>
+              <td class="px-4 py-3 text-sm text-slate-600">{{ backup.size_mb }} MB</td>
+              <td class="px-4 py-3 text-sm text-right space-x-2">
+                <a 
+                  href="/web/admin/backups/download/{{ backup.filename }}" 
+                  class="inline-block px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700"
+                  download
+                >
+                  ⬇️ Download
+                </a>
+                <button 
+                  onclick="confirmRestore('{{ backup.filename }}')" 
+                  class="px-3 py-1 bg-orange-600 text-white text-xs rounded hover:bg-orange-700"
+                >
+                  🔄 Restore
+                </button>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="p-8 text-center text-slate-500">
+      <p>No backups available yet.</p>
+      <p class="text-sm mt-2">The automatic backup system will create the first backup in 5 minutes.</p>
+    </div>
+  {% endif %}
+</div>
+
+<div class="mt-6 bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+  <div class="flex items-start gap-3">
+    <div class="text-yellow-600 text-xl">⚠️</div>
+    <div class="flex-1">
+      <h3 class="font-semibold text-yellow-900 mb-1">Important Notes</h3>
+      <ul class="text-sm text-yellow-800 space-y-1">
+        <li>• <strong>MANUAL</strong> backups (green) are kept forever and never deleted</li>
+        <li>• <strong>AUTO</strong> backups (blue) are kept for the last 10 automatic backups only</li>
+        <li>• <strong>UPLOADED</strong> backups (purple) come from your local machine and are kept forever</li>
+        <li>• Restoring a backup will replace the current database and attachments completely</li>
+        <li>• All data added after the backup was created will be lost</li>
+        <li>• Current database and uploads are saved as "corrupted_[timestamp]" before restore</li>
+        <li>• After restoring, you may need to log in again</li>
+        <li>• Download backups regularly to local storage for disaster recovery</li>
+        <li>• If server crashes completely, restore by: 1) Upload backup, 2) Click restore</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="mt-6 bg-green-50 border border-green-200 rounded-lg p-4">
+  <div class="flex items-start gap-3">
+    <div class="text-green-600 text-xl">💡</div>
+    <div class="flex-1">
+      <h3 class="font-semibold text-green-900 mb-1">Disaster Recovery Workflow</h3>
+      <ol class="text-sm text-green-800 space-y-1 list-decimal list-inside">
+        <li><strong>Regular backups:</strong> Download full backups (ZIP files) to your local machine regularly</li>
+        <li><strong>If server fails:</strong> Set up new server, install application</li>
+        <li><strong>Upload backup:</strong> Use the upload form above to upload your local backup ZIP file</li>
+        <li><strong>Restore:</strong> Click the restore button on the uploaded backup</li>
+        <li><strong>Result:</strong> All data, tasks, comments, and attachments are restored to the backup state</li>
+      </ol>
+    </div>
+  </div>
+</div>
+
+<script>
+function confirmRestore(filename) {
+  if (confirm(`⚠️ WARNING: This will restore the database to the state in "${filename}".\n\nAll current data added after this backup will be LOST.\n\nAre you absolutely sure you want to continue?`)) {
+    if (confirm('This is your FINAL WARNING. Click OK to proceed with restore.')) {
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = '/web/admin/backups/restore';
+      
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = 'backup_file';
+      input.value = filename;
+      
+      form.appendChild(input);
+      document.body.appendChild(form);
+      form.submit();
+    }
+  }
+}
+</script>
+{% endblock %}

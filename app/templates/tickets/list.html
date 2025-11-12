@@ -1,0 +1,269 @@
+{% extends 'base.html' %}
+
+{% block title %}Tickets - CRM{% endblock %}
+
+{% block content %}
+<div class="container mx-auto px-3 sm:px-4 py-4 sm:py-6">
+    <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-6">
+        <h1 class="text-2xl sm:text-3xl font-bold text-gray-900">Support Tickets</h1>
+        <div class="flex flex-wrap gap-2">
+            <a href="/web/tickets?status=all" class="px-3 sm:px-4 py-2 text-sm text-gray-600 hover:text-gray-900 whitespace-nowrap">
+                <i class="fas fa-list mr-1 sm:mr-2"></i>All Tickets
+            </a>
+            <a href="/web/tickets/archived" class="px-3 sm:px-4 py-2 text-sm text-amber-600 hover:text-amber-700 whitespace-nowrap">
+                <i class="fas fa-archive mr-1 sm:mr-2"></i>Archived
+            </a>
+            {% if user.is_admin %}
+            <form method="post" action="/web/tickets/process-emails" style="display: inline;">
+                <button type="submit" class="px-3 sm:px-4 py-2 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 whitespace-nowrap">
+                    <i class="fas fa-envelope mr-1 sm:mr-2"></i>Check Emails
+                </button>
+            </form>
+            {% endif %}
+            <button onclick="document.getElementById('createTicketModal').classList.remove('hidden')"
+                    class="px-3 sm:px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 whitespace-nowrap">
+                <i class="fas fa-plus mr-1 sm:mr-2"></i>New Ticket
+            </button>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="bg-white rounded-lg shadow-sm p-3 sm:p-4 mb-6">
+        <form method="get" action="/web/tickets" class="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Status</label>
+                <select name="status" onchange="this.form.submit()"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-md">
+                    <option value="all" {% if status_filter == 'all' %}selected{% endif %}>All</option>
+                    <option value="open" {% if status_filter == 'open' %}selected{% endif %}>Open</option>
+                    <option value="in_progress" {% if status_filter == 'in_progress' %}selected{% endif %}>In Progress</option>
+                    <option value="waiting" {% if status_filter == 'waiting' %}selected{% endif %}>Waiting</option>
+                    <option value="resolved" {% if status_filter == 'resolved' %}selected{% endif %}>Resolved</option>
+                    <option value="closed" {% if status_filter == 'closed' %}selected{% endif %}>Closed</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Priority</label>
+                <select name="priority" onchange="this.form.submit()"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-md">
+                    <option value="all" {% if priority_filter == 'all' %}selected{% endif %}>All</option>
+                    <option value="urgent" {% if priority_filter == 'urgent' %}selected{% endif %}>Urgent</option>
+                    <option value="high" {% if priority_filter == 'high' %}selected{% endif %}>High</option>
+                    <option value="medium" {% if priority_filter == 'medium' %}selected{% endif %}>Medium</option>
+                    <option value="low" {% if priority_filter == 'low' %}selected{% endif %}>Low</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Assigned</label>
+                <select name="assigned" onchange="this.form.submit()"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-md">
+                    <option value="all" {% if assigned_filter == 'all' %}selected{% endif %}>All</option>
+                    <option value="me" {% if assigned_filter == 'me' %}selected{% endif %}>My Tickets</option>
+                    <option value="unassigned" {% if assigned_filter == 'unassigned' %}selected{% endif %}>Unassigned</option>
+                </select>
+            </div>
+            <div class="flex items-end">
+                <a href="/web/tickets" class="w-full sm:w-auto px-3 py-2 text-sm text-center text-gray-600 hover:text-gray-900">
+                    Clear Filters
+                </a>
+            </div>
+        </form>
+    </div>
+
+    <!-- Tickets List -->
+    <div class="space-y-3">
+        {% if tickets %}
+            {% for ticket in tickets %}
+            <div class="bg-white rounded-lg shadow-sm hover:shadow-md transition-shadow">
+                <a href="/web/tickets/{{ ticket.id }}" class="block p-3 sm:p-4">
+                    <div class="flex items-start justify-between gap-3">
+                        <div class="flex-1 min-w-0">
+                            <div class="flex flex-wrap items-center gap-2 mb-2">
+                                <span class="text-xs sm:text-sm font-mono text-gray-500 whitespace-nowrap">{{ ticket.ticket_number }}</span>
+                                
+                                <!-- Priority Badge -->
+                                {% if ticket.priority == 'urgent' %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded bg-red-100 text-red-800 whitespace-nowrap">
+                                        <i class="fas fa-fire mr-1"></i>URGENT
+                                    </span>
+                                {% elif ticket.priority == 'high' %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded bg-orange-100 text-orange-800 whitespace-nowrap">
+                                        <i class="fas fa-exclamation-triangle mr-1"></i>High
+                                    </span>
+                                {% elif ticket.priority == 'medium' %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded bg-yellow-100 text-yellow-800 whitespace-nowrap">
+                                        <i class="fas fa-exclamation-circle mr-1"></i>Medium
+                                    </span>
+                                {% else %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded bg-gray-100 text-gray-800 whitespace-nowrap">
+                                        <i class="fas fa-circle mr-1"></i>Low
+                                    </span>
+                                {% endif %}
+
+                                <!-- Status Badge -->
+                                {% if ticket.status == 'open' %}
+                                    <span class="px-2 py-1 text-xs rounded bg-blue-100 text-blue-800 whitespace-nowrap">Open</span>
+                                {% elif ticket.status == 'in_progress' %}
+                                    <span class="px-2 py-1 text-xs rounded bg-purple-100 text-purple-800 whitespace-nowrap">In Progress</span>
+                                {% elif ticket.status == 'waiting' %}
+                                    <span class="px-2 py-1 text-xs rounded bg-yellow-100 text-yellow-800 whitespace-nowrap">Waiting</span>
+                                {% elif ticket.status == 'resolved' %}
+                                    <span class="px-2 py-1 text-xs rounded bg-green-100 text-green-800 whitespace-nowrap">Resolved</span>
+                                {% else %}
+                                    <span class="px-2 py-1 text-xs rounded bg-gray-100 text-gray-800 whitespace-nowrap">Closed</span>
+                                {% endif %}
+
+                                <!-- Guest Badge -->
+                                {% if ticket.is_guest %}
+                                    <span class="px-2 py-1 text-xs font-semibold rounded bg-indigo-100 text-indigo-800 whitespace-nowrap">
+                                        <i class="fas fa-user-circle mr-1"></i>Guest
+                                    </span>
+                                {% endif %}
+
+                                <!-- Category Badge -->
+                                <span class="px-2 py-1 text-xs rounded bg-gray-50 text-gray-700 whitespace-nowrap">
+                                    {% if ticket.category == 'bug' %}🐛 Bug
+                                    {% elif ticket.category == 'feature' %}✨ Feature
+                                    {% elif ticket.category == 'support' %}🤝 Support
+                                    {% elif ticket.category == 'billing' %}💳 Billing
+                                    {% else %}📋 General
+                                    {% endif %}
+                                </span>
+                            </div>
+
+                            <h3 class="text-base sm:text-lg font-semibold text-gray-900 mb-1">
+                                {{ ticket.subject }}
+                            </h3>
+
+                            {% if ticket.description %}
+                            <p class="text-xs sm:text-sm text-gray-600 line-clamp-2 mb-2">
+                                {{ ticket.description[:150] }}{% if ticket.description|length > 150 %}...{% endif %}
+                            </p>
+                            {% endif %}
+
+                            <div class="flex flex-wrap items-center gap-3 sm:gap-4 text-xs sm:text-sm text-gray-500">
+                                <span class="whitespace-nowrap">
+                                    <i class="far fa-clock mr-1"></i>
+                                    {{ ticket.created_at.strftime('%b %d, %Y %I:%M %p') }}
+                                </span>
+                            {% if ticket.assigned_to_id %}
+                                {% for u in users %}
+                                        {% if u.id == ticket.assigned_to_id %}
+                                        <span>
+                                            <i class="fas fa-user mr-1"></i>
+                                            Assigned to {{ u.full_name or u.username }}
+                                        </span>
+                                        {% endif %}
+                                    {% endfor %}
+                                {% else %}
+                                    <span class="text-gray-400">
+                                        <i class="fas fa-user-slash mr-1"></i>Unassigned
+                                    </span>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <div class="ml-4">
+                            <i class="fas fa-chevron-right text-gray-400"></i>
+                        </div>
+                    </div>
+                </a>
+            </div>
+            {% endfor %}
+        {% else %}
+            <div class="bg-white rounded-lg shadow-sm p-12 text-center">
+                <i class="fas fa-ticket-alt text-6xl text-gray-300 mb-4"></i>
+                <h3 class="text-xl font-semibold text-gray-700 mb-2">No Tickets Found</h3>
+                <p class="text-gray-500 mb-4">
+                    {% if status_filter != 'all' or priority_filter != 'all' or assigned_filter != 'all' %}
+                        No tickets match your current filters. Try adjusting the filters above.
+                    {% else %}
+                        Create your first ticket to get started with support tracking.
+                    {% endif %}
+                </p>
+                <button onclick="document.getElementById('createTicketModal').classList.remove('hidden')"
+                        class="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                    <i class="fas fa-plus mr-2"></i>Create Ticket
+                </button>
+            </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Create Ticket Modal -->
+<div id="createTicketModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+        <div class="sticky top-0 bg-white border-b px-6 py-4 flex justify-between items-center">
+            <h2 class="text-xl font-bold text-gray-900">Create New Ticket</h2>
+            <button onclick="document.getElementById('createTicketModal').classList.add('hidden')"
+                    class="text-gray-400 hover:text-gray-600">
+                <i class="fas fa-times text-xl"></i>
+            </button>
+        </div>
+
+        <form method="post" action="/web/tickets/create" class="p-6 space-y-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Subject *</label>
+                <input type="text" name="subject" required
+                       class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                       placeholder="Brief description of the issue">
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                <textarea name="description" rows="6"
+                          class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder="Detailed explanation of the ticket..."></textarea>
+            </div>
+
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Priority</label>
+                    <select name="priority"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="low">Low</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="high">High</option>
+                        <option value="urgent">Urgent</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                    <select name="category"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="general">General</option>
+                        <option value="support">Support</option>
+                        <option value="bug">Bug</option>
+                        <option value="feature">Feature Request</option>
+                        <option value="billing">Billing</option>
+                    </select>
+                </div>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Assign To (Optional)</label>
+                <select name="assigned_to_id"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">-- Leave Unassigned --</option>
+                    {% for u in users %}
+                    <option value="{{ u.id }}">{{ u.full_name or u.username }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="flex justify-end gap-3 pt-4">
+                <button type="button"
+                        onclick="document.getElementById('createTicketModal').classList.add('hidden')"
+                        class="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50">
+                    Cancel
+                </button>
+                <button type="submit"
+                        class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                    <i class="fas fa-check mr-2"></i>Create Ticket
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

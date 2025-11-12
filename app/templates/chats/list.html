@@ -1,0 +1,65 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="mb-5">
+  <h1 class="text-2xl font-semibold">Chats</h1>
+</div>
+
+<div class="mb-6 p-4 bg-white rounded-lg border border-slate-200">
+  <h2 class="text-lg font-medium mb-3">Start New Chat</h2>
+  <form method="post" action="/web/chats/create" class="space-y-4">
+    <div>
+      <label class="flex items-center gap-2 mb-3">
+        <input type="checkbox" name="is_group" value="true" class="rounded" />
+        <span class="text-sm font-medium">Group Chat</span>
+      </label>
+    </div>
+    
+    <div>
+      <label class="block text-sm font-medium mb-1">Chat Name (for group chats)</label>
+      <input type="text" name="name" class="w-full rounded border border-slate-300 px-3 py-2" placeholder="Optional for 1-on-1 chats" />
+    </div>
+    
+    <div>
+      <label class="block text-sm font-medium mb-1">Select Members</label>
+      <div class="border border-slate-300 rounded p-3 max-h-48 overflow-y-auto">
+        {% for u in users %}
+          <label class="flex items-center gap-2 mb-2">
+            <input type="checkbox" name="member_ids" value="{{ u.id }}" class="rounded" />
+            <span class="text-sm">{{ u.full_name or u.email }}</span>
+          </label>
+        {% endfor %}
+      </div>
+    </div>
+    
+    <button type="submit" class="px-4 py-2 bg-slate-900 text-white rounded hover:bg-slate-800">Create Chat</button>
+  </form>
+</div>
+
+<div class="space-y-3">
+  {% if chats %}
+    {% for chat in chats %}
+      <a href="/web/chats/{{ chat.id }}" class="block p-4 bg-white rounded-lg border border-slate-200 hover:border-slate-300 hover:shadow-sm transition">
+        <div class="flex items-start justify-between">
+          <div>
+            <h3 class="font-medium">
+              {% if chat.name %}
+                {{ chat.name }}
+              {% else %}
+                Direct Message
+              {% endif %}
+            </h3>
+            <p class="text-sm text-slate-500 mt-1">
+              {% if chat.is_group %}Group Chat{% else %}1-on-1{% endif %}
+            </p>
+          </div>
+          <span class="text-xs text-slate-400">{{ chat.created_at.strftime('%b %d') }}</span>
+        </div>
+      </a>
+    {% endfor %}
+  {% else %}
+    <div class="text-center py-12 text-slate-500">
+      <p>No chats yet. Start a conversation above!</p>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}
