@@ -68,10 +68,10 @@ def run_migration():
         else:
             raise
     
-    # Assign unique colors to existing users
+    # Assign unique colors to ALL existing users (including those with blue)
     try:
-        cursor.execute("SELECT id FROM user WHERE calendar_color IS NULL OR calendar_color = ''")
-        users_without_colors = cursor.fetchall()
+        cursor.execute("SELECT id FROM user ORDER BY id")
+        all_users = cursor.fetchall()
         
         # Define a set of distinct colors
         colors = [
@@ -92,12 +92,12 @@ def run_migration():
             "#FACC15",  # Yellow
         ]
         
-        for idx, (user_id,) in enumerate(users_without_colors):
+        for idx, (user_id,) in enumerate(all_users):
             color = colors[idx % len(colors)]
             cursor.execute("UPDATE user SET calendar_color = ? WHERE id = ?", (color, user_id))
         
-        if users_without_colors:
-            print(f"✅ Assigned colors to {len(users_without_colors)} existing users")
+        if all_users:
+            print(f"✅ Assigned unique colors to {len(all_users)} users")
     except Exception as e:
         print(f"⚠️  Error assigning colors to users: {e}")
     
