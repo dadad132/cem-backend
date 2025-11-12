@@ -1238,7 +1238,7 @@ async def web_admin_generate_user_activity_pdf(
             comment_data.append([
                 comment.created_at.strftime('%Y-%m-%d %H:%M'),
                 str(comment.task_id),
-                (comment.text or '')[:60],
+                (comment.content or '')[:60],
             ])
         
         comment_table = Table(comment_data, colWidths=[1.5*inch, 0.8*inch, 4*inch])
