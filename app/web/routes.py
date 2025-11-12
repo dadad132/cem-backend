@@ -1070,7 +1070,7 @@ async def web_admin_generate_user_activity_pdf(
     # 4. Comments
     comments = (await db.execute(
         select(Comment)
-        .where(Comment.user_id == target_user_id)
+        .where(Comment.author_id == target_user_id)
         .where(Comment.created_at >= start_dt)
         .where(Comment.created_at < end_dt)
         .order_by(Comment.created_at.desc())
@@ -4559,8 +4559,8 @@ async def web_tickets_track_detail(
     
     # Load user info for comments
     for comment in comments:
-        if comment.user_id:
-            user = (await db.execute(select(User).where(User.id == comment.user_id))).scalar_one_or_none()
+        if comment.author_id:
+            user = (await db.execute(select(User).where(User.id == comment.author_id))).scalar_one_or_none()
             comment.user = user
     
     return templates.TemplateResponse('tickets/track_detail.html', {
@@ -4643,9 +4643,9 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
     # Get comment authors
     comment_authors = {}
     for comment in comments:
-        if comment.user_id not in comment_authors:
-            author = (await db.execute(select(User).where(User.id == comment.user_id))).scalar_one_or_none()
-            comment_authors[comment.user_id] = author
+        if comment.author_id not in comment_authors:
+            author = (await db.execute(select(User).where(User.id == comment.author_id))).scalar_one_or_none()
+            comment_authors[comment.author_id] = author
     
     # Get attachments
     attachments = (await db.execute(
