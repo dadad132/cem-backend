@@ -1042,7 +1042,7 @@ async def web_admin_generate_user_activity_pdf(
     # 1. Tasks created
     tasks_created = (await db.execute(
         select(Task)
-        .where(Task.created_by == target_user_id)
+        .where(Task.creator_id == target_user_id)
         .where(Task.created_at >= start_dt)
         .where(Task.created_at < end_dt)
         .order_by(Task.created_at.desc())
