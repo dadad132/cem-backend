@@ -181,8 +181,7 @@
             {% if overdue %}
               {% set display_color = '#6B7280' %}
             {% endif %}
-            {% set tooltip_users = ', '.join([u.full_name or u.username for u in assigned_users]) if assigned_users else 'Unassigned' %}
-            <a href="/web/tasks/{{ item.id }}" class="flex items-center gap-3 p-3 rounded-lg border-l-4 transition shadow-sm hover:shadow-md" style="border-left-color: {{ display_color }}; background: linear-gradient(to right, {{ display_color }}25, {{ display_color }}10);" title="{{ tooltip_users }}">
+            <a href="/web/tasks/{{ item.id }}" class="flex items-center gap-3 p-3 rounded-lg border-l-4 transition shadow-sm hover:shadow-md" style="border-left-color: {{ display_color }}; background: linear-gradient(to right, {{ display_color }}25, {{ display_color }}10);" title="{{ item.title }}{% if assigned_users %} - {% for u in assigned_users %}{{ u.full_name or u.username }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}">
               <div class="text-2xl flex items-center gap-1">
                 {% if assigned_users %}
                   {% for user in assigned_users[:3] %}
@@ -281,8 +280,7 @@
               {% if overdue %}
                 {% set display_color = '#6B7280' %}
               {% endif %}
-              {% set tooltip_users = ', '.join([u.full_name or u.username for u in assigned_users]) if assigned_users else 'Unassigned' %}
-              <a href="/web/tasks/{{ t.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ display_color }}; background: linear-gradient(to right, {{ display_color }}35, {{ display_color }}18);" title="{{ t.title }}{% if t.due_time %} at {{ t.due_time.strftime('%I:%M %p') }}{% endif %} - {{ tooltip_users }}">
+              <a href="/web/tasks/{{ t.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ display_color }}; background: linear-gradient(to right, {{ display_color }}35, {{ display_color }}18);" title="{{ t.title }}{% if t.due_time %} at {{ t.due_time.strftime('%I:%M %p') }}{% endif %}{% if assigned_users %} - {% for u in assigned_users %}{{ u.full_name or u.username }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}">
                 <div class="flex items-center gap-1 font-semibold text-gray-800">
                   {% if assigned_users %}
                     {% for user in assigned_users[:3] %}
@@ -360,8 +358,7 @@
               {% if overdue %}
                 {% set display_color = '#6B7280' %}
               {% endif %}
-              {% set tooltip_users = ', '.join([u.full_name or u.username for u in assigned_users]) if assigned_users else 'Unassigned' %}
-              <a href="/web/tasks/{{ t.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ display_color }}; background: linear-gradient(to right, {{ display_color }}35, {{ display_color }}18);" title="{{ t.title }} - {{ tooltip_users }}">
+              <a href="/web/tasks/{{ t.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ display_color }}; background: linear-gradient(to right, {{ display_color }}35, {{ display_color }}18);" title="{{ t.title }}{% if assigned_users %} - {% for u in assigned_users %}{{ u.full_name or u.username }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}">
                 <div class="flex items-center gap-1 font-semibold text-gray-800">
                   {% if assigned_users %}
                     {% for user in assigned_users[:3] %}
