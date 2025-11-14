@@ -67,6 +67,14 @@
           <div class="mt-3 flex items-center gap-2 text-xs text-slate-500 flex-wrap">
             <div class="inline-flex items-center gap-1 bg-slate-100 px-2 py-1 rounded whitespace-nowrap">Created {{ p.created_at.strftime('%d/%m/%Y') if p.created_at else '' }}</div>
             {% if p.is_archived %}<span class="text-rose-600">Archived</span>{% endif %}
+            {% if p.support_email %}
+            <div class="inline-flex items-center gap-1 bg-blue-50 text-blue-700 px-2 py-1 rounded whitespace-nowrap">
+              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+              </svg>
+              {{ p.support_email }}
+            </div>
+            {% endif %}
           </div>
         </a>
         {% if user is defined and user.is_admin %}
@@ -123,6 +131,13 @@
               <label class="block text-sm mb-1">Description</label>
               <input class="w-full rounded border border-slate-300 px-3 py-2 text-sm" 
                      type="text" name="description" value="{{ p.description or '' }}" placeholder="Optional" />
+            </div>
+            <div>
+              <label class="block text-sm mb-1">Support Email</label>
+              <input class="w-full rounded border border-slate-300 px-3 py-2 text-sm" 
+                     type="email" name="support_email" value="{{ p.support_email or '' }}" 
+                     placeholder="support@company.com (Optional)" />
+              <p class="text-xs text-slate-500 mt-1">📧 Emails sent to this address will automatically create tickets for this project</p>
             </div>
             <div class="flex justify-end gap-2 pt-2">
               <button type="button" onclick="document.getElementById('editProject{{ p.id }}').close()" 

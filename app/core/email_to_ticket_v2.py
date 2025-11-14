@@ -19,6 +19,7 @@ from app.models.user import User
 from app.models.notification import Notification
 from app.models.email_settings import EmailSettings
 from app.models.processed_mail import ProcessedMail
+from app.models.project import Project
 
 
 class EmailToTicketService:
@@ -342,13 +343,39 @@ class EmailToTicketService:
         db.add(processed)
         await db.commit()
     
+    async def find_project_by_email(self, db: AsyncSession, to_email: str) -> Optional[Project]:
+        """Find project by support email address"""
+        if not to_email:
+            return None
+        
+        to_email = to_email.lower().strip()
+        print(f"[DEBUG] Looking for project with support_email: {to_email}")
+        
+        result = await db.execute(
+            select(Project).where(
+                Project.workspace_id == self.workspace_id,
+                Project.support_email == to_email,
+                Project.is_archived == False
+            )
+        )
+        project = result.scalar_one_or_none()
+        
+        if project:
+            print(f"[DEBUG] Found project: {project.name} (ID: {project.id})")
+        else:
+            print(f"[DEBUG] No project found for email: {to_email}")
+        
+        return project
+    
     async def create_ticket_from_email(
         self,
         db: AsyncSession,
         sender_name: str,
         sender_email: str,
         subject: str,
-        body: str
+        body: str,
+        to_email: Optional[str] = None,
+        project: Optional[Project] = None
     ) -> Ticket:
         """Create a guest ticket from email"""
         
@@ -379,6 +406,7 @@ class EmailToTicketService:
             guest_phone="",
             guest_company="",
             guest_branch="",
+            related_project_id=project.id if project else None,  # Link to project if found
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow()
         )
@@ -387,11 +415,17 @@ class EmailToTicketService:
         await db.flush()
         
         # Add history entry
+        history_comment = f'Ticket created automatically from email: {sender_email}'
+        if project:
+            history_comment += f' → Project: {project.name}'
+        if to_email:
+            history_comment += f' (to: {to_email})'
+            
         history = TicketHistory(
             ticket_id=ticket.id,
             user_id=None,  # System action
             action='created',
-            comment=f'Ticket created automatically from email: {sender_email}',
+            comment=history_comment,
             created_at=datetime.utcnow()
         )
         db.add(history)
@@ -399,17 +433,21 @@ class EmailToTicketService:
         # Notify all admins about new email ticket
         from app.models.notification import Notification
         from app.models.user import User
-        from sqlalchemy import select as sql_select
+        from sqlmodel import select as sql_select
         
         admin_users = (await db.execute(
             sql_select(User).where(User.workspace_id == self.workspace_id).where(User.is_admin == True)
         )).scalars().all()
         
+        notification_message = f'New ticket from email #{ticket_number}: {subject[:100]}'
+        if project:
+            notification_message = f'New ticket for {project.name} from email #{ticket_number}: {subject[:100]}'
+        
         for admin in admin_users:
             notification = Notification(
                 user_id=admin.id,
                 type='ticket',
-                message=f'New ticket from email #{ticket_number}: {subject[:100]}',
+                message=notification_message,
                 url=f'/web/tickets/{ticket.id}',
                 related_id=ticket.id
             )
@@ -498,6 +536,8 @@ class EmailToTicketService:
                     # Extract email info
                     from_header = msg.get('From', '')
                     sender_name, sender_email = self.extract_email_address(from_header)
+                    to_header = msg.get('To', '')
+                    _, to_email = self.extract_email_address(to_header)
                     subject = self.decode_header_value(msg.get('Subject', 'No Subject'))
                     body = self.extract_email_body(msg)
                     
@@ -509,6 +549,9 @@ class EmailToTicketService:
                     # If not found via headers, try subject line (Gmail/Outlook fallback)
                     if not existing_ticket:
                         existing_ticket = await self.find_ticket_by_subject(db, subject)
+                    
+                    # Find project by support email
+                    project = await self.find_project_by_email(db, to_email)
                     
                     if existing_ticket:
                         # Add as comment to existing ticket
@@ -525,7 +568,7 @@ class EmailToTicketService:
                     else:
                         # Create new ticket
                         ticket = await self.create_ticket_from_email(
-                            db, sender_name, sender_email, subject, body
+                            db, sender_name, sender_email, subject, body, to_email, project
                         )
                         
                         # Mark as processed
@@ -579,6 +622,8 @@ class EmailToTicketService:
                     # Extract email info
                     from_header = msg.get('From', '')
                     sender_name, sender_email = self.extract_email_address(from_header)
+                    to_header = msg.get('To', '')
+                    _, to_email = self.extract_email_address(to_header)
                     subject = self.decode_header_value(msg.get('Subject', 'No Subject'))
                     body = self.extract_email_body(msg)
                     
@@ -586,7 +631,7 @@ class EmailToTicketService:
                     in_reply_to = msg.get('In-Reply-To', '').strip('<>')
                     references = msg.get('References', '')
                     
-                    print(f"[IMAP DEBUG] Email from {sender_email}")
+                    print(f"[IMAP DEBUG] Email from {sender_email} to {to_email}")
                     print(f"[IMAP DEBUG] Subject: {subject}")
                     print(f"[IMAP DEBUG] In-Reply-To: '{in_reply_to}'")
                     print(f"[IMAP DEBUG] References: '{references}'")
@@ -597,6 +642,9 @@ class EmailToTicketService:
                     if not existing_ticket:
                         print(f"[IMAP DEBUG] Trying subject line fallback...")
                         existing_ticket = await self.find_ticket_by_subject(db, subject)
+                    
+                    # Find project by support email
+                    project = await self.find_project_by_email(db, to_email)
                     
                     if existing_ticket:
                         print(f"[IMAP DEBUG] Found existing ticket: {existing_ticket.ticket_number}")
@@ -618,7 +666,7 @@ class EmailToTicketService:
                         print(f"[IMAP DEBUG] No existing ticket found, creating new ticket")
                         # Create new ticket
                         ticket = await self.create_ticket_from_email(
-                            db, sender_name, sender_email, subject, body
+                            db, sender_name, sender_email, subject, body, to_email, project
                         )
                         
                         # Mark as processed

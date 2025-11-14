@@ -2327,6 +2327,7 @@ async def web_projects_edit(request: Request, project_id: int, db: AsyncSession 
         form = await request.form()
         project.name = form.get('name', project.name)
         project.description = form.get('description') or None
+        project.support_email = form.get('support_email') or None
         await db.commit()
     
     return RedirectResponse('/web/projects', status_code=303)
@@ -4665,6 +4666,14 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         select(User).where(User.workspace_id == user.workspace_id)
     )).scalars().all()
     
+    # Get related project if exists
+    related_project = None
+    if ticket.related_project_id:
+        from app.models.project import Project
+        related_project = (await db.execute(
+            select(Project).where(Project.id == ticket.related_project_id)
+        )).scalar_one_or_none()
+    
     return templates.TemplateResponse('tickets/detail.html', {
         'request': request,
         'user': user,
@@ -4675,7 +4684,8 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         'comment_authors': comment_authors,
         'attachments': attachments,
         'history': history,
-        'users': users
+        'users': users,
+        'related_project': related_project
     })
 
 
