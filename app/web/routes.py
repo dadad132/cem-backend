@@ -2354,7 +2354,18 @@ async def web_projects(request: Request, db: AsyncSession = Depends(get_session)
 
 
 @router.post('/projects/create')
-async def web_projects_create(request: Request, name: str = Form(...), description: Optional[str] = Form(None), db: AsyncSession = Depends(get_session)):
+async def web_projects_create(
+    request: Request, 
+    name: str = Form(...), 
+    description: Optional[str] = Form(None),
+    support_email: Optional[str] = Form(None),
+    imap_host: Optional[str] = Form(None),
+    imap_port: Optional[int] = Form(None),
+    imap_username: Optional[str] = Form(None),
+    imap_password: Optional[str] = Form(None),
+    imap_use_ssl: Optional[str] = Form(None),
+    db: AsyncSession = Depends(get_session)
+):
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
@@ -2362,7 +2373,19 @@ async def web_projects_create(request: Request, name: str = Form(...), descripti
     if not user:
         request.session.clear()
         return RedirectResponse('/web/login', status_code=303)
-    project = Project(name=name, description=description, owner_id=user_id, workspace_id=user.workspace_id)
+    
+    project = Project(
+        name=name, 
+        description=description, 
+        owner_id=user_id, 
+        workspace_id=user.workspace_id,
+        support_email=support_email if support_email else None,
+        imap_host=imap_host if imap_host else None,
+        imap_port=imap_port if imap_port else None,
+        imap_username=imap_username if imap_username else None,
+        imap_password=imap_password if imap_password else None,
+        imap_use_ssl=imap_use_ssl == '1' if imap_use_ssl else True
+    )
     db.add(project)
     await db.commit()
     await db.refresh(project)
@@ -2400,6 +2423,14 @@ async def web_projects_edit(request: Request, project_id: int, db: AsyncSession 
         project.name = form.get('name', project.name)
         project.description = form.get('description') or None
         project.support_email = form.get('support_email') or None
+        
+        # Update IMAP configuration
+        project.imap_host = form.get('imap_host') or None
+        project.imap_port = int(form.get('imap_port')) if form.get('imap_port') else None
+        project.imap_username = form.get('imap_username') or None
+        project.imap_password = form.get('imap_password') or None
+        project.imap_use_ssl = form.get('imap_use_ssl') == '1'
+        
         await db.commit()
     
     return RedirectResponse('/web/projects', status_code=303)
@@ -5221,12 +5252,45 @@ async def web_tickets_assign(
 
 @router.post('/tickets/process-emails')
 async def web_tickets_process_emails(request: Request, db: AsyncSession = Depends(get_session)):
-    """Manually trigger email-to-ticket processing (admin only) - V2"""
+    """Manually trigger email processing (admin only) - V3 with per-project support"""
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
     
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_admin:
+        return RedirectResponse('/web/tickets', status_code=303)
+    
+    try:
+        from app.core.email_to_ticket_v2 import process_workspace_emails
+        from app.core.email_to_task_v3 import process_all_project_emails
+        
+        # Process global workspace emails (creates tickets)
+        tickets = await process_workspace_emails(db, user.workspace_id)
+        
+        # Process per-project emails (creates tasks)
+        project_results = await process_all_project_emails(db, user.workspace_id)
+        total_tasks = sum(len(tasks) for tasks in project_results.values())
+        
+        # Build success message
+        messages = []
+        if tickets:
+            messages.append(f"{len(tickets)} tickets from global inbox")
+        if total_tasks > 0:
+            messages.append(f"{total_tasks} tasks from project inboxes")
+        
+        if messages:
+            request.session['flash_message'] = f"✓ Created: {', '.join(messages)}"
+            request.session['flash_type'] = 'success'
+        else:
+            request.session['flash_message'] = "No new emails found"
+            request.session['flash_type'] = 'info'
+        
+    except Exception as e:
+        request.session['flash_message'] = f"✗ Error processing emails: {str(e)}"
+        request.session['flash_type'] = 'error'
+    
+    return RedirectResponse('/web/tickets', status_code=303)
     if not user or not user.is_admin:
         return RedirectResponse('/web/tickets', status_code=303)
     

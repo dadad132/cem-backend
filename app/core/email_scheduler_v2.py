@@ -1,6 +1,7 @@
 """
 Email-to-Ticket Scheduler V2
 Uses database settings for each workspace
+UPDATED: Now also processes per-project email inboxes
 """
 
 import asyncio
@@ -10,6 +11,7 @@ from sqlmodel import select
 
 from app.core.database import engine
 from app.core.email_to_ticket_v2 import process_workspace_emails
+from app.core.email_to_task_v3 import process_all_project_emails
 from app.models.workspace import Workspace
 from app.models.email_settings import EmailSettings
 
@@ -31,7 +33,7 @@ class EmailScheduler:
     async def check_emails_task(self):
         """Background task to check emails periodically"""
         
-        print(f"[Email-to-Ticket] Scheduler started (checking every {self.check_interval}s)")
+        print(f"[Email Processor] Scheduler started (checking every {self.check_interval}s)")
         
         while self.running:
             try:
@@ -44,21 +46,30 @@ class EmailScheduler:
                     
                     for settings in email_settings_list:
                         try:
+                            # Process global workspace emails (creates tickets)
                             tickets = await process_workspace_emails(db, settings.workspace_id)
                             
                             if tickets:
                                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                                print(f"[{timestamp}] Workspace {settings.workspace_id}: Created {len(tickets)} ticket(s) from emails")
+                                print(f"[{timestamp}] Workspace {settings.workspace_id}: Created {len(tickets)} ticket(s) from global inbox")
+                            
+                            # Process per-project emails (creates tasks)
+                            project_results = await process_all_project_emails(db, settings.workspace_id)
+                            
+                            total_tasks = sum(len(tasks) for tasks in project_results.values())
+                            if total_tasks > 0:
+                                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                print(f"[{timestamp}] Workspace {settings.workspace_id}: Created {total_tasks} task(s) from project inboxes")
                         
                         except Exception as e:
-                            print(f"[Email-to-Ticket] Error processing workspace {settings.workspace_id}: {e}")
+                            print(f"[Email Processor] Error processing workspace {settings.workspace_id}: {e}")
                             continue
                 
                 # Wait for next check
                 await asyncio.sleep(self.check_interval)
                 
             except Exception as e:
-                print(f"[Email-to-Ticket] Error in background task: {e}")
+                print(f"[Email Processor] Error in background task: {e}")
                 await asyncio.sleep(self.check_interval)
     
     async def start(self):

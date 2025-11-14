@@ -17,7 +17,7 @@
     </form>
     <form method="post" action="/web/projects/create" class="w-96 p-5">
       <h3 class="text-lg font-medium mb-3">Create project</h3>
-      <div class="space-y-3">
+      <div class="space-y-3" x-data="{ showEmailConfig: false, supportEmail: '' }">
         <div>
           <label class="block text-sm mb-1">Name</label>
           <input class="w-full rounded border border-slate-300 px-3 py-2 text-sm" type="text" name="name" placeholder="New project" required />
@@ -26,6 +26,63 @@
           <label class="block text-sm mb-1">Description</label>
           <input class="w-full rounded border border-slate-300 px-3 py-2 text-sm" type="text" name="description" placeholder="Optional" />
         </div>
+        
+        <!-- Email Configuration Section -->
+        <div>
+          <label class="block text-sm mb-1">Support Email (Optional)</label>
+          <input 
+            x-model="supportEmail"
+            @input="showEmailConfig = supportEmail.length > 0"
+            class="w-full rounded border border-slate-300 px-3 py-2 text-sm" 
+            type="email" name="support_email" 
+            placeholder="support@company.com" />
+          <p class="text-xs text-slate-500 mt-1">📧 Emails will create tasks in this project</p>
+        </div>
+        
+        <!-- Expandable IMAP Configuration -->
+        <div x-show="showEmailConfig" x-transition class="pl-4 border-l-2 border-blue-200 space-y-3">
+          <p class="text-sm font-medium text-blue-900 mb-2">📬 Email Inbox Settings</p>
+          
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">IMAP Server</label>
+              <input class="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" 
+                     type="text" name="imap_host" 
+                     placeholder="mail.company.com" />
+            </div>
+            <div>
+              <label class="block text-xs text-gray-600 mb-1">Port</label>
+              <input class="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" 
+                     type="number" name="imap_port" value="993" 
+                     placeholder="993" />
+            </div>
+          </div>
+          
+          <div>
+            <label class="block text-xs text-gray-600 mb-1">Username</label>
+            <input class="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" 
+                   type="text" name="imap_username" 
+                   placeholder="support@company.com" />
+          </div>
+          
+          <div>
+            <label class="block text-xs text-gray-600 mb-1">Password</label>
+            <input class="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" 
+                   type="password" name="imap_password" 
+                   placeholder="••••••••" />
+          </div>
+          
+          <div class="flex items-center gap-2">
+            <input type="checkbox" name="imap_use_ssl" value="1" checked
+                   class="rounded border-gray-300" id="sslNew" />
+            <label for="sslNew" class="text-xs text-gray-600">Use SSL/TLS (recommended)</label>
+          </div>
+          
+          <p class="text-xs text-amber-600 bg-amber-50 p-2 rounded">
+            ⚠️ If left empty, the system will use the global email settings instead
+          </p>
+        </div>
+        
         <div class="flex justify-end gap-2 pt-2">
           <button type="button" onclick="document.getElementById('newProject').close()" class="px-3 py-2 rounded border border-slate-300 text-sm">Cancel</button>
           <button type="submit" class="px-3 py-2 rounded bg-slate-900 text-white text-sm">Create</button>
@@ -132,13 +189,66 @@
               <input class="w-full rounded border border-slate-300 px-3 py-2 text-sm" 
                      type="text" name="description" value="{{ p.description or '' }}" placeholder="Optional" />
             </div>
-            <div>
-              <label class="block text-sm mb-1">Support Email</label>
-              <input class="w-full rounded border border-slate-300 px-3 py-2 text-sm" 
-                     type="email" name="support_email" value="{{ p.support_email or '' }}" 
-                     placeholder="support@company.com (Optional)" />
-              <p class="text-xs text-slate-500 mt-1">📧 Emails sent to this address will automatically create tickets for this project</p>
+            
+            <!-- Email Configuration Section -->
+            <div x-data="{ showEmailConfig: {{ 'true' if p.support_email else 'false' }} }" class="space-y-3">
+              <div>
+                <label class="block text-sm mb-1">Support Email (Optional)</label>
+                <input 
+                  x-model="supportEmail"
+                  @input="showEmailConfig = supportEmail.length > 0"
+                  class="w-full rounded border border-slate-300 px-3 py-2 text-sm" 
+                  type="email" name="support_email" value="{{ p.support_email or '' }}" 
+                  placeholder="support@company.com" />
+                <p class="text-xs text-slate-500 mt-1">📧 Emails sent to this address will create tasks in this project</p>
+              </div>
+              
+              <!-- Expandable IMAP Configuration -->
+              <div x-show="showEmailConfig" x-transition class="pl-4 border-l-2 border-blue-200 space-y-3">
+                <p class="text-sm font-medium text-blue-900 mb-2">📬 Email Inbox Settings</p>
+                
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-xs text-gray-600 mb-1">IMAP Server</label>
+                    <input class="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" 
+                           type="text" name="imap_host" value="{{ p.imap_host or '' }}" 
+                           placeholder="mail.company.com" />
+                  </div>
+                  <div>
+                    <label class="block text-xs text-gray-600 mb-1">Port</label>
+                    <input class="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" 
+                           type="number" name="imap_port" value="{{ p.imap_port or 993 }}" 
+                           placeholder="993" />
+                  </div>
+                </div>
+                
+                <div>
+                  <label class="block text-xs text-gray-600 mb-1">Username</label>
+                  <input class="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" 
+                         type="text" name="imap_username" value="{{ p.imap_username or '' }}" 
+                         placeholder="support@company.com" />
+                </div>
+                
+                <div>
+                  <label class="block text-xs text-gray-600 mb-1">Password</label>
+                  <input class="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" 
+                         type="password" name="imap_password" value="{{ p.imap_password or '' }}" 
+                         placeholder="••••••••" />
+                </div>
+                
+                <div class="flex items-center gap-2">
+                  <input type="checkbox" name="imap_use_ssl" value="1" 
+                         {{ 'checked' if p.imap_use_ssl != False else '' }}
+                         class="rounded border-gray-300" id="ssl{{ p.id }}" />
+                  <label for="ssl{{ p.id }}" class="text-xs text-gray-600">Use SSL/TLS (recommended)</label>
+                </div>
+                
+                <p class="text-xs text-amber-600 bg-amber-50 p-2 rounded">
+                  ⚠️ If left empty, the system will use the global email settings instead
+                </p>
+              </div>
             </div>
+            
             <div class="flex justify-end gap-2 pt-2">
               <button type="button" onclick="document.getElementById('editProject{{ p.id }}').close()" 
                       class="px-3 py-2 rounded border border-slate-300 text-sm">Cancel</button>
