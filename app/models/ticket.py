@@ -39,6 +39,7 @@ class TicketBase(SQLModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     resolved_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
+    closed_by_id: Optional[int] = Field(default=None, foreign_key="user.id")  # Track who closed the ticket
     
     # Archive support
     is_archived: bool = False

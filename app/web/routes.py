@@ -1094,6 +1094,16 @@ async def web_admin_generate_user_activity_pdf(
         .order_by(Activity.created_at.desc())
     )).scalars().all()
     
+    # 7. Tickets closed (newly added)
+    from app.models.ticket import Ticket
+    tickets_closed = (await db.execute(
+        select(Ticket)
+        .where(Ticket.closed_by_id == target_user_id)
+        .where(Ticket.closed_at >= start_dt)
+        .where(Ticket.closed_at < end_dt)
+        .order_by(Ticket.closed_at.desc())
+    )).scalars().all()
+    
     # Generate PDF
     from reportlab.lib.pagesizes import letter, A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -1161,6 +1171,7 @@ async def web_admin_generate_user_activity_pdf(
         ['Comments Posted', str(len(comments))],
         ['Projects Created', str(len(projects_created))],
         ['Activities Logged', str(len(activities))],
+        ['Tickets Closed', str(len(tickets_closed))],
     ]
     
     summary_table = Table(summary_data, colWidths=[4*inch, 2*inch])
@@ -1253,6 +1264,32 @@ async def web_admin_generate_user_activity_pdf(
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
         ]))
         elements.append(comment_table)
+        elements.append(Spacer(1, 0.2*inch))
+    
+    # Tickets Closed
+    if tickets_closed:
+        elements.append(Paragraph("Tickets Closed", heading_style))
+        ticket_data = [['Date Closed', 'Ticket #', 'Subject', 'Priority']]
+        for ticket in tickets_closed[:20]:  # Limit to first 20
+            ticket_data.append([
+                ticket.closed_at.strftime('%Y-%m-%d %H:%M'),
+                ticket.ticket_number,
+                ticket.subject[:40],
+                ticket.priority.title(),
+            ])
+        
+        ticket_table = Table(ticket_data, colWidths=[1.5*inch, 1.3*inch, 2.5*inch, 1*inch])
+        ticket_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#EF4444')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+        ]))
+        elements.append(ticket_table)
         elements.append(Spacer(1, 0.2*inch))
     
     # Build PDF
@@ -4180,6 +4217,7 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
     status_filter = request.query_params.get('status', 'all')
     priority_filter = request.query_params.get('priority', 'all')
     assigned_filter = request.query_params.get('assigned', 'all')
+    project_filter = request.query_params.get('project', 'all')  # New: filter by project scope
     
     # Base query - exclude archived
     query = select(Ticket).where(
@@ -4187,7 +4225,37 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
         Ticket.is_archived == False
     )
     
-    # Apply filters
+    # Project-based visibility for non-admin users
+    if not user.is_admin:
+        # Get projects where user is a member
+        from app.models.project_member import ProjectMember
+        user_projects_query = select(ProjectMember.project_id).where(
+            ProjectMember.user_id == user_id
+        )
+        user_project_ids = (await db.execute(user_projects_query)).scalars().all()
+        
+        # User can see:
+        # 1. Tickets assigned to them
+        # 2. Tickets related to their projects
+        # 3. Tickets with no project assignment (general tickets) if they can access main system
+        query = query.where(
+            (Ticket.assigned_to_id == user_id) |
+            (Ticket.related_project_id.in_(user_project_ids)) |
+            ((Ticket.related_project_id.is_(None)) & (Ticket.assigned_to_id == user_id))
+        )
+    
+    # Project filter (for admins or filtering within allowed scope)
+    if project_filter == 'main':
+        # Show only tickets not related to any project (main ticket system)
+        query = query.where(Ticket.related_project_id.is_(None))
+    elif project_filter != 'all':
+        try:
+            project_id = int(project_filter)
+            query = query.where(Ticket.related_project_id == project_id)
+        except ValueError:
+            pass
+    
+    # Apply other filters
     if status_filter != 'all':
         query = query.where(Ticket.status == status_filter)
     if priority_filter != 'all':
@@ -4199,6 +4267,22 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
     
     query = query.order_by(Ticket.created_at.desc())
     tickets = (await db.execute(query)).scalars().all()
+    
+    # Get user's projects for filter dropdown
+    user_projects = []
+    if not user.is_admin:
+        from app.models.project_member import ProjectMember
+        from app.models.project import Project
+        user_projects_query = select(Project).join(
+            ProjectMember, Project.id == ProjectMember.project_id
+        ).where(ProjectMember.user_id == user_id)
+        user_projects = (await db.execute(user_projects_query)).scalars().all()
+    else:
+        # Admins see all projects
+        from app.models.project import Project
+        user_projects = (await db.execute(
+            select(Project).where(Project.workspace_id == user.workspace_id)
+        )).scalars().all()
     
     # Get all users for assignment dropdown
     users = (await db.execute(
@@ -4212,7 +4296,9 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
         'users': users,
         'status_filter': status_filter,
         'priority_filter': priority_filter,
-        'assigned_filter': assigned_filter
+        'assigned_filter': assigned_filter,
+        'project_filter': project_filter,
+        'user_projects': user_projects
     })
 
 
@@ -4674,6 +4760,13 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
             select(Project).where(Project.id == ticket.related_project_id)
         )).scalar_one_or_none()
     
+    # Get closed_by user if exists
+    closed_by_user = None
+    if ticket.closed_by_id:
+        closed_by_user = (await db.execute(
+            select(User).where(User.id == ticket.closed_by_id)
+        )).scalar_one_or_none()
+    
     return templates.TemplateResponse('tickets/detail.html', {
         'request': request,
         'user': user,
@@ -4685,7 +4778,8 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         'attachments': attachments,
         'history': history,
         'users': users,
-        'related_project': related_project
+        'related_project': related_project,
+        'closed_by_user': closed_by_user
     })
 
 
@@ -4922,11 +5016,13 @@ async def web_tickets_update_status(
     ticket.status = status
     ticket.updated_at = datetime.utcnow()
     
-    # Set resolved/closed timestamps
+    # Set resolved/closed timestamps and track who closed it
     if status == 'resolved' and not ticket.resolved_at:
         ticket.resolved_at = datetime.utcnow()
-    elif status == 'closed' and not ticket.closed_at:
-        ticket.closed_at = datetime.utcnow()
+    elif status == 'closed':
+        if not ticket.closed_at:
+            ticket.closed_at = datetime.utcnow()
+        ticket.closed_by_id = user_id  # Track who closed the ticket
         # Auto-archive when closed
         ticket.is_archived = True
         ticket.archived_at = datetime.utcnow()
@@ -5083,63 +5179,6 @@ async def web_tickets_assign(
         db.add(notification)
     
     await db.commit()
-    return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
-
-
-@router.post('/tickets/{ticket_id}/request')
-async def web_tickets_request(
-    request: Request,
-    ticket_id: int,
-    db: AsyncSession = Depends(get_session)
-):
-    """Request to be assigned to a ticket (for normal users)"""
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-    
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user:
-        return RedirectResponse('/web/login', status_code=303)
-    
-    from app.models.ticket import Ticket, TicketHistory
-    
-    ticket = (await db.execute(select(Ticket).where(Ticket.id == ticket_id))).scalar_one_or_none()
-    if not ticket:
-        return RedirectResponse('/web/tickets', status_code=303)
-    
-    # Check if already assigned
-    if ticket.assigned_to_id:
-        request.session['error_message'] = 'This ticket is already assigned.'
-        return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
-    
-    # Notify all admins about the request
-    from app.models.notification import Notification
-    admin_users = (await db.execute(
-        select(User).where(User.workspace_id == user.workspace_id).where(User.is_admin == True)
-    )).scalars().all()
-    
-    for admin in admin_users:
-        notification = Notification(
-            user_id=admin.id,
-            type='ticket',
-            message=f'{user.full_name or user.username} requests to be assigned to ticket #{ticket.ticket_number}: {ticket.subject}',
-            url=f'/web/tickets/{ticket_id}',
-            related_id=ticket_id
-        )
-        db.add(notification)
-    
-    # Add history entry
-    history = TicketHistory(
-        ticket_id=ticket_id,
-        user_id=user_id,
-        action='requested',
-        new_value=f'{user.full_name or user.username} requested assignment'
-    )
-    db.add(history)
-    
-    await db.commit()
-    
-    request.session['success_message'] = 'Your request has been sent to administrators.'
     return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
 
