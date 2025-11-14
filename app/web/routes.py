@@ -1467,6 +1467,41 @@ async def web_admin_toggle_admin(
     return RedirectResponse('/web/admin/users', status_code=303)
 
 
+@router.post('/admin/users/{user_id}/toggle-ticket-visibility')
+async def web_admin_toggle_ticket_visibility(
+    request: Request,
+    user_id: int,
+    db: AsyncSession = Depends(get_session),
+):
+    """Toggle whether a user can see all tickets or only their project tickets"""
+    current_user_id = request.session.get('user_id')
+    if not current_user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    
+    current_user = (await db.execute(select(User).where(User.id == current_user_id))).scalar_one_or_none()
+    if not current_user or not current_user.is_active:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+    
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Get the target user
+    target_user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Must be in same workspace
+    if target_user.workspace_id != current_user.workspace_id:
+        raise HTTPException(status_code=403, detail="User not in your workspace")
+    
+    # Toggle ticket visibility
+    target_user.can_see_all_tickets = not target_user.can_see_all_tickets
+    await db.commit()
+    
+    return RedirectResponse('/web/admin/users', status_code=303)
+
+
 @router.post('/admin/users/{user_id}/delete')
 async def web_admin_delete_user(
     request: Request,
@@ -4225,8 +4260,9 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
         Ticket.is_archived == False
     )
     
-    # Project-based visibility for non-admin users
-    if not user.is_admin:
+    # Project-based visibility based on user permissions
+    if not user.is_admin and not user.can_see_all_tickets:
+        # Regular users: see only their project tickets and assigned tickets
         # Get projects where user is a member
         from app.models.project_member import ProjectMember
         user_projects_query = select(ProjectMember.project_id).where(
@@ -4270,7 +4306,8 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
     
     # Get user's projects for filter dropdown
     user_projects = []
-    if not user.is_admin:
+    if not user.is_admin and not user.can_see_all_tickets:
+        # Limited users: show only their assigned projects
         from app.models.project_member import ProjectMember
         from app.models.project import Project
         user_projects_query = select(Project).join(
@@ -4278,7 +4315,7 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
         ).where(ProjectMember.user_id == user_id)
         user_projects = (await db.execute(user_projects_query)).scalars().all()
     else:
-        # Admins see all projects
+        # Admins and users with full ticket access see all projects
         from app.models.project import Project
         user_projects = (await db.execute(
             select(Project).where(Project.workspace_id == user.workspace_id)
