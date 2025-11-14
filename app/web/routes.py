@@ -4790,6 +4790,108 @@ Thank you.
     db.add(history)
     
     await db.commit()
+    await db.refresh(comment)
+    
+    # Send email notification to client (if not internal comment)
+    if not is_internal and ticket.guest_email:
+        try:
+            # Get user info
+            user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+            
+            # Determine which email to send from
+            from_email = None
+            from_name = "Support Team"
+            
+            # Check if ticket is related to a project with support email
+            if ticket.related_project_id:
+                from app.models.project import Project
+                project = (await db.execute(
+                    select(Project).where(Project.id == ticket.related_project_id)
+                )).scalar_one_or_none()
+                
+                if project and project.support_email:
+                    from_email = project.support_email
+                    from_name = f"{project.name} Support"
+            
+            # Fallback to main email settings if no project email
+            if not from_email:
+                from app.models.email_settings import EmailSettings
+                settings_result = await db.execute(
+                    select(EmailSettings).where(EmailSettings.workspace_id == ticket.workspace_id)
+                )
+                email_settings = settings_result.scalar_one_or_none()
+                
+                if email_settings:
+                    from_email = email_settings.smtp_from_email
+                    from_name = email_settings.smtp_from_name
+            
+            # Send email if we have a sender address
+            if from_email and email_settings:
+                import smtplib
+                from email.mime.text import MIMEText
+                from email.mime.multipart import MIMEMultipart
+                
+                msg = MIMEMultipart('alternative')
+                msg['From'] = f"{from_name} <{from_email}>"
+                msg['To'] = ticket.guest_email
+                msg['Subject'] = f"Re: Ticket #{ticket.ticket_number} - {ticket.subject}"
+                msg['Reply-To'] = from_email
+                
+                # Build email body
+                commenter_name = user.full_name or user.username if user else "Support Team"
+                
+                email_body = f"""
+<html>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #2563eb; border-bottom: 2px solid #2563eb; padding-bottom: 10px;">
+            New Update on Your Ticket
+        </h2>
+        
+        <div style="background-color: #f3f4f6; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <p><strong>Ticket Number:</strong> #{ticket.ticket_number}</p>
+            <p><strong>Subject:</strong> {ticket.subject}</p>
+            <p><strong>Status:</strong> {ticket.status.title()}</p>
+        </div>
+        
+        <div style="background-color: #fff; padding: 20px; border-left: 4px solid #2563eb; margin: 20px 0;">
+            <p><strong>{commenter_name} commented:</strong></p>
+            <div style="margin-top: 10px;">
+                {content.replace(chr(10), '<br>')}
+            </div>
+        </div>
+        
+        <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb;">
+            <p style="color: #6b7280; font-size: 14px;">
+                You can reply directly to this email and your response will be added to the ticket.
+            </p>
+            <p style="color: #6b7280; font-size: 12px; margin-top: 20px;">
+                This is an automated message from {from_name}. Please do not reply to this email if you have no further questions.
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+                
+                msg.attach(MIMEText(email_body, 'html'))
+                
+                # Send email
+                if email_settings.smtp_use_tls:
+                    server = smtplib.SMTP(email_settings.smtp_host, email_settings.smtp_port)
+                    server.starttls()
+                else:
+                    server = smtplib.SMTP_SSL(email_settings.smtp_host, email_settings.smtp_port)
+                
+                server.login(email_settings.smtp_username, email_settings.smtp_password)
+                server.send_message(msg)
+                server.quit()
+                
+                print(f"✅ Sent email notification to {ticket.guest_email} from {from_email}")
+        except Exception as e:
+            print(f"❌ Error sending email notification: {e}")
+            # Don't fail the comment creation if email fails
+    
     return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
 
