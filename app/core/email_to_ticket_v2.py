@@ -9,7 +9,8 @@ import email
 from email.header import decode_header
 from email.utils import parseaddr
 import re
-from datetime import datetime
+import logging
+from datetime import datetime, date
 from typing import Optional, List, Tuple
 from sqlmodel import Session, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -20,6 +21,11 @@ from app.models.notification import Notification
 from app.models.email_settings import EmailSettings
 from app.models.processed_mail import ProcessedMail
 from app.models.project import Project
+from app.models.task import Task
+from app.models.enums import TaskStatus, TaskPriority
+
+# Setup logger
+logger = logging.getLogger(__name__)
 
 
 class EmailToTicketService:
@@ -127,6 +133,72 @@ class EmailToTicketService:
             return 'high'
         else:
             return 'medium'
+    
+    def analyze_email_for_task(self, subject: str, body: str) -> tuple[str, str]:
+        """
+        Analyze email to extract concise title (max 3 words) and clean description
+        Uses simple NLP to identify key issue from email content
+        """
+        # Clean the body
+        cleaned_body = self.clean_email_body(body)
+        
+        # Generate short title (max 3 words)
+        # Priority order: look for key action words and subjects
+        title_keywords = []
+        
+        # Common IT/support action words
+        action_words = ['fix', 'repair', 'install', 'setup', 'configure', 'update', 'upgrade', 
+                       'replace', 'check', 'troubleshoot', 'reset', 'restore', 'resolve',
+                       'connection', 'issue', 'problem', 'error', 'bug', 'crash', 'slow']
+        
+        # Technical subjects
+        tech_subjects = ['email', 'printer', 'network', 'wifi', 'computer', 'laptop', 'server',
+                        'database', 'website', 'application', 'software', 'password', 'access',
+                        'login', 'account', 'internet', 'phone', 'mobile', 'vpn']
+        
+        # Extract from subject first (most concise)
+        subject_lower = subject.lower()
+        for word in tech_subjects:
+            if word in subject_lower:
+                title_keywords.append(word.title())
+                if len(title_keywords) >= 2:
+                    break
+        
+        for word in action_words:
+            if word in subject_lower:
+                title_keywords.insert(0, word.title())
+                break
+        
+        # If subject didn't yield enough, check body
+        if len(title_keywords) < 2:
+            body_lower = cleaned_body.lower()
+            for word in tech_subjects:
+                if word in body_lower and word.title() not in title_keywords:
+                    title_keywords.append(word.title())
+                    if len(title_keywords) >= 2:
+                        break
+        
+        # Build title (max 3 words)
+        if title_keywords:
+            title = ' '.join(title_keywords[:3])
+        else:
+            # Fallback: use first 3 meaningful words from subject
+            words = [w for w in subject.split() if len(w) > 3][:3]
+            title = ' '.join(words) if words else 'Support Request'
+        
+        # Ensure title isn't too long
+        if len(title) > 50:
+            title = title[:47] + '...'
+        
+        # Create structured description
+        description = f"""📧 Email Request from: {subject}
+
+{cleaned_body}
+
+---
+Auto-created from email support request"""
+        
+        return title, description
     
     def extract_email_body(self, msg) -> str:
         """Extract plain text body from email message, converting HTML if needed"""
@@ -458,6 +530,87 @@ class EmailToTicketService:
         
         return ticket
     
+    async def create_task_from_email(
+        self, 
+        db: AsyncSession,
+        sender_name: str,
+        sender_email: str,
+        subject: str,
+        body: str,
+        project: Project
+    ):
+        """Create task from email for projects with support emails"""
+        from sqlmodel import select as sql_select
+        
+        try:
+            # Analyze email to extract concise title and description
+            title, description = self.analyze_email_for_task(subject, body)
+            
+            # Determine priority using existing method
+            priority_str = self.determine_priority(subject, body)
+            
+            # Map string priority to TaskPriority enum
+            priority_map = {
+                'urgent': TaskPriority.critical,
+                'high': TaskPriority.high,
+                'medium': TaskPriority.medium,
+                'low': TaskPriority.low
+            }
+            task_priority = priority_map.get(priority_str, TaskPriority.medium)
+            
+            # Get project creator as task creator (or first admin if not available)
+            creator_id = project.created_by
+            if not creator_id:
+                # Fallback: use first admin
+                admin_query = sql_select(User).where(User.role == 'admin', User.is_active == True)
+                result = await db.execute(admin_query)
+                admin = result.scalars().first()
+                creator_id = admin.id if admin else 1
+            
+            # Create task with start_date as today, no due_date
+            new_task = Task(
+                title=title,
+                description=description,
+                project_id=project.id,
+                creator_id=creator_id,
+                status=TaskStatus.todo,
+                priority=task_priority,
+                start_date=date.today(),
+                due_date=None  # No deadline as requested
+            )
+            
+            db.add(new_task)
+            await db.commit()
+            await db.refresh(new_task)
+            
+            logger.info(f"✅ Created task '{title}' from {sender_email} for project '{project.name}'")
+            
+            # Notify project members
+            from app.models.project_member import ProjectMember
+            members_query = sql_select(ProjectMember).where(ProjectMember.project_id == project.id)
+            result = await db.execute(members_query)
+            members = result.scalars().all()
+            
+            for member in members:
+                notification = Notification(
+                    user_id=member.user_id,
+                    title=f"New Task: {title}",
+                    message=f"Email from {sender_name} created new task in '{project.name}': {subject}",
+                    type='info',
+                    related_id=new_task.id,
+                    related_type='task'
+                )
+                db.add(notification)
+            
+            await db.commit()
+            
+            return new_task
+            
+        except Exception as e:
+            logger.error(f"❌ Error creating task from email: {e}")
+            await db.rollback()
+            raise
+    
     async def add_comment_from_email(
         self,
         db: AsyncSession,
@@ -566,18 +719,32 @@ class EmailToTicketService:
                         
                         print(f"[POP3] Added comment to ticket {existing_ticket.ticket_number} from {sender_email}")
                     else:
-                        # Create new ticket
-                        ticket = await self.create_ticket_from_email(
-                            db, sender_name, sender_email, subject, body, to_email, project
-                        )
-                        
-                        # Mark as processed
-                        await self.mark_email_processed(
-                            db, message_id, sender_email, subject, ticket.id
-                        )
-                        
-                        tickets_created.append(ticket)
-                        print(f"[POP3] Created ticket {ticket.ticket_number} from {sender_email}")
+                        # Route based on project support email
+                        if project:
+                            # Create task for project with support email
+                            task = await self.create_task_from_email(
+                                db, sender_name, sender_email, subject, body, project
+                            )
+                            
+                            # Mark as processed
+                            await self.mark_email_processed(
+                                db, message_id, sender_email, subject, task.id
+                            )
+                            
+                            print(f"[POP3] Created task '{task.title}' for project '{project.name}' from {sender_email}")
+                        else:
+                            # Create ticket for general support
+                            ticket = await self.create_ticket_from_email(
+                                db, sender_name, sender_email, subject, body, to_email, None
+                            )
+                            
+                            # Mark as processed
+                            await self.mark_email_processed(
+                                db, message_id, sender_email, subject, ticket.id
+                            )
+                            
+                            tickets_created.append(ticket)
+                            print(f"[POP3] Created ticket {ticket.ticket_number} from {sender_email}")
                     
                 except Exception as e:
                     print(f"[POP3] Error processing message {i}: {e}")
@@ -663,22 +830,39 @@ class EmailToTicketService:
                         
                         print(f"[IMAP] Added comment to ticket {existing_ticket.ticket_number} from {sender_email}")
                     else:
-                        print(f"[IMAP DEBUG] No existing ticket found, creating new ticket")
-                        # Create new ticket
-                        ticket = await self.create_ticket_from_email(
-                            db, sender_name, sender_email, subject, body, to_email, project
-                        )
-                        
-                        # Mark as processed
-                        await self.mark_email_processed(
-                            db, message_id, sender_email, subject, ticket.id
-                        )
-                        
-                        # Mark email as read (keeps it on server)
-                        mail.store(email_id, '+FLAGS', '\\Seen')
-                        
-                        tickets_created.append(ticket)
-                        print(f"[IMAP] Created ticket {ticket.ticket_number} from {sender_email}")
+                        print(f"[IMAP DEBUG] No existing ticket found, routing to task/ticket")
+                        # Route based on project support email
+                        if project:
+                            # Create task for project with support email
+                            task = await self.create_task_from_email(
+                                db, sender_name, sender_email, subject, body, project
+                            )
+                            
+                            # Mark as processed
+                            await self.mark_email_processed(
+                                db, message_id, sender_email, subject, task.id
+                            )
+                            
+                            # Mark email as read (keeps it on server)
+                            mail.store(email_id, '+FLAGS', '\\Seen')
+                            
+                            print(f"[IMAP] Created task '{task.title}' for project '{project.name}' from {sender_email}")
+                        else:
+                            # Create ticket for general support
+                            ticket = await self.create_ticket_from_email(
+                                db, sender_name, sender_email, subject, body, to_email, None
+                            )
+                            
+                            # Mark as processed
+                            await self.mark_email_processed(
+                                db, message_id, sender_email, subject, ticket.id
+                            )
+                            
+                            # Mark email as read (keeps it on server)
+                            mail.store(email_id, '+FLAGS', '\\Seen')
+                            
+                            tickets_created.append(ticket)
+                            print(f"[IMAP] Created ticket {ticket.ticket_number} from {sender_email}")
                     
                 except Exception as e:
                     print(f"[IMAP] Error processing email {email_id}: {e}")
