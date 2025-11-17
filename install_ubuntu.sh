@@ -14,12 +14,6 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Configuration
-APP_NAME="crm-backend"
-APP_DIR="$HOME/$APP_NAME"
-SERVICE_NAME="crm-backend"
-PORT=8000
-
 echo -e "${BLUE}=========================================${NC}"
 echo -e "${BLUE}   CRM Backend - Ubuntu Installer${NC}"
 echo -e "${BLUE}=========================================${NC}\n"
@@ -37,12 +31,12 @@ print_info() {
     echo -e "${YELLOW}[i]${NC} $1"
 }
 
-# Configuration - set APP_DIR based on user
+# Configuration
 APP_NAME="crm-backend"
 SERVICE_NAME="crm-backend"
 PORT=8000
 
-# Check if running as root
+# Check if running as root and set paths accordingly
 if [ "$EUID" -eq 0 ]; then 
     print_info "Running as root - installing to /opt/crm-backend"
     APP_DIR="/opt/$APP_NAME"
