@@ -2690,7 +2690,7 @@ async def web_project_detail(request: Request, project_id: int, db: AsyncSession
         )).scalar_one_or_none()
         if not member:
             raise HTTPException(status_code=403, detail='You do not have access to this project')
-    # Fetch only non-archived tasks for board view
+    # Fetch only non-archived tasks for board view (archived tasks go to the Done tab in tasks/list)
     tasks_result = await db.execute(
         select(Task).where(Task.project_id == project_id, Task.is_archived == False)
     )

@@ -17,6 +17,10 @@
 </div>
 
 <div class="mb-4">
+  <div class="bg-blue-50 border-l-4 border-blue-400 p-3 rounded text-sm text-blue-800 mb-4">
+    <strong>ℹ️ Note:</strong> Completed tasks are automatically archived and hidden from this board.
+    <a href="/web/tasks/list?project_id={{ project.id }}&tab=done" class="underline font-medium">View all tasks including archived →</a>
+  </div>
   <form method="post" action="/web/tasks/create" class="grid grid-cols-1 lg:grid-cols-6 gap-2 items-end">
     <input type="hidden" name="project_id" value="{{ project.id }}" />
     <div class="lg:col-span-2">
