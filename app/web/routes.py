@@ -3629,11 +3629,14 @@ async def web_task_add_comment(
                 with open(file_path, 'wb') as f:
                     f.write(content)
                 
+                # Store relative path from app directory
+                relative_path = f"app/uploads/comments/{unique_filename}"
+                
                 # Create attachment record
                 attachment = CommentAttachment(
                     comment_id=comment.id,
                     filename=file.filename,
-                    file_path=str(file_path),
+                    file_path=relative_path,
                     file_size=len(content),
                     content_type=file.content_type or 'application/octet-stream',
                     uploaded_by_id=user_id
@@ -3673,9 +3676,14 @@ async def preview_comment_attachment(
     if not attachment:
         raise HTTPException(status_code=404, detail='Attachment not found')
     
+    # Handle both absolute paths (old) and relative paths (new)
     file_path = Path(attachment.file_path)
+    if not file_path.is_absolute():
+        # Relative path - resolve from current working directory
+        file_path = Path.cwd() / file_path
+    
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail='File not found on disk')
+        raise HTTPException(status_code=404, detail=f'File not found on disk: {file_path}')
     
     # Serve file inline for preview with proper headers for PDF embedding
     return FileResponse(
@@ -3719,7 +3727,12 @@ async def download_comment_attachment(
     if not attachment:
         raise HTTPException(status_code=404, detail='Attachment not found')
     
+    # Handle both absolute paths (old) and relative paths (new)
     file_path = Path(attachment.file_path)
+    if not file_path.is_absolute():
+        # Relative path - resolve from current working directory
+        file_path = Path.cwd() / file_path
+    
     if not file_path.exists():
         raise HTTPException(status_code=404, detail='File not found on disk')
     
