@@ -43,9 +43,9 @@ def start_server(host=None, port=8000, use_public_ip=True):
         print("[*] Checking database integrity...")
         if backup_manager.check_and_restore_on_startup():
             print("[+] Database is ready")
-            # Create an initial backup
+            # Create an initial backup with attachments
             print("[*] Creating startup backup...")
-            backup_manager.create_backup()
+            backup_manager.create_backup(include_attachments=True)
         else:
             print("[!] Failed to restore database. Server may not start properly.")
             return

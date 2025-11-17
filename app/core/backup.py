@@ -235,7 +235,7 @@ class DatabaseBackup:
         while True:
             try:
                 await asyncio.sleep(self.backup_interval)
-                self.create_backup()
+                self.create_backup(include_attachments=True)  # Always include attachments in auto-backups
             except asyncio.CancelledError:
                 logger.info("Backup loop cancelled")
                 break

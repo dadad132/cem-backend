@@ -37,10 +37,10 @@ class GracefulShutdown:
         logger.info("=" * 60)
         
         try:
-            # Step 1: Create final backup
+            # Step 1: Create final backup with attachments
             logger.info("Step 1: Creating final database backup...")
             from app.core.backup import backup_manager
-            backup_file = backup_manager.create_backup(is_manual=False)
+            backup_file = backup_manager.create_backup(is_manual=False, include_attachments=True)
             if backup_file:
                 logger.info(f"✅ Final backup created: {backup_file}")
             else:
