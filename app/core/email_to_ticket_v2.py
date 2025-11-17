@@ -322,7 +322,8 @@ Auto-created from email support request"""
             ref_ids = references.strip().split()
             print(f"[DEBUG] Parsed reference IDs: {ref_ids}")
             for ref_id in reversed(ref_ids):  # Check from newest to oldest
-                ref_id = ref_id.strip('<>')
+                # Keep angle brackets for matching
+                ref_id = ref_id.strip()
                 print(f"[DEBUG] Checking reference: '{ref_id}'")
                 result = await db.execute(
                     select(ProcessedMail).where(
@@ -728,8 +729,9 @@ Auto-created from email support request"""
                     print(f"[IMAP] Message-ID: {message_id}")
                     
                     # Check if this is a reply to an existing ticket
-                    in_reply_to = msg.get('In-Reply-To', '').strip('<>')
-                    references = msg.get('References', '')
+                    # Keep Message-ID with angle brackets for matching
+                    in_reply_to = msg.get('In-Reply-To', '').strip()
+                    references = msg.get('References', '').strip()
                     
                     print(f"[IMAP] In-Reply-To: '{in_reply_to}'")
                     print(f"[IMAP] References: '{references}'")
