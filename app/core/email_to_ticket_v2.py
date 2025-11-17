@@ -376,16 +376,19 @@ Auto-created from email support request"""
         
         # Look for patterns like "Ticket #12345" or "#12345"
         patterns = [
-            r'Ticket\s*#\s*(\d+)',  # "Ticket #12345" or "Ticket # 12345"
-            r'#(\d+)',               # "#12345"
-            r'ticket\s+(\d+)',       # "ticket 12345" (case insensitive)
+            r'Ticket\s*#?\s*(\d+)',      # "Ticket #12345" or "Ticket 12345"
+            r'Re:\s*Ticket\s*#?\s*(\d+)', # "Re: Ticket #12345"
+            r'#(\d+)',                     # "#12345" anywhere
+            r'\bticket\s*#?\s*(\d+)',      # "ticket 12345" (case insensitive)
+            r'\[#(\d+)\]',                 # "[#12345]"
+            r'(?:^|\s)(\d{5,})',           # 5+ digit number (likely ticket number)
         ]
         
         for pattern in patterns:
             match = re.search(pattern, subject, re.IGNORECASE)
             if match:
                 ticket_number = match.group(1)
-                print(f"[DEBUG] Found ticket number in subject: {ticket_number}")
+                print(f"[DEBUG] Found potential ticket number in subject: {ticket_number}")
                 
                 # Search for ticket by number
                 result = await db.execute(
@@ -396,10 +399,12 @@ Auto-created from email support request"""
                 )
                 ticket = result.scalar_one_or_none()
                 if ticket:
-                    print(f"[DEBUG] Found ticket #{ticket.ticket_number} via subject line")
+                    print(f"[DEBUG] ✅ Found ticket #{ticket.ticket_number} via subject line pattern: {pattern}")
                     return ticket
+                else:
+                    print(f"[DEBUG] Pattern matched '{ticket_number}' but no ticket found in database")
         
-        print(f"[DEBUG] No ticket number found in subject")
+        print(f"[DEBUG] ❌ No ticket number found in subject")
         return None
     
     async def mark_email_processed(
