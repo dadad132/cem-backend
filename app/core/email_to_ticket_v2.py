@@ -740,18 +740,37 @@ Auto-created from email support request"""
                     subject = self.decode_header_value(msg.get('Subject', 'No Subject'))
                     body = self.extract_email_body(msg)
                     
+                    print(f"\n{'='*80}")
+                    print(f"[POP3] Processing email {i}")
+                    print(f"[POP3] From: {sender_name} <{sender_email}>")
+                    print(f"[POP3] To: {to_email}")
+                    print(f"[POP3] Subject: {subject}")
+                    print(f"[POP3] Message-ID: {message_id}")
+                    
                     # Check if this is a reply to an existing ticket
                     in_reply_to = msg.get('In-Reply-To', '').strip('<>')
                     references = msg.get('References', '')
+                    
+                    print(f"[POP3] In-Reply-To: '{in_reply_to}'")
+                    print(f"[POP3] References: '{references}'")
+                    
                     existing_ticket = await self.find_ticket_by_reply(db, in_reply_to, references)
                     
                     # If not found via headers, try subject line (Gmail/Outlook fallback)
                     if not existing_ticket:
+                        print(f"[POP3] Trying subject line fallback...")
                         existing_ticket = await self.find_ticket_by_subject(db, subject)
                     
                     # If still not found, try by sender email (last resort)
                     if not existing_ticket:
+                        print(f"[POP3] Trying sender email fallback...")
                         existing_ticket = await self.find_ticket_by_sender(db, sender_email)
+                    
+                    if existing_ticket:
+                        print(f"[POP3] ✅ MATCH FOUND - Adding to ticket #{existing_ticket.ticket_number}")
+                    else:
+                        print(f"[POP3] ❌ NO MATCH - Will create new ticket")
+                    print(f"{'='*80}\n")
                     
                     # Find project by support email
                     project = await self.find_project_by_email(db, to_email)
