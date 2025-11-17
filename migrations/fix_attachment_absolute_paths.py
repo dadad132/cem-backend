@@ -1,12 +1,14 @@
 """
 Migration: Fix attachment file paths from absolute to relative
 Converts paths like /home/eugene/crm-backend/app/uploads/... to app/uploads/...
+Also searches for files if they exist in different locations
 """
 import sqlite3
+import os
 from pathlib import Path
 
 def migrate():
-    """Convert all absolute attachment paths to relative paths"""
+    """Convert all absolute attachment paths to relative paths and find missing files"""
     db_path = Path("data.db")
     
     if not db_path.exists():
@@ -18,6 +20,9 @@ def migrate():
     
     total_updated = 0
     
+    # Get current working directory
+    base_dir = Path.cwd()
+    
     # Fix comment_attachment table
     try:
         cursor.execute("SELECT id, file_path FROM comment_attachment")
@@ -25,11 +30,29 @@ def migrate():
         
         updates = []
         for att_id, file_path in comment_attachments:
-            if file_path and (file_path.startswith('/') or (len(file_path) > 1 and file_path[1] == ':')):
-                # Extract UUID filename from absolute path
-                uuid_filename = Path(file_path).name
-                relative_path = f"app/uploads/comments/{uuid_filename}"
-                updates.append((relative_path, att_id))
+            if file_path:
+                path_obj = Path(file_path)
+                
+                # Check if it's an absolute path (Windows or Linux)
+                if file_path.startswith('/') or (len(file_path) > 1 and file_path[1] == ':'):
+                    # Extract UUID filename from absolute path
+                    uuid_filename = path_obj.name
+                    relative_path = f"app/uploads/comments/{uuid_filename}"
+                    
+                    # Verify file exists in the relative location
+                    full_path = base_dir / relative_path
+                    if full_path.exists():
+                        updates.append((relative_path, att_id))
+                        print(f"  ✓ Found file: {uuid_filename}")
+                    else:
+                        # File not found in expected location
+                        print(f"  ⚠ File not found: {uuid_filename} (will still update path)")
+                        updates.append((relative_path, att_id))
+                elif not path_obj.is_absolute():
+                    # Already relative - verify it exists
+                    full_path = base_dir / file_path
+                    if not full_path.exists():
+                        print(f"  ⚠ Relative path file missing: {file_path}")
         
         if updates:
             print(f"  Converting {len(updates)} comment attachment paths...")
@@ -49,11 +72,23 @@ def migrate():
         
         updates = []
         for att_id, file_path in ticket_attachments:
-            if file_path and (file_path.startswith('/') or (len(file_path) > 1 and file_path[1] == ':')):
-                # Extract UUID filename from absolute path
-                uuid_filename = Path(file_path).name
-                relative_path = f"app/uploads/tickets/{uuid_filename}"
-                updates.append((relative_path, att_id))
+            if file_path:
+                path_obj = Path(file_path)
+                
+                # Check if it's an absolute path (Windows or Linux)
+                if file_path.startswith('/') or (len(file_path) > 1 and file_path[1] == ':'):
+                    # Extract UUID filename from absolute path
+                    uuid_filename = path_obj.name
+                    relative_path = f"app/uploads/tickets/{uuid_filename}"
+                    
+                    # Verify file exists in the relative location
+                    full_path = base_dir / relative_path
+                    if full_path.exists():
+                        updates.append((relative_path, att_id))
+                        print(f"  ✓ Found file: {uuid_filename}")
+                    else:
+                        print(f"  ⚠ File not found: {uuid_filename} (will still update path)")
+                        updates.append((relative_path, att_id))
         
         if updates:
             print(f"  Converting {len(updates)} ticket attachment paths...")
@@ -73,11 +108,23 @@ def migrate():
         
         updates = []
         for att_id, file_path in task_attachments:
-            if file_path and (file_path.startswith('/') or (len(file_path) > 1 and file_path[1] == ':')):
-                # Extract UUID filename from absolute path
-                uuid_filename = Path(file_path).name
-                relative_path = f"app/uploads/tasks/{uuid_filename}"
-                updates.append((relative_path, att_id))
+            if file_path:
+                path_obj = Path(file_path)
+                
+                # Check if it's an absolute path (Windows or Linux)
+                if file_path.startswith('/') or (len(file_path) > 1 and file_path[1] == ':'):
+                    # Extract UUID filename from absolute path
+                    uuid_filename = path_obj.name
+                    relative_path = f"app/uploads/tasks/{uuid_filename}"
+                    
+                    # Verify file exists in the relative location
+                    full_path = base_dir / relative_path
+                    if full_path.exists():
+                        updates.append((relative_path, att_id))
+                        print(f"  ✓ Found file: {uuid_filename}")
+                    else:
+                        print(f"  ⚠ File not found: {uuid_filename} (will still update path)")
+                        updates.append((relative_path, att_id))
         
         if updates:
             print(f"  Converting {len(updates)} task attachment paths...")
