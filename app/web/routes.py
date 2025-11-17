@@ -2,7 +2,7 @@
 
 from typing import Optional
 from pathlib import Path
-from datetime import date, datetime, timedelta, time
+from datetime import date, datetime, timedelta, time, timezone
 import calendar as pycalendar
 import os
 import uuid
@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_session
 from app.core.security import verify_password, get_password_hash
 from app.core.email import send_email
+from app.core.email_to_ticket_v2 import get_local_time
 from app.models.project import Project
 from app.models.task import Task
 from app.models.user import User
@@ -5059,12 +5060,17 @@ Thank you.
                 import smtplib
                 from email.mime.text import MIMEText
                 from email.mime.multipart import MIMEMultipart
+                from email.utils import make_msgid
+                
+                # Generate unique Message-ID for email threading
+                message_id = make_msgid(domain=from_email.split('@')[1])
                 
                 msg = MIMEMultipart('alternative')
                 msg['From'] = f"{from_name} <{from_email}>"
                 msg['To'] = ticket.guest_email
                 msg['Subject'] = f"Re: Ticket #{ticket.ticket_number} - {ticket.subject}"
                 msg['Reply-To'] = from_email
+                msg['Message-ID'] = message_id
                 
                 # Build email body
                 commenter_name = user.full_name or user.username if user else "Support Team"
@@ -5116,7 +5122,20 @@ Thank you.
                 server.send_message(msg)
                 server.quit()
                 
-                print(f"✅ Sent email notification to {ticket.guest_email} from {from_email}")
+                # Store the Message-ID so replies can be threaded
+                from app.models.processed_mail import ProcessedMail
+                processed = ProcessedMail(
+                    workspace_id=ticket.workspace_id,
+                    message_id=message_id,
+                    email_from=from_email,
+                    subject=msg['Subject'],
+                    ticket_id=ticket.id,
+                    processed_at=get_local_time()
+                )
+                db.add(processed)
+                await db.commit()
+                
+                print(f"✅ Sent email notification to {ticket.guest_email} from {from_email} with Message-ID: {message_id}")
         except Exception as e:
             print(f"❌ Error sending email notification: {e}")
             # Don't fail the comment creation if email fails
