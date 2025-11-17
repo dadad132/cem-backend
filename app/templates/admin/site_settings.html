@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+
+{% block title %}Site Settings{% endblock %}
+
+{% block content %}
+<div class="container mx-auto px-4 py-8">
+    <div class="max-w-4xl mx-auto">
+        <!-- Header -->
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold text-gray-900 mb-2">Site Settings</h1>
+            <p class="text-gray-600">Customize your site branding, logo, and appearance</p>
+        </div>
+
+        <!-- Success Message -->
+        {% if success_message %}
+        <div class="mb-6 bg-green-50 border-l-4 border-green-500 p-4 rounded">
+            <div class="flex items-center">
+                <i class="fas fa-check-circle text-green-500 mr-3"></i>
+                <p class="text-green-700">{{ success_message }}</p>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Error Message -->
+        {% if error_message %}
+        <div class="mb-6 bg-red-50 border-l-4 border-red-500 p-4 rounded">
+            <div class="flex items-center">
+                <i class="fas fa-exclamation-circle text-red-500 mr-3"></i>
+                <p class="text-red-700">{{ error_message }}</p>
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <!-- Main Settings Form -->
+            <div class="lg:col-span-2 space-y-6">
+                <!-- Site Title & Colors -->
+                <div class="bg-white rounded-lg shadow-md p-6">
+                    <h2 class="text-xl font-semibold text-gray-900 mb-6 flex items-center">
+                        <i class="fas fa-palette text-blue-600 mr-3"></i>
+                        Branding
+                    </h2>
+
+                    <form method="post" action="/web/admin/site-settings/save">
+                        <div class="space-y-4">
+                            <!-- Site Title -->
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    Site Title
+                                </label>
+                                <input type="text" name="site_title" 
+                                       value="{{ workspace.site_title or '' }}"
+                                       placeholder="My Company CRM"
+                                       class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                <p class="text-xs text-gray-500 mt-1">Leave empty to use workspace name</p>
+                            </div>
+
+                            <!-- Primary Color -->
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    Primary Color
+                                </label>
+                                <div class="flex items-center gap-3">
+                                    <input type="color" name="primary_color" 
+                                           value="{{ workspace.primary_color or '#2563eb' }}"
+                                           class="h-10 w-20 border border-gray-300 rounded cursor-pointer">
+                                    <input type="text" 
+                                           value="{{ workspace.primary_color or '#2563eb' }}"
+                                           readonly
+                                           class="flex-1 px-4 py-2 border border-gray-300 rounded-lg bg-gray-50">
+                                </div>
+                                <p class="text-xs text-gray-500 mt-1">Used for buttons, links, and accents</p>
+                            </div>
+
+                            <!-- Save Button -->
+                            <div class="pt-4">
+                                <button type="submit" 
+                                        class="w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition duration-200 flex items-center justify-center gap-2">
+                                    <i class="fas fa-save"></i>
+                                    Save Settings
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Logo Upload -->
+                <div class="bg-white rounded-lg shadow-md p-6">
+                    <h2 class="text-xl font-semibold text-gray-900 mb-6 flex items-center">
+                        <i class="fas fa-image text-blue-600 mr-3"></i>
+                        Logo
+                    </h2>
+
+                    <!-- Current Logo -->
+                    {% if workspace.logo_url %}
+                    <div class="mb-6">
+                        <p class="text-sm font-medium text-gray-700 mb-2">Current Logo:</p>
+                        <div class="p-4 bg-gray-50 border border-gray-200 rounded-lg inline-block">
+                            <img src="{{ workspace.logo_url }}" alt="Site Logo" class="max-h-24">
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    <!-- Upload Form -->
+                    <form method="post" action="/web/admin/site-settings/upload-logo" enctype="multipart/form-data">
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    Upload New Logo
+                                </label>
+                                <input type="file" name="logo" accept="image/*" required
+                                       class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                <p class="text-xs text-gray-500 mt-1">
+                                    <i class="fas fa-info-circle mr-1"></i>
+                                    Supported: PNG, JPG, GIF, SVG. Max size: 5MB
+                                </p>
+                            </div>
+
+                            <button type="submit" 
+                                    class="w-full bg-green-600 text-white py-2 px-4 rounded-lg hover:bg-green-700 transition duration-200 flex items-center justify-center gap-2">
+                                <i class="fas fa-upload"></i>
+                                Upload Logo
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Preview Panel -->
+            <div class="lg:col-span-1">
+                <div class="bg-white rounded-lg shadow-md p-6 sticky top-4">
+                    <h3 class="text-lg font-semibold text-gray-900 mb-4">Preview</h3>
+                    
+                    <div class="space-y-4">
+                        <!-- Logo Preview -->
+                        {% if workspace.logo_url %}
+                        <div class="p-4 bg-gray-50 rounded-lg text-center">
+                            <img src="{{ workspace.logo_url }}" alt="Logo" class="max-h-16 mx-auto mb-2">
+                            <p class="text-sm font-medium text-gray-700">
+                                {{ workspace.site_title or workspace.name }}
+                            </p>
+                        </div>
+                        {% else %}
+                        <div class="p-4 bg-gray-50 rounded-lg text-center">
+                            <div class="w-16 h-16 bg-gray-300 rounded-full mx-auto mb-2 flex items-center justify-center">
+                                <i class="fas fa-image text-gray-500 text-2xl"></i>
+                            </div>
+                            <p class="text-sm text-gray-500">No logo uploaded</p>
+                        </div>
+                        {% endif %}
+
+                        <!-- Color Preview -->
+                        <div class="p-4 bg-gray-50 rounded-lg">
+                            <p class="text-xs text-gray-600 mb-2">Primary Color:</p>
+                            <div class="flex items-center gap-2">
+                                <div class="w-8 h-8 rounded" style="background-color: {{ workspace.primary_color or '#2563eb' }}"></div>
+                                <span class="text-sm font-mono">{{ workspace.primary_color or '#2563eb' }}</span>
+                            </div>
+                        </div>
+
+                        <!-- Sample Button -->
+                        <button class="w-full py-2 px-4 rounded-lg text-white font-medium transition duration-200"
+                                style="background-color: {{ workspace.primary_color or '#2563eb' }}">
+                            Sample Button
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Back Button -->
+        <div class="mt-8">
+            <a href="/web/admin/users" 
+               class="inline-flex items-center text-blue-600 hover:text-blue-700">
+                <i class="fas fa-arrow-left mr-2"></i>
+                Back to Admin
+            </a>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Update color preview when color picker changes
+    document.querySelector('input[type="color"]').addEventListener('input', function(e) {
+        document.querySelector('input[type="text"][readonly]').value = e.target.value;
+        document.querySelector('.w-8.h-8.rounded').style.backgroundColor = e.target.value;
+        document.querySelector('button[style]').style.backgroundColor = e.target.value;
+        document.querySelectorAll('.font-mono').forEach(el => {
+            if (el.textContent.startsWith('#')) {
+                el.textContent = e.target.value;
+            }
+        });
+    });
+</script>
+{% endblock %}

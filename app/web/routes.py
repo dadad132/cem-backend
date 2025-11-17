@@ -2201,6 +2201,138 @@ async def web_admin_preview_inbox(request: Request, db: AsyncSession = Depends(g
 
 
 # --------------------------
+# Site Settings (Admin Only)
+# --------------------------
+@router.get('/admin/site-settings', response_class=HTMLResponse)
+async def web_admin_site_settings(
+    request: Request,
+    db: AsyncSession = Depends(get_session)
+):
+    """Site branding and customization settings"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_admin:
+        return RedirectResponse('/web/dashboard', status_code=303)
+    
+    # Get workspace settings
+    workspace = (await db.execute(
+        select(Workspace).where(Workspace.id == user.workspace_id)
+    )).scalar_one_or_none()
+    
+    success_message = request.session.pop('success_message', None)
+    error_message = request.session.pop('error_message', None)
+    
+    return templates.TemplateResponse('admin/site_settings.html', {
+        'request': request,
+        'user': user,
+        'workspace': workspace,
+        'success_message': success_message,
+        'error_message': error_message
+    })
+
+
+@router.post('/admin/site-settings/save')
+async def web_admin_site_settings_save(
+    request: Request,
+    site_title: str = Form(None),
+    primary_color: str = Form("#2563eb"),
+    db: AsyncSession = Depends(get_session)
+):
+    """Save site branding settings"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_admin:
+        return RedirectResponse('/web/dashboard', status_code=303)
+    
+    try:
+        # Update workspace settings
+        workspace = (await db.execute(
+            select(Workspace).where(Workspace.id == user.workspace_id)
+        )).scalar_one_or_none()
+        
+        if workspace:
+            workspace.site_title = site_title if site_title else None
+            workspace.primary_color = primary_color
+            
+            await db.commit()
+            request.session['success_message'] = 'Site settings saved successfully!'
+        else:
+            request.session['error_message'] = 'Workspace not found'
+            
+    except Exception as e:
+        request.session['error_message'] = f'Failed to save settings: {str(e)}'
+    
+    return RedirectResponse('/web/admin/site-settings', status_code=303)
+
+
+@router.post('/admin/site-settings/upload-logo')
+async def web_admin_site_settings_upload_logo(
+    request: Request,
+    logo: UploadFile = File(...),
+    db: AsyncSession = Depends(get_session)
+):
+    """Upload site logo"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_admin:
+        return RedirectResponse('/web/dashboard', status_code=303)
+    
+    try:
+        # Validate file type
+        allowed_types = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/svg+xml']
+        if logo.content_type not in allowed_types:
+            request.session['error_message'] = 'Invalid file type. Please upload PNG, JPG, GIF, or SVG.'
+            return RedirectResponse('/web/admin/site-settings', status_code=303)
+        
+        # Create uploads directory if it doesn't exist
+        import os
+        uploads_dir = os.path.join(os.getcwd(), 'app', 'uploads', 'branding')
+        os.makedirs(uploads_dir, exist_ok=True)
+        
+        # Generate unique filename
+        import uuid
+        from pathlib import Path
+        file_extension = Path(logo.filename).suffix
+        filename = f"logo_{uuid.uuid4().hex}{file_extension}"
+        file_path = os.path.join(uploads_dir, filename)
+        
+        # Save file
+        with open(file_path, 'wb') as f:
+            content = await logo.read()
+            f.write(content)
+        
+        # Update workspace
+        workspace = (await db.execute(
+            select(Workspace).where(Workspace.id == user.workspace_id)
+        )).scalar_one_or_none()
+        
+        if workspace:
+            # Delete old logo if exists
+            if workspace.logo_url:
+                old_path = os.path.join(os.getcwd(), 'app', workspace.logo_url.lstrip('/'))
+                if os.path.exists(old_path):
+                    os.remove(old_path)
+            
+            workspace.logo_url = f"/uploads/branding/{filename}"
+            await db.commit()
+            request.session['success_message'] = 'Logo uploaded successfully!'
+        
+    except Exception as e:
+        request.session['error_message'] = f'Failed to upload logo: {str(e)}'
+    
+    return RedirectResponse('/web/admin/site-settings', status_code=303)
+
+
+# --------------------------
 # My tasks view
 # --------------------------
 @router.get('/my-tasks', response_class=HTMLResponse)
