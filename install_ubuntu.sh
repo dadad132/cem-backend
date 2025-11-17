@@ -191,14 +191,23 @@ fi
 
 # Initialize database
 print_info "Initializing database..."
-python3 -c "
+cd "$APP_DIR"
+python3 << 'PYEOF'
 import asyncio
 import sys
-sys.path.insert(0, '.')
-from app.core.database import init_models
-asyncio.run(init_models())
-print('Database initialized successfully')
-" || print_info "Database may already be initialized"
+import os
+
+# Change to app directory
+os.chdir('.')
+sys.path.insert(0, os.getcwd())
+
+try:
+    from app.core.database import init_models
+    asyncio.run(init_models())
+    print('Database initialized successfully')
+except Exception as e:
+    print(f'Database initialization skipped or already done: {e}')
+PYEOF
 print_status "Database ready"
 
 # Create systemd service file
