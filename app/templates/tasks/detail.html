@@ -224,7 +224,7 @@
             {% for attachment in attachments_by_comment[comment.id] %}
             <div style="display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.25rem 0.5rem; margin-right: 0.5rem; margin-bottom: 0.5rem; background: white; border: 1px solid #d1d5db; border-radius: 0.25rem; font-size: 0.875rem;">
               <span style="color: #374151;">📄 {{ attachment.filename }} ({{ (attachment.file_size / 1024) | round(1) }} KB)</span>
-              <button onclick="previewAttachment('{{ attachment.id }}', '{{ attachment.filename }}', '{{ attachment.content_type }}')" 
+              <button onclick="previewAttachment({{ attachment.id }}, '{{ attachment.filename | replace("'", "\\'") }}', '{{ attachment.content_type }}')" 
                       style="padding: 0.125rem 0.5rem; background: #3b82f6; color: white; border: none; border-radius: 0.25rem; cursor: pointer; font-size: 0.75rem;">
                 👁️ Preview
               </button>
