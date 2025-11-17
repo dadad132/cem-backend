@@ -216,6 +216,10 @@ print_status "Database ready"
 print_info "Creating systemd service..."
 print_info "Service file: /etc/systemd/system/${SERVICE_NAME}.service"
 
+# Get the actual Python3 path
+PYTHON_PATH=$(which python3)
+print_info "Using Python at: $PYTHON_PATH"
+
 if [ "$EUID" -eq 0 ]; then
     tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null << EOF
 [Unit]
@@ -226,7 +230,7 @@ After=network.target
 Type=simple
 User=$SERVICE_USER
 WorkingDirectory=$APP_DIR
-ExecStart=/usr/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+ExecStart=$PYTHON_PATH -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
 Restart=always
 RestartSec=10
 
@@ -243,7 +247,7 @@ After=network.target
 Type=simple
 User=$SERVICE_USER
 WorkingDirectory=$APP_DIR
-ExecStart=/usr/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+ExecStart=$PYTHON_PATH -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
 Restart=always
 RestartSec=10
 

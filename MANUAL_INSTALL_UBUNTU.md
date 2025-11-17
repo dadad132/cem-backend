@@ -50,6 +50,10 @@ Press Ctrl+C to stop it once you confirm it works.
 
 ### 7. Create systemd service (optional - for auto-start)
 ```bash
+# Get the correct Python path
+PYTHON_PATH=$(which python3)
+echo "Using Python at: $PYTHON_PATH"
+
 sudo tee /etc/systemd/system/crm-backend.service > /dev/null << EOF
 [Unit]
 Description=CRM Backend Service
@@ -59,7 +63,7 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=$HOME/cem-backend
-ExecStart=/usr/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+ExecStart=$PYTHON_PATH -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=10
 
