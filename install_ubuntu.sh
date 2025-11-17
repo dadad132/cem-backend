@@ -92,17 +92,21 @@ if [ -d "$APP_DIR" ]; then
     fi
 fi
 
-# Copy application files
-print_info "Creating application directory..."
-mkdir -p "$APP_DIR"
-
 # Clone from GitHub
 print_info "Cloning from GitHub repository..."
-if [ -d "$APP_DIR" ]; then
-    print_info "Directory exists, using git pull instead..."
+if [ -d "$APP_DIR/.git" ]; then
+    print_info "Git repository exists, updating..."
     cd "$APP_DIR"
-    git pull origin main
+    git fetch origin
+    git reset --hard origin/main
     print_status "Repository updated"
+elif [ -d "$APP_DIR" ]; then
+    print_info "Directory exists but not a git repo, cloning inside..."
+    cd "$APP_DIR"
+    git clone https://github.com/dadad132/cem-backend.git temp_clone
+    mv temp_clone/* temp_clone/.git .
+    rm -rf temp_clone
+    print_status "Repository cloned successfully"
 else
     git clone https://github.com/dadad132/cem-backend.git "$APP_DIR"
     print_status "Repository cloned successfully"
