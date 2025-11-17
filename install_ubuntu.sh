@@ -116,7 +116,7 @@ cd "$APP_DIR"
 
 # Create virtual environment
 print_info "Creating Python virtual environment..."
-python3 -m venv .venv
+python3 -m venv .venv --system-site-packages || python3 -m venv .venv
 print_status "Virtual environment created"
 
 # Activate virtual environment
@@ -124,15 +124,15 @@ print_info "Activating virtual environment..."
 source .venv/bin/activate
 print_status "Virtual environment activated"
 
-# Upgrade pip
-print_info "Upgrading pip..."
-pip install --upgrade pip
+# Upgrade pip in virtual environment
+print_info "Upgrading pip in virtual environment..."
+python -m pip install --upgrade pip
 print_status "Pip upgraded"
 
-# Install Python dependencies
+# Install Python dependencies in virtual environment
 print_info "Installing Python dependencies..."
 if [ -f "requirements.txt" ]; then
-    pip install -r requirements.txt
+    python -m pip install -r requirements.txt
     print_status "Python dependencies installed"
 else
     print_error "requirements.txt not found!"
