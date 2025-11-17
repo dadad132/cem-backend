@@ -15,9 +15,32 @@
                 <div class="inline-block p-4 bg-blue-600 rounded-full mb-4">
                     <i class="fas fa-ticket-alt text-4xl text-white"></i>
                 </div>
-                <h1 class="text-4xl font-bold text-gray-900 mb-2">Submit Support Ticket</h1>
-                <p class="text-gray-600 text-lg">We're here to help! Fill out the form below and we'll get back to you soon.</p>
+                <h1 class="text-4xl font-bold text-gray-900 mb-2">Support Center</h1>
+                <p class="text-gray-600 text-lg">Submit a new ticket or track an existing one</p>
             </div>
+
+            <!-- Action Buttons -->
+            {% if not success %}
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+                <button onclick="showForm('submit')" id="btn-submit"
+                        class="p-6 bg-blue-600 text-white rounded-xl shadow-lg hover:bg-blue-700 transition-all duration-200 flex flex-col items-center gap-3">
+                    <i class="fas fa-plus-circle text-4xl"></i>
+                    <div>
+                        <div class="font-semibold text-lg">Submit a Ticket</div>
+                        <div class="text-sm text-blue-100">Create a new support request</div>
+                    </div>
+                </button>
+                
+                <button onclick="showForm('track')" id="btn-track"
+                        class="p-6 bg-white border-2 border-gray-300 text-gray-700 rounded-xl shadow-lg hover:border-blue-500 hover:text-blue-600 transition-all duration-200 flex flex-col items-center gap-3">
+                    <i class="fas fa-search text-4xl"></i>
+                    <div>
+                        <div class="font-semibold text-lg">Track a Ticket</div>
+                        <div class="text-sm text-gray-500">Check your ticket status</div>
+                    </div>
+                </button>
+            </div>
+            {% endif %}
 
             <!-- Success Message -->
             {% if success %}
@@ -66,7 +89,55 @@
 
             <!-- Form -->
             {% if not success %}
-            <div class="bg-white rounded-xl shadow-xl overflow-hidden">
+            <!-- Ticket Tracking Form (hidden by default) -->
+            <div id="track-form" class="bg-white rounded-xl shadow-xl overflow-hidden mb-6" style="display: none;">
+                <div class="p-8">
+                    <h2 class="text-2xl font-semibold text-gray-900 mb-4 flex items-center">
+                        <i class="fas fa-search text-blue-600 mr-3"></i>
+                        Track Your Ticket
+                    </h2>
+                    <p class="text-gray-600 mb-6">Enter your ticket number and email address to view the status of your support request.</p>
+                    
+                    <form method="post" action="/web/tickets/track">
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700 mb-1">
+                                Ticket Number <span class="text-red-500">*</span>
+                            </label>
+                            <input type="text" name="ticket_number" required
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                   placeholder="TKT-2025-00001">
+                            <p class="text-sm text-gray-500 mt-1">
+                                <i class="fas fa-info-circle mr-1"></i>
+                                This was provided when you submitted your ticket
+                            </p>
+                        </div>
+                        
+                        <div class="mb-6">
+                            <label class="block text-sm font-medium text-gray-700 mb-1">
+                                Email Address <span class="text-red-500">*</span>
+                            </label>
+                            <input type="email" name="email" required
+                                   class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                   placeholder="john.doe@example.com">
+                            <p class="text-sm text-gray-500 mt-1">
+                                <i class="fas fa-info-circle mr-1"></i>
+                                Use the same email you submitted the ticket with
+                            </p>
+                        </div>
+                        
+                        <div class="flex justify-end">
+                            <button type="submit"
+                                    class="px-8 py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 shadow-lg hover:shadow-xl transition-all duration-200 flex items-center gap-2">
+                                <i class="fas fa-search"></i>
+                                Track Ticket
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Submit Ticket Form -->
+            <div id="submit-form" class="bg-white rounded-xl shadow-xl overflow-hidden">
                 <form method="post" action="/web/tickets/guest" class="p-8" autocomplete="off">
                     <!-- Personal Information -->
                     <div class="mb-8">
@@ -204,5 +275,31 @@
             {% endif %}
         </div>
     </div>
+
+    <script>
+        function showForm(type) {
+            const submitForm = document.getElementById('submit-form');
+            const trackForm = document.getElementById('track-form');
+            const btnSubmit = document.getElementById('btn-submit');
+            const btnTrack = document.getElementById('btn-track');
+            
+            if (type === 'submit') {
+                submitForm.style.display = 'block';
+                trackForm.style.display = 'none';
+                btnSubmit.className = 'p-6 bg-blue-600 text-white rounded-xl shadow-lg hover:bg-blue-700 transition-all duration-200 flex flex-col items-center gap-3';
+                btnTrack.className = 'p-6 bg-white border-2 border-gray-300 text-gray-700 rounded-xl shadow-lg hover:border-blue-500 hover:text-blue-600 transition-all duration-200 flex flex-col items-center gap-3';
+            } else {
+                submitForm.style.display = 'none';
+                trackForm.style.display = 'block';
+                btnTrack.className = 'p-6 bg-blue-600 text-white rounded-xl shadow-lg hover:bg-blue-700 transition-all duration-200 flex flex-col items-center gap-3';
+                btnSubmit.className = 'p-6 bg-white border-2 border-gray-300 text-gray-700 rounded-xl shadow-lg hover:border-blue-500 hover:text-blue-600 transition-all duration-200 flex flex-col items-center gap-3';
+            }
+        }
+        
+        // Show submit form by default
+        document.addEventListener('DOMContentLoaded', function() {
+            showForm('submit');
+        });
+    </script>
 </body>
 </html>
