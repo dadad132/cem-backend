@@ -193,38 +193,64 @@ class UpdateManager:
                 logger.info("Running migration scripts...")
                 for migration_script in sorted(migrations_dir.glob("migrate_*.py")):
                     logger.info(f"Running {migration_script.name}...")
-                    if venv_python.exists():
-                        subprocess.run(
-                            [str(venv_python), str(migration_script)],
-                            cwd=self.app_dir,
-                            capture_output=True,
-                            text=True
-                        )
-                    else:
-                        subprocess.run(
-                            ["python3", str(migration_script)],
-                            cwd=self.app_dir,
-                            capture_output=True,
-                            text=True
-                        )
+                    try:
+                        if venv_python.exists():
+                            result = subprocess.run(
+                                [str(venv_python), str(migration_script)],
+                                cwd=self.app_dir,
+                                capture_output=True,
+                                text=True,
+                                timeout=30
+                            )
+                        else:
+                            result = subprocess.run(
+                                ["python3", str(migration_script)],
+                                cwd=self.app_dir,
+                                capture_output=True,
+                                text=True,
+                                timeout=30
+                            )
+                        
+                        if result.returncode == 0:
+                            logger.info(f"✓ {migration_script.name} completed")
+                        else:
+                            logger.warning(f"⚠ {migration_script.name} returned code {result.returncode}")
+                            if result.stderr:
+                                logger.warning(f"Error: {result.stderr}")
+                    except Exception as e:
+                        logger.error(f"Failed to run {migration_script.name}: {e}")
             
             # Run standalone migration scripts in root directory
             for migration_script in sorted(self.app_dir.glob("add_*.py")):
                 logger.info(f"Running {migration_script.name}...")
-                if venv_python.exists():
-                    subprocess.run(
-                        [str(venv_python), str(migration_script)],
-                        cwd=self.app_dir,
-                        capture_output=True,
-                        text=True
-                    )
-                else:
-                    subprocess.run(
-                        ["python3", str(migration_script)],
-                        cwd=self.app_dir,
-                        capture_output=True,
-                        text=True
-                    )
+                try:
+                    if venv_python.exists():
+                        result = subprocess.run(
+                            [str(venv_python), str(migration_script)],
+                            cwd=self.app_dir,
+                            capture_output=True,
+                            text=True,
+                            timeout=30
+                        )
+                    else:
+                        result = subprocess.run(
+                            ["python3", str(migration_script)],
+                            cwd=self.app_dir,
+                            capture_output=True,
+                            text=True,
+                            timeout=30
+                        )
+                    
+                    if result.returncode == 0:
+                        logger.info(f"✓ {migration_script.name} completed successfully")
+                        if result.stdout:
+                            logger.info(f"Output: {result.stdout}")
+                    else:
+                        logger.warning(f"⚠ {migration_script.name} returned code {result.returncode}")
+                        if result.stderr:
+                            logger.warning(f"Error: {result.stderr}")
+                except Exception as e:
+                    logger.error(f"Failed to run {migration_script.name}: {e}")
             
             # Ensure database schema is up to date
             logger.info("Updating database schema...")
