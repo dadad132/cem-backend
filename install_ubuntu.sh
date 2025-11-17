@@ -39,9 +39,16 @@ print_info() {
 
 # Check if running as root
 if [ "$EUID" -eq 0 ]; then 
-    print_error "Please do not run this script as root or with sudo"
-    echo "Run as your regular user: ./install_ubuntu.sh"
-    exit 1
+    print_info "Running as root - setting APP_DIR to /opt/crm-backend"
+    APP_DIR="/opt/$APP_NAME"
+    # Use a regular user for service if possible
+    if [ -z "$SUDO_USER" ]; then
+        SERVICE_USER="www-data"
+    else
+        SERVICE_USER="$SUDO_USER"
+    fi
+else
+    SERVICE_USER="$USER"
 fi
 
 print_info "Starting installation process..."
@@ -187,7 +194,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=$USER
+User=$SERVICE_USER
 WorkingDirectory=$APP_DIR
 Environment="PATH=$APP_DIR/.venv/bin"
 ExecStart=$APP_DIR/.venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
