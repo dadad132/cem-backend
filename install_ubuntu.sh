@@ -196,7 +196,7 @@ fi
 
 # Initialize database
 print_info "Initializing database..."
-python3 -c "
+.venv/bin/python -c "
 import asyncio
 import sys
 sys.path.insert(0, '.')
