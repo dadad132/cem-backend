@@ -7,7 +7,7 @@ import calendar as pycalendar
 import os
 import uuid
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, File, UploadFile, Query
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, File, UploadFile, Query, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -4836,9 +4836,12 @@ async def web_tickets_add_comment(
     ticket_id: int,
     content: str = Form(...),
     is_internal: bool = Form(False),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: AsyncSession = Depends(get_session)
 ):
     """Add comment to ticket"""
+    from fastapi import BackgroundTasks
+    
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
@@ -4937,11 +4940,11 @@ Thank you.
     if not is_internal and ticket.guest_email:
         print(f"[DEBUG] Triggering email notification for ticket #{ticket.ticket_number} to {ticket.guest_email}")
         print(f"[DEBUG] is_internal={is_internal}, guest_email={ticket.guest_email}")
-        import asyncio
-        # Pass ticket details instead of ticket object to avoid session issues
-        asyncio.create_task(send_ticket_comment_email_background(
+        # Use FastAPI BackgroundTasks to ensure task completion
+        background_tasks.add_task(
+            send_ticket_comment_email_background,
             ticket.id, ticket.workspace_id, content, user_id
-        ))
+        )
     else:
         print(f"[DEBUG] NOT sending email: is_internal={is_internal}, guest_email={ticket.guest_email}")
     
