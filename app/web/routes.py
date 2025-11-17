@@ -2063,7 +2063,7 @@ async def web_admin_debug_settings(request: Request, db: AsyncSession = Depends(
     })
 
 
-@router.get('/admin/email-settings/comment-logs')
+@router.get('/admin/email-settings/comment-logs', response_class=HTMLResponse)
 async def web_admin_comment_logs(request: Request, db: AsyncSession = Depends(get_session)):
     """List all comment email log files"""
     user_id = request.session.get('user_id')
@@ -2075,19 +2075,22 @@ async def web_admin_comment_logs(request: Request, db: AsyncSession = Depends(ge
         return RedirectResponse('/web/dashboard', status_code=303)
     
     from pathlib import Path
+    from datetime import datetime
     log_dir = Path("logs/comment_emails")
     
     logs = []
     if log_dir.exists():
         for log_file in sorted(log_dir.glob("*.log"), reverse=True):
+            stat = log_file.stat()
             logs.append({
                 'name': log_file.name,
-                'size': log_file.stat().st_size,
-                'modified': log_file.stat().st_mtime
+                'size': stat.st_size,
+                'modified': stat.st_mtime
             })
     
     return enhanced_template_response(request, 'admin/comment_logs.html', {
-        'logs': logs
+        'logs': logs,
+        'user': user
     })
 
 
