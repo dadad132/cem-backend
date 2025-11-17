@@ -2063,6 +2063,60 @@ async def web_admin_debug_settings(request: Request, db: AsyncSession = Depends(
     })
 
 
+@router.get('/admin/email-settings/comment-logs')
+async def web_admin_comment_logs(request: Request, db: AsyncSession = Depends(get_session)):
+    """List all comment email log files"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_admin:
+        return RedirectResponse('/web/dashboard', status_code=303)
+    
+    from pathlib import Path
+    log_dir = Path("logs/comment_emails")
+    
+    logs = []
+    if log_dir.exists():
+        for log_file in sorted(log_dir.glob("*.log"), reverse=True):
+            logs.append({
+                'name': log_file.name,
+                'size': log_file.stat().st_size,
+                'modified': log_file.stat().st_mtime
+            })
+    
+    return enhanced_template_response(request, 'admin/comment_logs.html', {
+        'logs': logs
+    })
+
+
+@router.get('/admin/email-settings/comment-logs/{filename}')
+async def web_admin_download_comment_log(filename: str, request: Request, db: AsyncSession = Depends(get_session)):
+    """Download a specific comment email log file"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return JSONResponse({'success': False, 'error': 'Not authenticated'})
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_admin:
+        return JSONResponse({'success': False, 'error': 'Admin access required'})
+    
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    
+    log_file = Path("logs/comment_emails") / filename
+    
+    # Security: prevent path traversal
+    if not log_file.is_relative_to(Path("logs/comment_emails")):
+        return JSONResponse({'success': False, 'error': 'Invalid file path'})
+    
+    if not log_file.exists():
+        return JSONResponse({'success': False, 'error': 'File not found'})
+    
+    return FileResponse(log_file, filename=filename, media_type='text/plain')
+
+
 @router.get('/admin/email-settings/preview-inbox')
 async def web_admin_preview_inbox(request: Request, db: AsyncSession = Depends(get_session)):
     """Preview inbox emails without processing them"""
@@ -5046,9 +5100,25 @@ async def web_tickets_add_comment(
     """Add comment to ticket"""
     from fastapi import BackgroundTasks
     import logging
-    logger = logging.getLogger(__name__)
+    from datetime import datetime
+    from pathlib import Path
     
+    logger = logging.getLogger(__name__)
     logger.warning(f"🔔 COMMENT: Received comment for ticket {ticket_id}, is_internal={is_internal}")
+    
+    # Create detailed log file
+    log_dir = Path("logs/comment_emails")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"comment_{ticket_id}_{timestamp}.log"
+    
+    def write_log(message: str):
+        """Write to both logger and file"""
+        logger.warning(message)
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat()} - {message}\n")
+    
+    write_log(f"🔔 COMMENT SUBMITTED: ticket_id={ticket_id}, is_internal={is_internal}")
     
     user_id = request.session.get('user_id')
     if not user_id:
@@ -5059,10 +5129,14 @@ async def web_tickets_add_comment(
     # Verify ticket exists
     ticket = (await db.execute(select(Ticket).where(Ticket.id == ticket_id))).scalar_one_or_none()
     if not ticket:
+        write_log("❌ TICKET NOT FOUND")
         return RedirectResponse('/web/tickets', status_code=303)
+    
+    write_log(f"✓ Ticket found: #{ticket.ticket_number}, status={ticket.status}, is_guest={ticket.is_guest}, guest_email={ticket.guest_email}")
     
     # Check if ticket is closed
     if ticket.status == 'closed':
+        write_log("❌ TICKET IS CLOSED - Cannot add comment")
         # Get user info
         user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
         
@@ -5144,35 +5218,45 @@ Thank you.
     await db.commit()
     await db.refresh(comment)
     
+    write_log(f"✓ Comment added successfully, ID={comment.id}")
+    
     # Send email notification to client in background (if not internal comment)
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.warning(f"📧 EMAIL CHECK: is_internal={is_internal}, guest_email='{ticket.guest_email}', is_guest={ticket.is_guest}")
+    write_log(f"📧 EMAIL CHECK: is_internal={is_internal}, guest_email='{ticket.guest_email}', is_guest={ticket.is_guest}")
     if not is_internal and ticket.guest_email:
-        logger.warning(f"✅ SENDING EMAIL to {ticket.guest_email} for ticket #{ticket.ticket_number}")
+        write_log(f"✅ WILL SEND EMAIL to {ticket.guest_email} for ticket #{ticket.ticket_number}")
         
         # Send email directly (moved to async task that won't block response)
         try:
-            await send_ticket_comment_email(ticket, content, user_id, db)
+            await send_ticket_comment_email(ticket, content, user_id, db, write_log)
+            write_log("✅ Email sent successfully")
         except Exception as e:
-            logger.error(f"❌ EMAIL FAILED: {e}")
+            write_log(f"❌ EMAIL FAILED: {e}")
+            import traceback
+            write_log(f"Traceback: {traceback.format_exc()}")
             # Don't fail the request if email fails
     else:
-        logger.warning(f"❌ NOT SENDING EMAIL: is_internal={is_internal}, guest_email={ticket.guest_email}")
+        write_log(f"❌ NOT SENDING EMAIL: is_internal={is_internal}, guest_email='{ticket.guest_email}'")
     
+    write_log(f"✓ COMPLETE - Log saved to: {log_file}")
     return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
 
 
 
-async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, db: AsyncSession):
+async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, db: AsyncSession, write_log=None):
     """Send email notification in background (non-blocking)"""
+    def log(msg):
+        if write_log:
+            write_log(msg)
+        else:
+            print(msg)
+    
     try:
-        print(f"[EMAIL] send_ticket_comment_email called for ticket #{ticket.ticket_number}")
+        log(f"[EMAIL] send_ticket_comment_email called for ticket #{ticket.ticket_number}")
         
         # Get user info
         user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-        print(f"[EMAIL] User: {user.username if user else 'None'}")
+        log(f"[EMAIL] User: {user.username if user else 'None'}")
         
         # Get email settings (always needed for SMTP connection)
         from app.models.email_settings import EmailSettings
@@ -5182,16 +5266,16 @@ async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, 
         email_settings = settings_result.scalar_one_or_none()
         
         if not email_settings:
-            print(f"❌ No email settings configured for workspace {ticket.workspace_id}")
+            log(f"❌ No email settings configured for workspace {ticket.workspace_id}")
             return
         
-        print(f"[EMAIL] SMTP settings found: {email_settings.smtp_host}:{email_settings.smtp_port}")
+        log(f"[EMAIL] SMTP settings found: {email_settings.smtp_host}:{email_settings.smtp_port}")
         
         # Determine which email to send from
         from_email = email_settings.smtp_from_email
         from_name = email_settings.smtp_from_name or "Support Team"
         
-        print(f"[EMAIL] Default from: {from_name} <{from_email}>")
+        log(f"[EMAIL] Default from: {from_name} <{from_email}>")
         
         # Check if ticket is related to a project with support email
         if ticket.related_project_id:
@@ -5203,11 +5287,11 @@ async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, 
             if project and project.support_email:
                 from_email = project.support_email
                 from_name = f"{project.name} Support"
-                print(f"[EMAIL] Using project email: {from_name} <{from_email}>")
+                log(f"[EMAIL] Using project email: {from_name} <{from_email}>")
         
         # Send email if we have a sender address
         if from_email:
-            print(f"[EMAIL] Preparing to send email to {ticket.guest_email}")
+            log(f"[EMAIL] Preparing to send email to {ticket.guest_email}")
             
             import smtplib
             from email.mime.text import MIMEText
@@ -5263,26 +5347,26 @@ async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, 
             
             msg.attach(MIMEText(email_body, 'html'))
             
-            print(f"[EMAIL] Email message prepared, attempting to send via SMTP...")
+            log(f"[EMAIL] Email message prepared, attempting to send via SMTP...")
             
             # Send email in thread pool to avoid blocking
             import concurrent.futures
             loop = asyncio.get_event_loop()
             
             def send_email():
-                print(f"[EMAIL] Connecting to SMTP server {email_settings.smtp_host}:{email_settings.smtp_port}")
+                log(f"[EMAIL] Connecting to SMTP server {email_settings.smtp_host}:{email_settings.smtp_port}")
                 if email_settings.smtp_use_tls:
                     server = smtplib.SMTP(email_settings.smtp_host, email_settings.smtp_port)
                     server.starttls()
                 else:
                     server = smtplib.SMTP_SSL(email_settings.smtp_host, email_settings.smtp_port)
                 
-                print(f"[EMAIL] Logging in as {email_settings.smtp_username}")
+                log(f"[EMAIL] Logging in as {email_settings.smtp_username}")
                 server.login(email_settings.smtp_username, email_settings.smtp_password)
-                print(f"[EMAIL] Sending message...")
+                log(f"[EMAIL] Sending message...")
                 server.send_message(msg)
                 server.quit()
-                print(f"[EMAIL] SMTP connection closed successfully")
+                log(f"[EMAIL] SMTP connection closed successfully")
             
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 await loop.run_in_executor(pool, send_email)
@@ -5300,9 +5384,11 @@ async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, 
             db.add(processed)
             await db.commit()
             
-            print(f"✅ Sent email notification to {ticket.guest_email} from {from_email} with Message-ID: {message_id}")
+            log(f"✅ Sent email notification to {ticket.guest_email} from {from_email} with Message-ID: {message_id}")
     except Exception as e:
-        print(f"❌ Error sending email notification: {e}")
+        log(f"❌ Error sending email notification: {e}")
+        import traceback
+        log(f"Traceback: {traceback.format_exc()}")
         # Don't fail if email fails
 
 
