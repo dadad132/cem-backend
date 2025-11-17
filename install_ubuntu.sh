@@ -187,7 +187,10 @@ print_status "Database ready"
 
 # Create systemd service file
 print_info "Creating systemd service..."
-sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null << EOF
+print_info "Service file: /etc/systemd/system/${SERVICE_NAME}.service"
+
+if [ "$EUID" -eq 0 ]; then
+    tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null << EOF
 [Unit]
 Description=CRM Backend Service
 After=network.target
@@ -204,7 +207,33 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
-print_status "Systemd service created"
+else
+    sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null << EOF
+[Unit]
+Description=CRM Backend Service
+After=network.target
+
+[Service]
+Type=simple
+User=$SERVICE_USER
+WorkingDirectory=$APP_DIR
+Environment="PATH=$APP_DIR/.venv/bin"
+ExecStart=$APP_DIR/.venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+
+# Verify service file was created
+if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
+    print_status "Systemd service file created successfully"
+else
+    print_error "Failed to create systemd service file!"
+    exit 1
+fi
 
 # Reload systemd
 print_info "Reloading systemd daemon..."
