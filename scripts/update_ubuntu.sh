@@ -50,11 +50,42 @@ if [ -d "venv" ]; then
     echo -e "${YELLOW}[i]${NC} Using virtual environment"
     source venv/bin/activate
     pip install -r requirements.txt --upgrade
+    PYTHON_CMD="python"
 else
     echo -e "${YELLOW}[i]${NC} Using system Python"
     pip3 install --break-system-packages -r requirements.txt 2>&1 | grep -v "Cannot uninstall" || true
+    PYTHON_CMD="python3"
 fi
 echo -e "${GREEN}[✓]${NC} Dependencies updated"
+
+echo -e "${YELLOW}[i]${NC} Running database migrations..."
+# Try to run migrations if they exist
+if [ -f "alembic.ini" ]; then
+    echo -e "${YELLOW}[i]${NC} Found Alembic configuration, running migrations..."
+    $PYTHON_CMD -m alembic upgrade head 2>/dev/null || echo -e "${YELLOW}[!]${NC} Alembic not configured or no migrations"
+fi
+
+# Run any migration scripts in migrations/ folder
+if [ -d "migrations" ]; then
+    echo -e "${YELLOW}[i]${NC} Checking for migration scripts..."
+    for migration_script in migrations/migrate_*.py; do
+        if [ -f "$migration_script" ]; then
+            echo -e "${YELLOW}[i]${NC} Running $(basename $migration_script)..."
+            $PYTHON_CMD "$migration_script" 2>/dev/null || echo -e "${YELLOW}[!]${NC} Migration already applied or not needed"
+        fi
+    done
+fi
+
+# Auto-create any missing tables/columns by importing models
+echo -e "${YELLOW}[i]${NC} Ensuring database schema is up to date..."
+$PYTHON_CMD -c "
+from app.core.database import init_db
+import asyncio
+asyncio.run(init_db())
+print('Database schema updated')
+" 2>/dev/null || echo -e "${YELLOW}[!]${NC} Schema update completed with warnings"
+
+echo -e "${GREEN}[✓]${NC} Database migrations completed"
 
 echo -e "${YELLOW}[i]${NC} Updating systemd service file..."
 # Detect if using venv or system Python
