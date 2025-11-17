@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{{ title or 'Kyotech Project Tracker' }}</title>
+    <title>{{ title or (workspace.site_title if workspace and workspace.site_title else 'Kyotech Project Tracker') }}</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://unpkg.com/htmx.org@1.9.12"></script>
@@ -20,10 +20,10 @@
         transform: translateX(2px);
       }
       .gradient-primary {
-        background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%);
+        background: linear-gradient(135deg, {{ workspace.primary_color if workspace and workspace.primary_color else '#dc2626' }} 0%, {{ workspace.primary_color if workspace and workspace.primary_color else '#991b1b' }} 100%);
       }
       .gradient-accent {
-        background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
+        background: linear-gradient(135deg, {{ workspace.primary_color if workspace and workspace.primary_color else '#ef4444' }} 0%, {{ workspace.primary_color if workspace and workspace.primary_color else '#b91c1c' }} 100%);
       }
       
       /* Mobile sidebar overlay */
@@ -62,15 +62,22 @@
              class="fixed left-0 top-0 h-screen w-[280px] border-r border-gray-200 bg-gradient-to-b from-gray-900 to-gray-800 shadow-2xl p-6 flex flex-col gap-6 overflow-y-auto z-50 lg:translate-x-0">
         <!-- Logo -->
         <div class="flex items-center gap-3 pb-4 border-b border-gray-700">
+          {% if workspace and workspace.logo_url %}
+          <div class="w-10 h-10 bg-white rounded-lg flex items-center justify-center shadow-lg p-1">
+            <img src="{{ workspace.logo_url }}" alt="Logo" class="w-full h-full object-contain">
+          </div>
+          {% else %}
           <div class="w-10 h-10 bg-white rounded-lg flex items-center justify-center shadow-lg p-1.5">
-            <!-- Kyotech Logo Placeholder - Replace with actual logo -->
             <svg class="w-full h-full text-red-600" fill="currentColor" viewBox="0 0 24 24">
               <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5zm0 18c-3.86-.96-7-5.23-7-9V8.3l7-3.5 7 3.5V11c0 3.77-3.14 8.04-7 9z"/>
               <path d="M12 6l-5 2.5v4.5c0 2.77 1.93 5.37 5 6 3.07-.63 5-3.23 5-6v-4.5L12 6zm3 6c0 1.94-1.29 3.75-3 4.19-1.71-.44-3-2.25-3-4.19V9.4l3-1.5 3 1.5V12z"/>
             </svg>
           </div>
+          {% endif %}
           <div>
-            <h1 class="text-xl font-bold text-white tracking-tight">Kyotech</h1>
+            <h1 class="text-xl font-bold text-white tracking-tight">
+              {{ workspace.site_title if workspace and workspace.site_title else 'Kyotech' }}
+            </h1>
             <p class="text-xs text-gray-400 font-medium">Project Tracker</p>
           </div>
         </div>
