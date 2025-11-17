@@ -407,6 +407,34 @@ Auto-created from email support request"""
         print(f"[DEBUG] ❌ No ticket number found in subject")
         return None
     
+    async def find_ticket_by_sender(self, db: AsyncSession, sender_email: str) -> Optional[Ticket]:
+        """
+        Last resort fallback: Find most recent open ticket from this sender
+        Only matches if there's exactly ONE open ticket from this email
+        """
+        print(f"[DEBUG] Trying to find ticket by sender email: '{sender_email}'")
+        
+        # Search for open tickets from this email (not closed)
+        result = await db.execute(
+            select(Ticket).where(
+                Ticket.guest_email == sender_email,
+                Ticket.workspace_id == self.workspace_id,
+                Ticket.status.in_(['new', 'open', 'pending', 'in_progress'])
+            ).order_by(Ticket.created_at.desc())
+        )
+        tickets = result.scalars().all()
+        
+        if len(tickets) == 1:
+            # Only auto-match if there's exactly one open ticket
+            print(f"[DEBUG] ✅ Found single open ticket #{tickets[0].ticket_number} from sender")
+            return tickets[0]
+        elif len(tickets) > 1:
+            print(f"[DEBUG] Found {len(tickets)} open tickets from sender - ambiguous, creating new ticket")
+        else:
+            print(f"[DEBUG] No open tickets found from sender")
+        
+        return None
+    
     async def mark_email_processed(
         self, 
         db: AsyncSession, 
@@ -715,6 +743,10 @@ Auto-created from email support request"""
                     if not existing_ticket:
                         existing_ticket = await self.find_ticket_by_subject(db, subject)
                     
+                    # If still not found, try by sender email (last resort)
+                    if not existing_ticket:
+                        existing_ticket = await self.find_ticket_by_sender(db, sender_email)
+                    
                     # Find project by support email
                     project = await self.find_project_by_email(db, to_email)
                     
@@ -821,6 +853,11 @@ Auto-created from email support request"""
                     if not existing_ticket:
                         print(f"[IMAP DEBUG] Trying subject line fallback...")
                         existing_ticket = await self.find_ticket_by_subject(db, subject)
+                    
+                    # If still not found, try by sender email (last resort)
+                    if not existing_ticket:
+                        print(f"[IMAP DEBUG] Trying sender email fallback...")
+                        existing_ticket = await self.find_ticket_by_sender(db, sender_email)
                     
                     # Find project by support email
                     project = await self.find_project_by_email(db, to_email)
