@@ -37,12 +37,19 @@ echo -e "${GREEN}[✓]${NC} Code ready"
 # Install system dependencies
 echo -e "${YELLOW}[i]${NC} Installing system dependencies..."
 sudo apt update
-sudo apt install -y python3 python3-pip git sqlite3
+sudo apt install -y python3 python3-pip python3-venv git sqlite3
 echo -e "${GREEN}[✓]${NC} System dependencies installed"
 
-# Install Python packages
+# Create virtual environment
+echo -e "${YELLOW}[i]${NC} Creating virtual environment..."
+python3 -m venv venv
+echo -e "${GREEN}[✓]${NC} Virtual environment created"
+
+# Install Python packages in venv
 echo -e "${YELLOW}[i]${NC} Installing Python packages..."
-pip3 install --break-system-packages sqlmodel aiosqlite python-multipart python-jose passlib bcrypt httpx email-validator python-dotenv pydantic-settings jinja2 2>&1 | grep -v "Cannot uninstall" || true
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
 echo -e "${GREEN}[✓]${NC} Python packages installed"
 
 # Create directories
@@ -67,11 +74,7 @@ else
     echo -e "${YELLOW}[i]${NC} .env file already exists"
 fi
 
-# Get Python path
-PYTHON_PATH=$(which python3)
-echo -e "${YELLOW}[i]${NC} Using Python at: $PYTHON_PATH"
-
-# Create systemd service
+# Create systemd service with venv
 echo -e "${YELLOW}[i]${NC} Creating systemd service..."
 sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null << EOF
 [Unit]
@@ -82,7 +85,7 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=$APP_DIR
-ExecStart=$PYTHON_PATH -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+ExecStart=$APP_DIR/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
 Restart=always
 RestartSec=10
 
