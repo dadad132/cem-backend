@@ -79,14 +79,10 @@
   <div class="bg-white rounded-lg border border-slate-200 p-4">
     <h3 class="font-semibold mb-3">Create New Backup</h3>
     <form method="post" action="/web/admin/backups/create" class="space-y-3">
-      <div class="flex items-center gap-2">
-        <input type="checkbox" id="include_attachments" name="include_attachments" checked class="rounded">
-        <label for="include_attachments" class="text-sm text-slate-700">Include attachments (comments, chat messages)</label>
-      </div>
       <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 w-full">
-        💾 Create Backup Now
+        💾 Create Full Backup Now
       </button>
-      <p class="text-xs text-slate-500">Creates a manual backup that will be kept forever. Includes database and all attachments if checked.</p>
+      <p class="text-xs text-slate-500">Creates a complete backup with database and all attachments. Manual backups are kept forever.</p>
     </form>
   </div>
   

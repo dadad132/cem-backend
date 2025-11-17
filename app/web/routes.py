@@ -1572,8 +1572,7 @@ async def web_admin_backups(request: Request, db: AsyncSession = Depends(get_ses
 
 @router.post('/admin/backups/create')
 async def web_admin_backup_create(
-    request: Request, 
-    include_attachments: Optional[str] = Form(None),
+    request: Request,
     db: AsyncSession = Depends(get_session)
 ):
     user_id = request.session.get('user_id')
@@ -1585,10 +1584,8 @@ async def web_admin_backup_create(
         raise HTTPException(status_code=403, detail="Admin access required")
     
     from app.core.backup import backup_manager
-    # Mark as manual backup - won't be auto-deleted
-    # Checkbox sends 'on' when checked, None when unchecked
-    with_attachments = include_attachments == 'on'
-    backup_file = backup_manager.create_backup(is_manual=True, include_attachments=with_attachments)
+    # Always create full backup with attachments
+    backup_file = backup_manager.create_backup(is_manual=True, include_attachments=True)
     
     if backup_file:
         return RedirectResponse('/web/admin/backups?success=backup_created', status_code=303)
