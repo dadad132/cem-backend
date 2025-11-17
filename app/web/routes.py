@@ -2218,12 +2218,21 @@ async def web_admin_site_settings(
         return RedirectResponse('/web/dashboard', status_code=303)
     
     # Get workspace settings
-    workspace = (await db.execute(
-        select(Workspace).where(Workspace.id == user.workspace_id)
-    )).scalar_one_or_none()
+    try:
+        workspace = (await db.execute(
+            select(Workspace).where(Workspace.id == user.workspace_id)
+        )).scalar_one_or_none()
+    except Exception as e:
+        # If columns don't exist yet, show migration required message
+        if "no such column" in str(e):
+            error_message = "Database migration required. Please run: python add_site_settings_columns.py"
+            workspace = None
+        else:
+            raise
     
     success_message = request.session.pop('success_message', None)
-    error_message = request.session.pop('error_message', None)
+    if not error_message:
+        error_message = request.session.pop('error_message', None)
     
     return templates.TemplateResponse('admin/site_settings.html', {
         'request': request,
@@ -2266,7 +2275,10 @@ async def web_admin_site_settings_save(
             request.session['error_message'] = 'Workspace not found'
             
     except Exception as e:
-        request.session['error_message'] = f'Failed to save settings: {str(e)}'
+        if "no such column" in str(e):
+            request.session['error_message'] = 'Database migration required. Run: python add_site_settings_columns.py'
+        else:
+            request.session['error_message'] = f'Failed to save settings: {str(e)}'
     
     return RedirectResponse('/web/admin/site-settings', status_code=303)
 
@@ -2317,7 +2329,7 @@ async def web_admin_site_settings_upload_logo(
         
         if workspace:
             # Delete old logo if exists
-            if workspace.logo_url:
+            if hasattr(workspace, 'logo_url') and workspace.logo_url:
                 old_path = os.path.join(os.getcwd(), 'app', workspace.logo_url.lstrip('/'))
                 if os.path.exists(old_path):
                     os.remove(old_path)
@@ -2327,7 +2339,10 @@ async def web_admin_site_settings_upload_logo(
             request.session['success_message'] = 'Logo uploaded successfully!'
         
     except Exception as e:
-        request.session['error_message'] = f'Failed to upload logo: {str(e)}'
+        if "no such column" in str(e):
+            request.session['error_message'] = 'Database migration required. Run: python add_site_settings_columns.py'
+        else:
+            request.session['error_message'] = f'Failed to upload logo: {str(e)}'
     
     return RedirectResponse('/web/admin/site-settings', status_code=303)
 
