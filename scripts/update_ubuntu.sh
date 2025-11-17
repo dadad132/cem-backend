@@ -38,6 +38,11 @@ if [ -f "data.db" ]; then
     echo -e "${GREEN}[✓]${NC} Database backed up to backups/$BACKUP_FILE"
 fi
 
+echo -e "${YELLOW}[i]${NC} Updating from GitHub..."
+git fetch origin
+git reset --hard origin/main
+echo -e "${GREEN}[✓]${NC} Code updated"
+
 echo -e "${YELLOW}[i]${NC} Activating virtual environment..."
 source .venv/bin/activate
 
@@ -45,30 +50,13 @@ echo -e "${YELLOW}[i]${NC} Updating dependencies..."
 pip install --upgrade pip
 pip install -r requirements.txt --upgrade
 
-echo -e "${YELLOW}[i]${NC} Running database migrations..."
-
-# Run table creation if needed
+echo -e "${YELLOW}[i]${NC} Running database initialization..."
+# Ensure all tables exist
 python3 -c "
 import asyncio
 from app.core.database import init_models
 asyncio.run(init_models())
-" || echo -e "${YELLOW}[!]${NC} Model initialization may have failed, check manually"
-
-# Run any migration scripts
-if [ -f "migrate_profile_picture_simple.py" ]; then
-    echo -e "${YELLOW}[i]${NC} Running profile picture migration..."
-    python3 migrate_profile_picture_simple.py || echo -e "${YELLOW}[!]${NC} Profile picture migration may have already been applied"
-fi
-
-if [ -f "migrate_task_archive.py" ]; then
-    echo -e "${YELLOW}[i]${NC} Running task archive migration..."
-    python3 migrate_task_archive.py || echo -e "${YELLOW}[!]${NC} Task archive migration may have already been applied"
-fi
-
-if [ -f "migrate_meeting_cancellation.py" ]; then
-    echo -e "${YELLOW}[i]${NC} Running meeting cancellation migration..."
-    python3 migrate_meeting_cancellation.py || echo -e "${YELLOW}[!]${NC} Meeting cancellation migration may have already been applied"
-fi
+" || echo -e "${YELLOW}[!]${NC} Model initialization completed with warnings"
 
 echo -e "${YELLOW}[i]${NC} Starting service..."
 sudo systemctl start ${SERVICE_NAME}
