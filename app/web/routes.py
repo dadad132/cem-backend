@@ -45,11 +45,32 @@ def enhanced_template_response(name: str, context: dict, *args, **kwargs):
     """Enhanced TemplateResponse that adds workspace if user is logged in"""
     # Add workspace to context if not already present and user is logged in
     if 'workspace' not in context and 'user' in context and context['user']:
+        # Get workspace from user synchronously since we're already in a route handler
+        # Note: This is a fallback - routes should ideally pass workspace explicitly
+        from sqlalchemy import select
+        from app.models.workspace import Workspace
+        import asyncio
+        
+        async def get_workspace():
+            from app.core.deps import get_session
+            async for db in get_session():
+                try:
+                    workspace = (await db.execute(
+                        select(Workspace).where(Workspace.id == context['user'].workspace_id)
+                    )).scalar_one_or_none()
+                    return workspace
+                finally:
+                    break
+            return None
+        
         try:
-            # Workspace should be passed explicitly by routes
-            # This is just a fallback - routes should pass it
-            pass
-        except:
+            # Run async function to get workspace
+            loop = asyncio.get_event_loop()
+            workspace = loop.run_until_complete(get_workspace())
+            if workspace:
+                context['workspace'] = workspace
+        except Exception as e:
+            # If workspace fetch fails, continue without it
             pass
     return _original_template_response(name, context, *args, **kwargs)
 
