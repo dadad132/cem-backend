@@ -3,10 +3,12 @@ from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from starlette.middleware.sessions import SessionMiddleware
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
+import os
 
 from app.core.config import get_settings
 from app.core.database import lifespan, get_session
@@ -41,6 +43,11 @@ app.add_middleware(SessionMiddleware, secret_key=settings.secret_key)
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+# Mount uploads directory for serving uploaded files (logos, attachments, etc.)
+uploads_path = os.path.join(BASE_DIR, "uploads")
+os.makedirs(uploads_path, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=uploads_path), name="uploads")
 
 
 @app.get("/health")
