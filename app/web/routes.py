@@ -5078,25 +5078,36 @@ Thank you.
     if not is_internal and ticket.guest_email:
         print(f"[DEBUG] Triggering email notification for ticket #{ticket.ticket_number} to {ticket.guest_email}")
         print(f"[DEBUG] is_internal={is_internal}, guest_email={ticket.guest_email}")
-        # Use FastAPI BackgroundTasks with sync wrapper
-        background_tasks.add_task(
-            send_ticket_comment_email_sync,
-            ticket.id, ticket.workspace_id, content, user_id
+        # Send email in a separate thread
+        import threading
+        thread = threading.Thread(
+            target=send_ticket_comment_email_threaded,
+            args=(ticket.id, ticket.workspace_id, content, user_id)
         )
+        thread.daemon = True
+        thread.start()
     else:
         print(f"[DEBUG] NOT sending email: is_internal={is_internal}, guest_email={ticket.guest_email}")
     
     return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
 
-def send_ticket_comment_email_sync(ticket_id: int, workspace_id: int, content: str, user_id: int):
-    """Synchronous wrapper for background email task"""
+def send_ticket_comment_email_threaded(ticket_id: int, workspace_id: int, content: str, user_id: int):
+    """Send email in a separate thread (synchronous)"""
     import asyncio
     try:
-        # Run the async function in the event loop
-        asyncio.run(send_ticket_comment_email_background(ticket_id, workspace_id, content, user_id))
+        print(f"[EMAIL] Thread started for ticket #{ticket_id}")
+        # Create new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(
+                send_ticket_comment_email_background(ticket_id, workspace_id, content, user_id)
+            )
+        finally:
+            loop.close()
     except Exception as e:
-        print(f"❌ Error in sync email wrapper: {e}")
+        print(f"❌ Error in email thread: {e}")
         import traceback
         traceback.print_exc()
 
