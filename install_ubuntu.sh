@@ -94,22 +94,37 @@ fi
 
 # Clone from GitHub
 print_info "Cloning from GitHub repository..."
+print_info "Target directory: $APP_DIR"
+
 if [ -d "$APP_DIR/.git" ]; then
-    print_info "Git repository exists, updating..."
+    print_info "Git repository already exists, updating..."
     cd "$APP_DIR"
     git fetch origin
     git reset --hard origin/main
     print_status "Repository updated"
-elif [ -d "$APP_DIR" ]; then
-    print_info "Directory exists but not a git repo, cloning inside..."
-    cd "$APP_DIR"
-    git clone https://github.com/dadad132/cem-backend.git temp_clone
-    mv temp_clone/* temp_clone/.git .
-    rm -rf temp_clone
-    print_status "Repository cloned successfully"
 else
+    # Clone the repository
     git clone https://github.com/dadad132/cem-backend.git "$APP_DIR"
-    print_status "Repository cloned successfully"
+    if [ $? -eq 0 ]; then
+        print_status "Repository cloned successfully"
+    else
+        print_error "Failed to clone repository!"
+        print_info "Trying alternative method..."
+        mkdir -p "$APP_DIR"
+        cd "$APP_DIR"
+        git init
+        git remote add origin https://github.com/dadad132/cem-backend.git
+        git fetch origin
+        git checkout -b main origin/main
+        print_status "Repository cloned via git init"
+    fi
+fi
+
+# Verify we have the code
+if [ ! -f "$APP_DIR/requirements.txt" ]; then
+    print_error "Failed to clone repository - requirements.txt not found!"
+    print_info "Please check your internet connection and GitHub access"
+    exit 1
 fi
 
 cd "$APP_DIR"
