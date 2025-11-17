@@ -5046,6 +5046,8 @@ async def web_tickets_add_comment(
     """Add comment to ticket"""
     from fastapi import BackgroundTasks
     
+    print(f"[COMMENT] Received comment for ticket {ticket_id}, is_internal={is_internal}")
+    
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
@@ -5141,6 +5143,7 @@ Thank you.
     await db.refresh(comment)
     
     # Send email notification to client in background (if not internal comment)
+    print(f"[DEBUG] Email check: is_internal={is_internal}, guest_email='{ticket.guest_email}', is_guest={ticket.is_guest}")
     if not is_internal and ticket.guest_email:
         print(f"[DEBUG] Triggering email notification for ticket #{ticket.ticket_number} to {ticket.guest_email}")
         print(f"[DEBUG] is_internal={is_internal}, guest_email={ticket.guest_email}")
