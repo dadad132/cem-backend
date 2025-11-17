@@ -43,35 +43,62 @@ _original_template_response = templates.TemplateResponse
 
 def enhanced_template_response(name: str, context: dict, *args, **kwargs):
     """Enhanced TemplateResponse that adds workspace if user is logged in"""
-    # Add workspace to context if not already present and user is logged in
-    if 'workspace' not in context and 'user' in context and context['user']:
-        # Get workspace from user synchronously since we're already in a route handler
-        # Note: This is a fallback - routes should ideally pass workspace explicitly
+    # Add workspace to context if not already present
+    if 'workspace' not in context:
         from sqlalchemy import select
         from app.models.workspace import Workspace
         import asyncio
         
-        async def get_workspace():
-            from app.core.deps import get_session
-            async for db in get_session():
-                try:
-                    workspace = (await db.execute(
-                        select(Workspace).where(Workspace.id == context['user'].workspace_id)
-                    )).scalar_one_or_none()
-                    return workspace
-                finally:
-                    break
-            return None
+        # Try to get user from context, or from request session
+        user = context.get('user')
+        request = context.get('request')
         
-        try:
-            # Run async function to get workspace
-            loop = asyncio.get_event_loop()
-            workspace = loop.run_until_complete(get_workspace())
-            if workspace:
-                context['workspace'] = workspace
-        except Exception as e:
-            # If workspace fetch fails, continue without it
-            pass
+        user_id = None
+        if user:
+            user_id = user.workspace_id if hasattr(user, 'workspace_id') else None
+        elif request and hasattr(request, 'session'):
+            # Get user_id from session and fetch user
+            session_user_id = request.session.get('user_id')
+            if session_user_id:
+                async def get_user():
+                    from app.core.deps import get_session
+                    async for db in get_session():
+                        try:
+                            user = (await db.execute(
+                                select(User).where(User.id == session_user_id)
+                            )).scalar_one_or_none()
+                            return user.workspace_id if user else None
+                        finally:
+                            break
+                    return None
+                
+                try:
+                    loop = asyncio.get_event_loop()
+                    user_id = loop.run_until_complete(get_user())
+                except:
+                    pass
+        
+        if user_id:
+            async def get_workspace():
+                from app.core.deps import get_session
+                async for db in get_session():
+                    try:
+                        workspace = (await db.execute(
+                            select(Workspace).where(Workspace.id == user_id)
+                        )).scalar_one_or_none()
+                        return workspace
+                    finally:
+                        break
+                return None
+            
+            try:
+                loop = asyncio.get_event_loop()
+                workspace = loop.run_until_complete(get_workspace())
+                if workspace:
+                    context['workspace'] = workspace
+            except:
+                pass
+    
     return _original_template_response(name, context, *args, **kwargs)
 
 templates.TemplateResponse = enhanced_template_response
