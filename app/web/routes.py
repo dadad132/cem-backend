@@ -4947,9 +4947,20 @@ async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, 
         # Get user info
         user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
         
+        # Get email settings (always needed for SMTP connection)
+        from app.models.email_settings import EmailSettings
+        settings_result = await db.execute(
+            select(EmailSettings).where(EmailSettings.workspace_id == ticket.workspace_id)
+        )
+        email_settings = settings_result.scalar_one_or_none()
+        
+        if not email_settings:
+            print(f"❌ No email settings configured for workspace {ticket.workspace_id}")
+            return
+        
         # Determine which email to send from
-        from_email = None
-        from_name = "Support Team"
+        from_email = email_settings.smtp_from_email
+        from_name = email_settings.smtp_from_name or "Support Team"
         
         # Check if ticket is related to a project with support email
         if ticket.related_project_id:
@@ -4962,20 +4973,8 @@ async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, 
                 from_email = project.support_email
                 from_name = f"{project.name} Support"
         
-        # Fallback to main email settings if no project email
-        if not from_email:
-            from app.models.email_settings import EmailSettings
-            settings_result = await db.execute(
-                select(EmailSettings).where(EmailSettings.workspace_id == ticket.workspace_id)
-            )
-            email_settings = settings_result.scalar_one_or_none()
-            
-            if email_settings:
-                from_email = email_settings.smtp_from_email
-                from_name = email_settings.smtp_from_name
-        
         # Send email if we have a sender address
-        if from_email and email_settings:
+        if from_email:
             import smtplib
             from email.mime.text import MIMEText
             from email.mime.multipart import MIMEMultipart
