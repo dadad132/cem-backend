@@ -2218,6 +2218,8 @@ async def web_admin_site_settings(
         return RedirectResponse('/web/dashboard', status_code=303)
     
     # Get workspace settings
+    error_message = None
+    workspace = None
     try:
         workspace = (await db.execute(
             select(Workspace).where(Workspace.id == user.workspace_id)
@@ -2226,7 +2228,6 @@ async def web_admin_site_settings(
         # If columns don't exist yet, show migration required message
         if "no such column" in str(e):
             error_message = "Database migration required. Please run: python add_site_settings_columns.py"
-            workspace = None
         else:
             raise
     
