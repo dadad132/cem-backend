@@ -1764,11 +1764,21 @@ async def web_admin_updates(
     
     from app.core.update_manager import update_manager
     
-    # Get current version
-    current_version = await update_manager.get_current_version()
-    
-    # Get commit history
-    commit_history = await update_manager.get_commit_history(limit=30)
+    try:
+        # Get current version
+        current_version = await update_manager.get_current_version()
+        
+        # Get commit history
+        commit_history = await update_manager.get_commit_history(limit=30)
+    except Exception as e:
+        # If update manager fails, provide defaults
+        current_version = {
+            'hash': 'unknown',
+            'message': 'Unable to determine version',
+            'date': 'unknown',
+            'branch': 'unknown'
+        }
+        commit_history = []
     
     return templates.TemplateResponse('admin/updates.html', {
         'request': request,
