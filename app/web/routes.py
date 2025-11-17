@@ -5094,61 +5094,19 @@ Thank you.
     if not is_internal and ticket.guest_email:
         print(f"[DEBUG] Triggering email notification for ticket #{ticket.ticket_number} to {ticket.guest_email}")
         print(f"[DEBUG] is_internal={is_internal}, guest_email={ticket.guest_email}")
-        # Send email in a separate thread
-        import threading
-        thread = threading.Thread(
-            target=send_ticket_comment_email_threaded,
-            args=(ticket.id, ticket.workspace_id, content, user_id)
-        )
-        thread.daemon = True
-        thread.start()
+        
+        # Send email directly (moved to async task that won't block response)
+        try:
+            await send_ticket_comment_email(ticket, content, user_id, db)
+        except Exception as e:
+            print(f"[ERROR] Failed to send email: {e}")
+            # Don't fail the request if email fails
     else:
         print(f"[DEBUG] NOT sending email: is_internal={is_internal}, guest_email={ticket.guest_email}")
     
     return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
 
-def send_ticket_comment_email_threaded(ticket_id: int, workspace_id: int, content: str, user_id: int):
-    """Send email in a separate thread (synchronous)"""
-    import asyncio
-    try:
-        print(f"[EMAIL] Thread started for ticket #{ticket_id}")
-        # Create new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(
-                send_ticket_comment_email_background(ticket_id, workspace_id, content, user_id)
-            )
-        finally:
-            loop.close()
-    except Exception as e:
-        print(f"❌ Error in email thread: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-async def send_ticket_comment_email_background(ticket_id: int, workspace_id: int, content: str, user_id: int):
-    """Send email notification in background with new DB session (non-blocking)"""
-    try:
-        print(f"[EMAIL] Background task started for ticket #{ticket_id}")
-        
-        # Create new database session for background task
-        from app.core.database import async_session_maker
-        async with async_session_maker() as db:
-            # Reload ticket in new session
-            ticket = (await db.execute(select(Ticket).where(Ticket.id == ticket_id))).scalar_one_or_none()
-            if not ticket:
-                print(f"❌ Ticket {ticket_id} not found in background task")
-                return
-            
-            print(f"[EMAIL] Ticket loaded: #{ticket.ticket_number}, guest_email={ticket.guest_email}")
-            
-            await send_ticket_comment_email(ticket, content, user_id, db)
-    except Exception as e:
-        print(f"❌ Error in background email task: {e}")
-        import traceback
-        traceback.print_exc()
 
 
 async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, db: AsyncSession):
