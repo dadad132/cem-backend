@@ -374,6 +374,10 @@ Auto-created from email support request"""
         
         print(f"[DEBUG] Trying to find ticket by subject: '{subject}'")
         
+        # Clean up the subject - remove Re:, Fwd:, etc.
+        clean_subject = re.sub(r'^(Re:|RE:|Fwd:|FWD:|\[.*?\])\s*', '', subject, flags=re.IGNORECASE).strip()
+        print(f"[DEBUG] Cleaned subject: '{clean_subject}'")
+        
         # Look for patterns like "Ticket #12345" or "#12345"
         patterns = [
             r'Ticket\s*#?\s*(\d+)',      # "Ticket #12345" or "Ticket 12345"
@@ -384,25 +388,27 @@ Auto-created from email support request"""
             r'(?:^|\s)(\d{5,})',           # 5+ digit number (likely ticket number)
         ]
         
-        for pattern in patterns:
-            match = re.search(pattern, subject, re.IGNORECASE)
-            if match:
-                ticket_number = match.group(1)
-                print(f"[DEBUG] Found potential ticket number in subject: {ticket_number}")
-                
-                # Search for ticket by number
-                result = await db.execute(
-                    select(Ticket).where(
-                        Ticket.ticket_number == ticket_number,
-                        Ticket.workspace_id == self.workspace_id
+        # Try on both original and cleaned subject
+        for test_subject in [subject, clean_subject]:
+            for pattern in patterns:
+                match = re.search(pattern, test_subject, re.IGNORECASE)
+                if match:
+                    ticket_number = match.group(1)
+                    print(f"[DEBUG] Found potential ticket number in subject: {ticket_number} (pattern: {pattern})")
+                    
+                    # Search for ticket by number
+                    result = await db.execute(
+                        select(Ticket).where(
+                            Ticket.ticket_number == ticket_number,
+                            Ticket.workspace_id == self.workspace_id
+                        )
                     )
-                )
-                ticket = result.scalar_one_or_none()
-                if ticket:
-                    print(f"[DEBUG] ✅ Found ticket #{ticket.ticket_number} via subject line pattern: {pattern}")
-                    return ticket
-                else:
-                    print(f"[DEBUG] Pattern matched '{ticket_number}' but no ticket found in database")
+                    ticket = result.scalar_one_or_none()
+                    if ticket:
+                        print(f"[DEBUG] ✅ Found ticket #{ticket.ticket_number} via subject line")
+                        return ticket
+                    else:
+                        print(f"[DEBUG] Pattern matched '{ticket_number}' but no ticket found in database")
         
         print(f"[DEBUG] ❌ No ticket number found in subject")
         return None
