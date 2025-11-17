@@ -98,6 +98,32 @@ async def lifespan(app):  # FastAPI lifespan
     except Exception as e:
         logger.warning(f"⚠️  Email-to-Ticket scheduler not started: {e}")
     
+    # Fix attachment paths from absolute to relative on startup
+    try:
+        import sqlite3
+        from pathlib import Path
+        
+        db_path = Path("data.db")
+        if db_path.exists():
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            
+            # Quick fix for comment_attachment
+            cursor.execute("SELECT id, file_path FROM comment_attachment WHERE file_path LIKE '/%' OR file_path LIKE '_:%'")
+            rows = cursor.fetchall()
+            if rows:
+                logger.info(f"🔧 Fixing {len(rows)} comment attachment paths...")
+                for att_id, file_path in rows:
+                    uuid_filename = Path(file_path).name
+                    new_path = f"app/uploads/comments/{uuid_filename}"
+                    cursor.execute("UPDATE comment_attachment SET file_path = ? WHERE id = ?", (new_path, att_id))
+                conn.commit()
+                logger.info(f"✅ Fixed {len(rows)} comment attachment paths")
+            
+            conn.close()
+    except Exception as e:
+        logger.warning(f"⚠️  Could not fix attachment paths: {e}")
+    
     yield
     
     # Cleanup on shutdown - execute graceful shutdown sequence
