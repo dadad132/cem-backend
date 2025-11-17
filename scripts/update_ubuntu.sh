@@ -13,7 +13,7 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 SERVICE_NAME="crm-backend"
-APP_DIR="$HOME/crm-backend"
+APP_DIR="$HOME/cem-backend"
 
 echo -e "${YELLOW}=========================================${NC}"
 echo -e "${YELLOW}   CRM Backend - Update${NC}"
