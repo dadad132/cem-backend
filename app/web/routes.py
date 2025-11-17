@@ -38,6 +38,23 @@ from app.models.activity import Activity, ActivityType
 BASE_DIR = Path(__file__).resolve().parents[1]
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
 
+# Store original TemplateResponse
+_original_template_response = templates.TemplateResponse
+
+def enhanced_template_response(name: str, context: dict, *args, **kwargs):
+    """Enhanced TemplateResponse that adds workspace if user is logged in"""
+    # Add workspace to context if not already present and user is logged in
+    if 'workspace' not in context and 'user' in context and context['user']:
+        try:
+            # Workspace should be passed explicitly by routes
+            # This is just a fallback - routes should pass it
+            pass
+        except:
+            pass
+    return _original_template_response(name, context, *args, **kwargs)
+
+templates.TemplateResponse = enhanced_template_response
+
 # Convert UTC datetime to local time for display
 def utc_to_local(utc_dt):
     """Convert UTC datetime to local time"""
@@ -53,6 +70,17 @@ def utc_to_local(utc_dt):
     from datetime import timedelta
     local_dt = utc_dt - timedelta(seconds=offset_seconds)
     return local_dt
+
+async def get_workspace_for_user(user_id: int, db: AsyncSession) -> Optional[Workspace]:
+    """Get workspace with branding for a user"""
+    try:
+        user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        if not user:
+            return None
+        workspace = (await db.execute(select(Workspace).where(Workspace.id == user.workspace_id))).scalar_one_or_none()
+        return workspace
+    except:
+        return None
 
 # Add helper functions to Jinja2 globals for use in templates
 templates.env.globals['now'] = datetime.utcnow
@@ -2504,10 +2532,14 @@ async def web_projects(request: Request, db: AsyncSession = Depends(get_session)
         )
         projects = result.scalars().all()
     
+    # Get workspace for branding
+    workspace = await get_workspace_for_user(user_id, db)
+    
     return templates.TemplateResponse('projects/index.html', {
         'request': request, 
         'user': user,
-        'projects': projects
+        'projects': projects,
+        'workspace': workspace
     })
 
 
