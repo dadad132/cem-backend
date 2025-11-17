@@ -215,8 +215,7 @@ After=network.target
 Type=simple
 User=$SERVICE_USER
 WorkingDirectory=$APP_DIR
-Environment="PATH=$APP_DIR/.venv/bin"
-ExecStart=$APP_DIR/.venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+ExecStart=/usr/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
 Restart=always
 RestartSec=10
 
@@ -233,8 +232,7 @@ After=network.target
 Type=simple
 User=$SERVICE_USER
 WorkingDirectory=$APP_DIR
-Environment="PATH=$APP_DIR/.venv/bin"
-ExecStart=$APP_DIR/.venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+ExecStart=/usr/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
 Restart=always
 RestartSec=10
 
