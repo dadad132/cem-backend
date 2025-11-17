@@ -164,6 +164,61 @@ class UpdateManager:
                     check=True
                 )
             
+            # Run Alembic migrations
+            alembic_ini = self.app_dir / "alembic.ini"
+            if alembic_ini.exists():
+                logger.info("Running Alembic migrations...")
+                if venv_python.exists():
+                    result = subprocess.run(
+                        [str(venv_python), "-m", "alembic", "upgrade", "head"],
+                        cwd=self.app_dir,
+                        capture_output=True,
+                        text=True
+                    )
+                    if result.returncode != 0:
+                        logger.warning(f"Alembic migration warning: {result.stderr}")
+                else:
+                    result = subprocess.run(
+                        ["python3", "-m", "alembic", "upgrade", "head"],
+                        cwd=self.app_dir,
+                        capture_output=True,
+                        text=True
+                    )
+                    if result.returncode != 0:
+                        logger.warning(f"Alembic migration warning: {result.stderr}")
+            
+            # Run any migration scripts in migrations/ folder
+            migrations_dir = self.app_dir / "migrations"
+            if migrations_dir.exists():
+                logger.info("Running migration scripts...")
+                for migration_script in sorted(migrations_dir.glob("migrate_*.py")):
+                    logger.info(f"Running {migration_script.name}...")
+                    if venv_python.exists():
+                        subprocess.run(
+                            [str(venv_python), str(migration_script)],
+                            cwd=self.app_dir,
+                            capture_output=True,
+                            text=True
+                        )
+                    else:
+                        subprocess.run(
+                            ["python3", str(migration_script)],
+                            cwd=self.app_dir,
+                            capture_output=True,
+                            text=True
+                        )
+            
+            # Ensure database schema is up to date
+            logger.info("Updating database schema...")
+            if venv_python.exists():
+                subprocess.run(
+                    [str(venv_python), "-c", 
+                     "from app.core.database import init_db; import asyncio; asyncio.run(init_db())"],
+                    cwd=self.app_dir,
+                    capture_output=True,
+                    text=True
+                )
+            
             return {
                 "success": True,
                 "message": "Updated successfully",
@@ -218,6 +273,29 @@ class UpdateManager:
                     capture_output=True,
                     text=True,
                     check=True
+                )
+            
+            # Run Alembic migrations after rollback
+            alembic_ini = self.app_dir / "alembic.ini"
+            if alembic_ini.exists():
+                logger.info("Running Alembic migrations...")
+                if venv_python.exists():
+                    subprocess.run(
+                        [str(venv_python), "-m", "alembic", "upgrade", "head"],
+                        cwd=self.app_dir,
+                        capture_output=True,
+                        text=True
+                    )
+            
+            # Ensure database schema is up to date
+            logger.info("Updating database schema...")
+            if venv_python.exists():
+                subprocess.run(
+                    [str(venv_python), "-c", 
+                     "from app.core.database import init_db; import asyncio; asyncio.run(init_db())"],
+                    cwd=self.app_dir,
+                    capture_output=True,
+                    text=True
                 )
             
             return {
