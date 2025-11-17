@@ -208,18 +208,34 @@ print_status "Systemd service created"
 
 # Reload systemd
 print_info "Reloading systemd daemon..."
-sudo systemctl daemon-reload
+if [ "$EUID" -eq 0 ]; then
+    systemctl daemon-reload
+else
+    sudo systemctl daemon-reload
+fi
 print_status "Systemd reloaded"
 
 # Enable and start service
 print_info "Enabling and starting service..."
-sudo systemctl enable ${SERVICE_NAME}
-sudo systemctl start ${SERVICE_NAME}
+print_info "Service name: ${SERVICE_NAME}"
+if [ "$EUID" -eq 0 ]; then
+    systemctl enable ${SERVICE_NAME}
+    systemctl start ${SERVICE_NAME}
+else
+    sudo systemctl enable ${SERVICE_NAME}
+    sudo systemctl start ${SERVICE_NAME}
+fi
 sleep 2
 print_status "Service started"
 
 # Check service status
-if sudo systemctl is-active --quiet ${SERVICE_NAME}; then
+if [ "$EUID" -eq 0 ]; then
+    SERVICE_ACTIVE=$(systemctl is-active ${SERVICE_NAME})
+else
+    SERVICE_ACTIVE=$(sudo systemctl is-active ${SERVICE_NAME})
+fi
+
+if [ "$SERVICE_ACTIVE" = "active" ]; then
     print_status "Service is running!"
 else
     print_error "Service failed to start. Check logs with: sudo journalctl -u ${SERVICE_NAME} -f"
