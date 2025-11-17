@@ -1746,6 +1746,94 @@ async def web_admin_backup_restore(
 
 
 # --------------------------
+# Admin - System Updates
+# --------------------------
+
+@router.get('/admin/updates')
+async def web_admin_updates(
+    request: Request,
+    db: AsyncSession = Depends(get_session)
+):
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_active or not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    from app.core.update_manager import update_manager
+    
+    # Get current version
+    current_version = await update_manager.get_current_version()
+    
+    # Get commit history
+    commit_history = await update_manager.get_commit_history(limit=30)
+    
+    return templates.TemplateResponse('admin/updates.html', {
+        'request': request,
+        'user': user,
+        'current_version': current_version,
+        'commit_history': commit_history,
+        'success': request.query_params.get('success'),
+        'error': request.query_params.get('error')
+    })
+
+
+@router.post('/admin/updates/latest')
+async def web_admin_update_latest(
+    request: Request,
+    db: AsyncSession = Depends(get_session)
+):
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_active or not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    from app.core.update_manager import update_manager
+    
+    result = await update_manager.update_to_latest()
+    
+    if result["success"]:
+        # Restart service after update
+        await update_manager.restart_service()
+        return RedirectResponse('/web/admin/updates?success=update_complete', status_code=303)
+    else:
+        error_msg = result.get("error", "Unknown error")
+        return RedirectResponse(f'/web/admin/updates?error={error_msg}', status_code=303)
+
+
+@router.post('/admin/updates/rollback')
+async def web_admin_update_rollback(
+    request: Request,
+    commit_hash: str = Form(...),
+    db: AsyncSession = Depends(get_session)
+):
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_active or not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    from app.core.update_manager import update_manager
+    
+    result = await update_manager.rollback_to_commit(commit_hash)
+    
+    if result["success"]:
+        # Restart service after rollback
+        await update_manager.restart_service()
+        return RedirectResponse('/web/admin/updates?success=rollback_complete', status_code=303)
+    else:
+        error_msg = result.get("error", "Unknown error")
+        return RedirectResponse(f'/web/admin/updates?error={error_msg}', status_code=303)
+
+
+# --------------------------
 # Admin - Email Settings
 # --------------------------
 @router.get('/admin/email-settings', response_class=HTMLResponse)
