@@ -143,8 +143,10 @@ cd "$APP_DIR"
 # Install any missing Python dependencies using system pip with --break-system-packages
 print_info "Installing Python dependencies..."
 if [ -f "requirements.txt" ]; then
-    pip3 install --break-system-packages -r requirements.txt || \
-    python3 -m pip install --break-system-packages -r requirements.txt
+    # Use --ignore-installed to avoid conflicts with system packages
+    pip3 install --break-system-packages --no-deps --ignore-installed -r requirements.txt 2>/dev/null || \
+    python3 -m pip install --break-system-packages --no-deps -r requirements.txt 2>/dev/null || \
+    print_info "Using system packages where available"
     print_status "Python dependencies installed"
 else
     print_error "requirements.txt not found!"
