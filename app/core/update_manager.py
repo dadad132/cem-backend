@@ -208,6 +208,24 @@ class UpdateManager:
                             text=True
                         )
             
+            # Run standalone migration scripts in root directory
+            for migration_script in sorted(self.app_dir.glob("add_*.py")):
+                logger.info(f"Running {migration_script.name}...")
+                if venv_python.exists():
+                    subprocess.run(
+                        [str(venv_python), str(migration_script)],
+                        cwd=self.app_dir,
+                        capture_output=True,
+                        text=True
+                    )
+                else:
+                    subprocess.run(
+                        ["python3", str(migration_script)],
+                        cwd=self.app_dir,
+                        capture_output=True,
+                        text=True
+                    )
+            
             # Ensure database schema is up to date
             logger.info("Updating database schema...")
             if venv_python.exists():
