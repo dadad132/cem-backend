@@ -10,7 +10,7 @@ from email.header import decode_header
 from email.utils import parseaddr
 import re
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 from typing import Optional, List, Tuple
 from sqlmodel import Session, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -26,6 +26,13 @@ from app.models.enums import TaskStatus, TaskPriority
 
 # Setup logger
 logger = logging.getLogger(__name__)
+
+# Timezone offset (UTC+2 for South Africa)
+LOCAL_TZ_OFFSET = timedelta(hours=2)
+
+def get_local_time() -> datetime:
+    """Get current time in local timezone (UTC+2)"""
+    return datetime.now(timezone(LOCAL_TZ_OFFSET))
 
 
 class EmailToTicketService:
@@ -410,7 +417,7 @@ Auto-created from email support request"""
             subject=subject,
             ticket_id=ticket_id,
             workspace_id=self.workspace_id,
-            processed_at=datetime.utcnow()
+            processed_at=get_local_time()
         )
         db.add(processed)
         await db.commit()
@@ -479,8 +486,8 @@ Auto-created from email support request"""
             guest_company="",
             guest_branch="",
             related_project_id=project.id if project else None,  # Link to project if found
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
+            created_at=get_local_time(),
+            updated_at=get_local_time()
         )
         
         db.add(ticket)
@@ -627,12 +634,12 @@ Auto-created from email support request"""
             user_id=None,  # Guest comment from email
             content=f"**Email reply from {sender_name} ({sender_email}):**\n\n{body}",
             is_internal=False,
-            created_at=datetime.utcnow()
+            created_at=get_local_time()
         )
         db.add(comment)
         
         # Update ticket timestamp
-        ticket.updated_at = datetime.utcnow()
+        ticket.updated_at = get_local_time()
         
         # Add history entry
         history = TicketHistory(
@@ -640,7 +647,7 @@ Auto-created from email support request"""
             user_id=None,
             action='comment_added',
             comment=f'Email reply received from {sender_email}',
-            created_at=datetime.utcnow()
+            created_at=get_local_time()
         )
         db.add(history)
         
