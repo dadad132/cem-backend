@@ -1,9 +1,8 @@
 """
 Email-to-Ticket Service V2
-Supports both POP3 and IMAP, uses database settings, keeps emails on server
+IMAP-based email processing, uses database settings, keeps emails on server
 """
 
-import poplib
 import imaplib
 import email
 from email.header import decode_header
@@ -36,34 +35,12 @@ def get_local_time() -> datetime:
 
 
 class EmailToTicketService:
-    """Service to process emails from POP3 or IMAP and create tickets"""
+    """Service to process emails from IMAP and create tickets"""
     
     def __init__(self, email_settings: EmailSettings, workspace_id: int):
         self.settings = email_settings
         self.workspace_id = workspace_id
-        self.mail_type = (email_settings.incoming_mail_type or "POP3").upper()
         
-    def connect_pop3(self):
-        """Connect to POP3 server"""
-        try:
-            if self.settings.incoming_mail_use_ssl:
-                mail = poplib.POP3_SSL(
-                    self.settings.incoming_mail_host, 
-                    self.settings.incoming_mail_port or 995
-                )
-            else:
-                mail = poplib.POP3(
-                    self.settings.incoming_mail_host,
-                    self.settings.incoming_mail_port or 110
-                )
-            
-            mail.user(self.settings.incoming_mail_username)
-            mail.pass_(self.settings.incoming_mail_password)
-            return mail
-        except Exception as e:
-            print(f"Failed to connect to POP3 server: {e}")
-            raise
-    
     def connect_imap(self):
         """Connect to IMAP server"""
         try:
@@ -706,126 +683,6 @@ Auto-created from email support request"""
         
         return comment
     
-    async def fetch_pop3_emails(self, db: AsyncSession) -> List[Ticket]:
-        """Fetch emails from POP3 server and create tickets"""
-        tickets_created = []
-        
-        try:
-            mail = self.connect_pop3()
-            
-            # Get message count
-            num_messages = len(mail.list()[1])
-            print(f"[POP3] Found {num_messages} messages")
-            
-            # Process each message
-            for i in range(1, num_messages + 1):
-                try:
-                    # Fetch message (but don't delete - RETR keeps it on server)
-                    response, lines, octets = mail.retr(i)
-                    msg_data = b'\n'.join(lines)
-                    msg = email.message_from_bytes(msg_data)
-                    
-                    # Get message ID
-                    message_id = msg.get('Message-ID', f'no-id-{i}')
-                    
-                    # Check if already processed
-                    if await self.is_email_processed(db, message_id):
-                        continue
-                    
-                    # Extract email info
-                    from_header = msg.get('From', '')
-                    sender_name, sender_email = self.extract_email_address(from_header)
-                    to_header = msg.get('To', '')
-                    _, to_email = self.extract_email_address(to_header)
-                    subject = self.decode_header_value(msg.get('Subject', 'No Subject'))
-                    body = self.extract_email_body(msg)
-                    
-                    print(f"\n{'='*80}")
-                    print(f"[POP3] Processing email {i}")
-                    print(f"[POP3] From: {sender_name} <{sender_email}>")
-                    print(f"[POP3] To: {to_email}")
-                    print(f"[POP3] Subject: {subject}")
-                    print(f"[POP3] Message-ID: {message_id}")
-                    
-                    # Check if this is a reply to an existing ticket
-                    in_reply_to = msg.get('In-Reply-To', '').strip('<>')
-                    references = msg.get('References', '')
-                    
-                    print(f"[POP3] In-Reply-To: '{in_reply_to}'")
-                    print(f"[POP3] References: '{references}'")
-                    
-                    existing_ticket = await self.find_ticket_by_reply(db, in_reply_to, references)
-                    
-                    # If not found via headers, try subject line (Gmail/Outlook fallback)
-                    if not existing_ticket:
-                        print(f"[POP3] Trying subject line fallback...")
-                        existing_ticket = await self.find_ticket_by_subject(db, subject)
-                    
-                    # If still not found, try by sender email (last resort)
-                    if not existing_ticket:
-                        print(f"[POP3] Trying sender email fallback...")
-                        existing_ticket = await self.find_ticket_by_sender(db, sender_email)
-                    
-                    if existing_ticket:
-                        print(f"[POP3] ✅ MATCH FOUND - Adding to ticket #{existing_ticket.ticket_number}")
-                    else:
-                        print(f"[POP3] ❌ NO MATCH - Will create new ticket")
-                    print(f"{'='*80}\n")
-                    
-                    # Find project by support email
-                    project = await self.find_project_by_email(db, to_email)
-                    
-                    if existing_ticket:
-                        # Add as comment to existing ticket
-                        await self.add_comment_from_email(
-                            db, existing_ticket, sender_name, sender_email, body
-                        )
-                        
-                        # Mark as processed
-                        await self.mark_email_processed(
-                            db, message_id, sender_email, subject, existing_ticket.id
-                        )
-                        
-                        print(f"[POP3] Added comment to ticket {existing_ticket.ticket_number} from {sender_email}")
-                    else:
-                        # Route based on project support email
-                        if project:
-                            # Create task for project with support email
-                            task = await self.create_task_from_email(
-                                db, sender_name, sender_email, subject, body, project
-                            )
-                            
-                            # Mark as processed
-                            await self.mark_email_processed(
-                                db, message_id, sender_email, subject, task.id
-                            )
-                            
-                            print(f"[POP3] Created task '{task.title}' for project '{project.name}' from {sender_email}")
-                        else:
-                            # Create ticket for general support
-                            ticket = await self.create_ticket_from_email(
-                                db, sender_name, sender_email, subject, body, to_email, None
-                            )
-                            
-                            # Mark as processed
-                            await self.mark_email_processed(
-                                db, message_id, sender_email, subject, ticket.id
-                            )
-                            
-                            tickets_created.append(ticket)
-                            print(f"[POP3] Created ticket {ticket.ticket_number} from {sender_email}")
-                    
-                except Exception as e:
-                    print(f"[POP3] Error processing message {i}: {e}")
-                    continue
-            
-            mail.quit()
-            
-        except Exception as e:
-            print(f"[POP3] Error fetching emails: {e}")
-        
-        return tickets_created
-    
     async def fetch_imap_emails(self, db: AsyncSession) -> List[Ticket]:
         """Fetch emails from IMAP server and create tickets"""
         tickets_created = []
@@ -863,32 +720,42 @@ Auto-created from email support request"""
                     subject = self.decode_header_value(msg.get('Subject', 'No Subject'))
                     body = self.extract_email_body(msg)
                     
+                    print(f"\n{'='*80}")
+                    print(f"[IMAP] Processing email")
+                    print(f"[IMAP] From: {sender_name} <{sender_email}>")
+                    print(f"[IMAP] To: {to_email}")
+                    print(f"[IMAP] Subject: {subject}")
+                    print(f"[IMAP] Message-ID: {message_id}")
+                    
                     # Check if this is a reply to an existing ticket
                     in_reply_to = msg.get('In-Reply-To', '').strip('<>')
                     references = msg.get('References', '')
                     
-                    print(f"[IMAP DEBUG] Email from {sender_email} to {to_email}")
-                    print(f"[IMAP DEBUG] Subject: {subject}")
-                    print(f"[IMAP DEBUG] In-Reply-To: '{in_reply_to}'")
-                    print(f"[IMAP DEBUG] References: '{references}'")
+                    print(f"[IMAP] In-Reply-To: '{in_reply_to}'")
+                    print(f"[IMAP] References: '{references}'")
                     
                     existing_ticket = await self.find_ticket_by_reply(db, in_reply_to, references)
                     
                     # If not found via headers, try subject line (Gmail/Outlook fallback)
                     if not existing_ticket:
-                        print(f"[IMAP DEBUG] Trying subject line fallback...")
+                        print(f"[IMAP] Trying subject line fallback...")
                         existing_ticket = await self.find_ticket_by_subject(db, subject)
                     
                     # If still not found, try by sender email (last resort)
                     if not existing_ticket:
-                        print(f"[IMAP DEBUG] Trying sender email fallback...")
+                        print(f"[IMAP] Trying sender email fallback...")
                         existing_ticket = await self.find_ticket_by_sender(db, sender_email)
+                    
+                    if existing_ticket:
+                        print(f"[IMAP] ✅ MATCH FOUND - Adding to ticket #{existing_ticket.ticket_number}")
+                    else:
+                        print(f"[IMAP] ❌ NO MATCH - Will create new ticket")
+                    print(f"{'='*80}\n")
                     
                     # Find project by support email
                     project = await self.find_project_by_email(db, to_email)
                     
                     if existing_ticket:
-                        print(f"[IMAP DEBUG] Found existing ticket: {existing_ticket.ticket_number}")
                         # Add as comment to existing ticket
                         await self.add_comment_from_email(
                             db, existing_ticket, sender_name, sender_email, body
@@ -904,7 +771,6 @@ Auto-created from email support request"""
                         
                         print(f"[IMAP] Added comment to ticket {existing_ticket.ticket_number} from {sender_email}")
                     else:
-                        print(f"[IMAP DEBUG] No existing ticket found, routing to task/ticket")
                         # Route based on project support email
                         if project:
                             # Create task for project with support email
@@ -951,14 +817,8 @@ Auto-created from email support request"""
         return tickets_created
     
     async def process_emails(self, db: AsyncSession) -> List[Ticket]:
-        """Process emails based on mail type (POP3 or IMAP)"""
-        if self.mail_type == "POP3":
-            return await self.fetch_pop3_emails(db)
-        elif self.mail_type == "IMAP":
-            return await self.fetch_imap_emails(db)
-        else:
-            print(f"[Email] Unknown mail type: {self.mail_type}")
-            return []
+        """Process emails from IMAP server"""
+        return await self.fetch_imap_emails(db)
 
 
 async def process_workspace_emails(db: AsyncSession, workspace_id: int) -> List[Ticket]:
