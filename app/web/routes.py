@@ -42,70 +42,12 @@ templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
 _original_template_response = templates.TemplateResponse
 
 def enhanced_template_response(name: str, context: dict, *args, **kwargs):
-    """Enhanced TemplateResponse that adds workspace if user is logged in"""
+    """Enhanced TemplateResponse that adds workspace from request state"""
     # Add workspace to context if not already present
     if 'workspace' not in context:
-        from sqlalchemy import select
-        from app.models.workspace import Workspace
-        import asyncio
-        
-        # Try to get workspace_id from session directly (fastest)
         request = context.get('request')
-        workspace_id = None
-        
-        if request and hasattr(request, 'session'):
-            workspace_id = request.session.get('workspace_id')
-        
-        # If no workspace_id in session, try from user object or user_id
-        if not workspace_id:
-            user = context.get('user')
-            if user and hasattr(user, 'workspace_id'):
-                workspace_id = user.workspace_id
-            elif request and hasattr(request, 'session'):
-                session_user_id = request.session.get('user_id')
-                if session_user_id:
-                    async def get_workspace_id():
-                        from app.core.deps import get_session
-                        async for db in get_session():
-                            try:
-                                user = (await db.execute(
-                                    select(User).where(User.id == session_user_id)
-                                )).scalar_one_or_none()
-                                if user:
-                                    # Cache it in session for next time
-                                    request.session['workspace_id'] = user.workspace_id
-                                    return user.workspace_id
-                            finally:
-                                break
-                        return None
-                    
-                    try:
-                        loop = asyncio.get_event_loop()
-                        workspace_id = loop.run_until_complete(get_workspace_id())
-                    except:
-                        pass
-        
-        # Fetch workspace if we have an ID
-        if workspace_id:
-            async def get_workspace():
-                from app.core.deps import get_session
-                async for db in get_session():
-                    try:
-                        workspace = (await db.execute(
-                            select(Workspace).where(Workspace.id == workspace_id)
-                        )).scalar_one_or_none()
-                        return workspace
-                    finally:
-                        break
-                return None
-            
-            try:
-                loop = asyncio.get_event_loop()
-                workspace = loop.run_until_complete(get_workspace())
-                if workspace:
-                    context['workspace'] = workspace
-            except:
-                pass
+        if request and hasattr(request.state, 'workspace'):
+            context['workspace'] = request.state.workspace
     
     return _original_template_response(name, context, *args, **kwargs)
 

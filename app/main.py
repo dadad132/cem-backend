@@ -41,6 +41,33 @@ app.add_middleware(
 # Session middleware for server-rendered web UI
 app.add_middleware(SessionMiddleware, secret_key=settings.secret_key)
 
+# Workspace injection middleware - adds workspace to all requests
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class WorkspaceMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Add workspace to request state for templates
+        workspace_id = request.session.get('workspace_id') if hasattr(request, 'session') else None
+        if workspace_id:
+            try:
+                from app.core.deps import get_session
+                from app.models.workspace import Workspace
+                async for db in get_session():
+                    try:
+                        workspace = (await db.execute(
+                            select(Workspace).where(Workspace.id == workspace_id)
+                        )).scalar_one_or_none()
+                        if workspace:
+                            request.state.workspace = workspace
+                    finally:
+                        break
+            except:
+                pass
+        response = await call_next(request)
+        return response
+
+app.add_middleware(WorkspaceMiddleware)
+
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
