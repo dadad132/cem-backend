@@ -3677,16 +3677,15 @@ async def preview_comment_attachment(
     if not file_path.exists():
         raise HTTPException(status_code=404, detail='File not found on disk')
     
-    # Serve file inline for preview (not as download)
-    from fastapi.responses import Response
-    with open(file_path, 'rb') as f:
-        content = f.read()
-    
-    return Response(
-        content=content,
+    # Serve file inline for preview with proper headers for PDF embedding
+    return FileResponse(
+        path=str(file_path),
         media_type=attachment.content_type,
+        filename=attachment.filename,
         headers={
-            'Content-Disposition': f'inline; filename="{attachment.filename}"'
+            'Content-Disposition': f'inline; filename="{attachment.filename}"',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "frame-ancestors 'self'"
         }
     )
 
