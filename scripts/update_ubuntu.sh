@@ -45,13 +45,26 @@ git reset --hard origin/main
 echo -e "${GREEN}[✓]${NC} Code updated"
 
 echo -e "${YELLOW}[i]${NC} Updating dependencies..."
-pip3 install --break-system-packages -r requirements.txt 2>&1 | grep -v "Cannot uninstall" || true
+# Check if venv exists, if so use it
+if [ -d "venv" ]; then
+    echo -e "${YELLOW}[i]${NC} Using virtual environment"
+    source venv/bin/activate
+    pip install -r requirements.txt --upgrade
+else
+    echo -e "${YELLOW}[i]${NC} Using system Python"
+    pip3 install --break-system-packages -r requirements.txt 2>&1 | grep -v "Cannot uninstall" || true
+fi
 echo -e "${GREEN}[✓]${NC} Dependencies updated"
 
 echo -e "${YELLOW}[i]${NC} Updating systemd service file..."
-# Get the actual Python path
-PYTHON_PATH=$(which python3)
-echo -e "${YELLOW}[i]${NC} Using Python at: $PYTHON_PATH"
+# Detect if using venv or system Python
+if [ -d "venv" ]; then
+    PYTHON_PATH="$APP_DIR/venv/bin/python"
+    echo -e "${YELLOW}[i]${NC} Using venv Python at: $PYTHON_PATH"
+else
+    PYTHON_PATH=$(which python3)
+    echo -e "${YELLOW}[i]${NC} Using system Python at: $PYTHON_PATH"
+fi
 
 sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null << EOF
 [Unit]
