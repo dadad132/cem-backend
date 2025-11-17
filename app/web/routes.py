@@ -4946,15 +4946,27 @@ Thank you.
     if not is_internal and ticket.guest_email:
         print(f"[DEBUG] Triggering email notification for ticket #{ticket.ticket_number} to {ticket.guest_email}")
         print(f"[DEBUG] is_internal={is_internal}, guest_email={ticket.guest_email}")
-        # Use FastAPI BackgroundTasks to ensure task completion
+        # Use FastAPI BackgroundTasks with sync wrapper
         background_tasks.add_task(
-            send_ticket_comment_email_background,
+            send_ticket_comment_email_sync,
             ticket.id, ticket.workspace_id, content, user_id
         )
     else:
         print(f"[DEBUG] NOT sending email: is_internal={is_internal}, guest_email={ticket.guest_email}")
     
     return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+
+
+def send_ticket_comment_email_sync(ticket_id: int, workspace_id: int, content: str, user_id: int):
+    """Synchronous wrapper for background email task"""
+    import asyncio
+    try:
+        # Run the async function in the event loop
+        asyncio.run(send_ticket_comment_email_background(ticket_id, workspace_id, content, user_id))
+    except Exception as e:
+        print(f"❌ Error in sync email wrapper: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 async def send_ticket_comment_email_background(ticket_id: int, workspace_id: int, content: str, user_id: int):
