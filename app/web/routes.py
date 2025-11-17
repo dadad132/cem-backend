@@ -5045,8 +5045,10 @@ async def web_tickets_add_comment(
 ):
     """Add comment to ticket"""
     from fastapi import BackgroundTasks
+    import logging
+    logger = logging.getLogger(__name__)
     
-    print(f"[COMMENT] Received comment for ticket {ticket_id}, is_internal={is_internal}")
+    logger.warning(f"🔔 COMMENT: Received comment for ticket {ticket_id}, is_internal={is_internal}")
     
     user_id = request.session.get('user_id')
     if not user_id:
@@ -5143,19 +5145,20 @@ Thank you.
     await db.refresh(comment)
     
     # Send email notification to client in background (if not internal comment)
-    print(f"[DEBUG] Email check: is_internal={is_internal}, guest_email='{ticket.guest_email}', is_guest={ticket.is_guest}")
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.warning(f"📧 EMAIL CHECK: is_internal={is_internal}, guest_email='{ticket.guest_email}', is_guest={ticket.is_guest}")
     if not is_internal and ticket.guest_email:
-        print(f"[DEBUG] Triggering email notification for ticket #{ticket.ticket_number} to {ticket.guest_email}")
-        print(f"[DEBUG] is_internal={is_internal}, guest_email={ticket.guest_email}")
+        logger.warning(f"✅ SENDING EMAIL to {ticket.guest_email} for ticket #{ticket.ticket_number}")
         
         # Send email directly (moved to async task that won't block response)
         try:
             await send_ticket_comment_email(ticket, content, user_id, db)
         except Exception as e:
-            print(f"[ERROR] Failed to send email: {e}")
+            logger.error(f"❌ EMAIL FAILED: {e}")
             # Don't fail the request if email fails
     else:
-        print(f"[DEBUG] NOT sending email: is_internal={is_internal}, guest_email={ticket.guest_email}")
+        logger.warning(f"❌ NOT SENDING EMAIL: is_internal={is_internal}, guest_email={ticket.guest_email}")
     
     return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
