@@ -47,7 +47,15 @@ from starlette.middleware.base import BaseHTTPMiddleware
 class WorkspaceMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # Add workspace to request state for templates
-        user_id = request.session.get('user_id') if hasattr(request, 'session') else None
+        user_id = None
+        
+        # Safely check for session
+        try:
+            if 'session' in request.scope:
+                user_id = request.session.get('user_id')
+        except:
+            pass
+        
         if user_id:
             try:
                 from app.core.deps import get_session
@@ -61,7 +69,7 @@ class WorkspaceMiddleware(BaseHTTPMiddleware):
                         
                         if user and user.workspace_id:
                             # Cache workspace_id in session for faster lookups
-                            if hasattr(request, 'session'):
+                            if 'session' in request.scope:
                                 request.session['workspace_id'] = user.workspace_id
                             
                             # Fetch workspace
