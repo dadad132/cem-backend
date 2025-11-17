@@ -4935,17 +4935,50 @@ Thank you.
     
     # Send email notification to client in background (if not internal comment)
     if not is_internal and ticket.guest_email:
+        print(f"[DEBUG] Triggering email notification for ticket #{ticket.ticket_number} to {ticket.guest_email}")
+        print(f"[DEBUG] is_internal={is_internal}, guest_email={ticket.guest_email}")
         import asyncio
-        asyncio.create_task(send_ticket_comment_email(ticket, content, user_id, db))
+        # Pass ticket details instead of ticket object to avoid session issues
+        asyncio.create_task(send_ticket_comment_email_background(
+            ticket.id, ticket.workspace_id, content, user_id
+        ))
+    else:
+        print(f"[DEBUG] NOT sending email: is_internal={is_internal}, guest_email={ticket.guest_email}")
     
     return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+
+
+async def send_ticket_comment_email_background(ticket_id: int, workspace_id: int, content: str, user_id: int):
+    """Send email notification in background with new DB session (non-blocking)"""
+    try:
+        print(f"[EMAIL] Background task started for ticket #{ticket_id}")
+        
+        # Create new database session for background task
+        from app.core.database import async_session_maker
+        async with async_session_maker() as db:
+            # Reload ticket in new session
+            ticket = (await db.execute(select(Ticket).where(Ticket.id == ticket_id))).scalar_one_or_none()
+            if not ticket:
+                print(f"❌ Ticket {ticket_id} not found in background task")
+                return
+            
+            print(f"[EMAIL] Ticket loaded: #{ticket.ticket_number}, guest_email={ticket.guest_email}")
+            
+            await send_ticket_comment_email(ticket, content, user_id, db)
+    except Exception as e:
+        print(f"❌ Error in background email task: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, db: AsyncSession):
     """Send email notification in background (non-blocking)"""
     try:
+        print(f"[EMAIL] send_ticket_comment_email called for ticket #{ticket.ticket_number}")
+        
         # Get user info
         user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        print(f"[EMAIL] User: {user.username if user else 'None'}")
         
         # Get email settings (always needed for SMTP connection)
         from app.models.email_settings import EmailSettings
@@ -4958,9 +4991,13 @@ async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, 
             print(f"❌ No email settings configured for workspace {ticket.workspace_id}")
             return
         
+        print(f"[EMAIL] SMTP settings found: {email_settings.smtp_host}:{email_settings.smtp_port}")
+        
         # Determine which email to send from
         from_email = email_settings.smtp_from_email
         from_name = email_settings.smtp_from_name or "Support Team"
+        
+        print(f"[EMAIL] Default from: {from_name} <{from_email}>")
         
         # Check if ticket is related to a project with support email
         if ticket.related_project_id:
@@ -4972,9 +5009,12 @@ async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, 
             if project and project.support_email:
                 from_email = project.support_email
                 from_name = f"{project.name} Support"
+                print(f"[EMAIL] Using project email: {from_name} <{from_email}>")
         
         # Send email if we have a sender address
         if from_email:
+            print(f"[EMAIL] Preparing to send email to {ticket.guest_email}")
+            
             import smtplib
             from email.mime.text import MIMEText
             from email.mime.multipart import MIMEMultipart
@@ -5029,20 +5069,26 @@ async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, 
             
             msg.attach(MIMEText(email_body, 'html'))
             
+            print(f"[EMAIL] Email message prepared, attempting to send via SMTP...")
+            
             # Send email in thread pool to avoid blocking
             import concurrent.futures
             loop = asyncio.get_event_loop()
             
             def send_email():
+                print(f"[EMAIL] Connecting to SMTP server {email_settings.smtp_host}:{email_settings.smtp_port}")
                 if email_settings.smtp_use_tls:
                     server = smtplib.SMTP(email_settings.smtp_host, email_settings.smtp_port)
                     server.starttls()
                 else:
                     server = smtplib.SMTP_SSL(email_settings.smtp_host, email_settings.smtp_port)
                 
+                print(f"[EMAIL] Logging in as {email_settings.smtp_username}")
                 server.login(email_settings.smtp_username, email_settings.smtp_password)
+                print(f"[EMAIL] Sending message...")
                 server.send_message(msg)
                 server.quit()
+                print(f"[EMAIL] SMTP connection closed successfully")
             
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 await loop.run_in_executor(pool, send_email)
