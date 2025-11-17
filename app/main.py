@@ -47,22 +47,37 @@ from starlette.middleware.base import BaseHTTPMiddleware
 class WorkspaceMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # Add workspace to request state for templates
-        workspace_id = request.session.get('workspace_id') if hasattr(request, 'session') else None
-        if workspace_id:
+        user_id = request.session.get('user_id') if hasattr(request, 'session') else None
+        if user_id:
             try:
                 from app.core.deps import get_session
                 from app.models.workspace import Workspace
                 async for db in get_session():
                     try:
-                        workspace = (await db.execute(
-                            select(Workspace).where(Workspace.id == workspace_id)
+                        # Get user first to find workspace_id
+                        user = (await db.execute(
+                            select(User).where(User.id == user_id)
                         )).scalar_one_or_none()
-                        if workspace:
-                            request.state.workspace = workspace
+                        
+                        if user and user.workspace_id:
+                            # Cache workspace_id in session for faster lookups
+                            if hasattr(request, 'session'):
+                                request.session['workspace_id'] = user.workspace_id
+                            
+                            # Fetch workspace
+                            workspace = (await db.execute(
+                                select(Workspace).where(Workspace.id == user.workspace_id)
+                            )).scalar_one_or_none()
+                            
+                            if workspace:
+                                request.state.workspace = workspace
                     finally:
                         break
-            except:
-                pass
+            except Exception as e:
+                # Log error but continue
+                import logging
+                logging.getLogger(__name__).debug(f"WorkspaceMiddleware error: {e}")
+        
         response = await call_next(request)
         return response
 
