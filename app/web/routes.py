@@ -49,42 +49,50 @@ def enhanced_template_response(name: str, context: dict, *args, **kwargs):
         from app.models.workspace import Workspace
         import asyncio
         
-        # Try to get user from context, or from request session
-        user = context.get('user')
+        # Try to get workspace_id from session directly (fastest)
         request = context.get('request')
+        workspace_id = None
         
-        user_id = None
-        if user:
-            user_id = user.workspace_id if hasattr(user, 'workspace_id') else None
-        elif request and hasattr(request, 'session'):
-            # Get user_id from session and fetch user
-            session_user_id = request.session.get('user_id')
-            if session_user_id:
-                async def get_user():
-                    from app.core.deps import get_session
-                    async for db in get_session():
-                        try:
-                            user = (await db.execute(
-                                select(User).where(User.id == session_user_id)
-                            )).scalar_one_or_none()
-                            return user.workspace_id if user else None
-                        finally:
-                            break
-                    return None
-                
-                try:
-                    loop = asyncio.get_event_loop()
-                    user_id = loop.run_until_complete(get_user())
-                except:
-                    pass
+        if request and hasattr(request, 'session'):
+            workspace_id = request.session.get('workspace_id')
         
-        if user_id:
+        # If no workspace_id in session, try from user object or user_id
+        if not workspace_id:
+            user = context.get('user')
+            if user and hasattr(user, 'workspace_id'):
+                workspace_id = user.workspace_id
+            elif request and hasattr(request, 'session'):
+                session_user_id = request.session.get('user_id')
+                if session_user_id:
+                    async def get_workspace_id():
+                        from app.core.deps import get_session
+                        async for db in get_session():
+                            try:
+                                user = (await db.execute(
+                                    select(User).where(User.id == session_user_id)
+                                )).scalar_one_or_none()
+                                if user:
+                                    # Cache it in session for next time
+                                    request.session['workspace_id'] = user.workspace_id
+                                    return user.workspace_id
+                            finally:
+                                break
+                        return None
+                    
+                    try:
+                        loop = asyncio.get_event_loop()
+                        workspace_id = loop.run_until_complete(get_workspace_id())
+                    except:
+                        pass
+        
+        # Fetch workspace if we have an ID
+        if workspace_id:
             async def get_workspace():
                 from app.core.deps import get_session
                 async for db in get_session():
                     try:
                         workspace = (await db.execute(
-                            select(Workspace).where(Workspace.id == user_id)
+                            select(Workspace).where(Workspace.id == workspace_id)
                         )).scalar_one_or_none()
                         return workspace
                     finally:
@@ -161,6 +169,7 @@ async def web_login_post(
         return templates.TemplateResponse('auth/login.html', {'request': request, 'error': 'Your account has been deactivated. Please contact your administrator.'}, status_code=403)
     
     request.session['user_id'] = user.id
+    request.session['workspace_id'] = user.workspace_id
     # Redirect to profile completion if not completed
     if not user.profile_completed:
         return RedirectResponse('/web/profile/complete', status_code=303)
