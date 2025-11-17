@@ -72,7 +72,16 @@ sudo apt install -y \
     curl \
     sqlite3 \
     nginx \
-    supervisor
+    supervisor \
+    python3-fastapi \
+    python3-uvicorn \
+    python3-sqlalchemy \
+    python3-aiofiles \
+    python3-pydantic \
+    python3-jwt \
+    python3-passlib \
+    python3-bcrypt \
+    python3-httpx
 print_status "Dependencies installed"
 
 # Check Python version
@@ -131,25 +140,11 @@ fi
 
 cd "$APP_DIR"
 
-# Create virtual environment
-print_info "Creating Python virtual environment..."
-python3 -m venv .venv --system-site-packages || python3 -m venv .venv
-print_status "Virtual environment created"
-
-# Activate virtual environment
-print_info "Activating virtual environment..."
-source .venv/bin/activate
-print_status "Virtual environment activated"
-
-# Upgrade pip in virtual environment
-print_info "Upgrading pip in virtual environment..."
-python -m pip install --upgrade pip
-print_status "Pip upgraded"
-
-# Install Python dependencies in virtual environment
+# Install any missing Python dependencies using system pip with --break-system-packages
 print_info "Installing Python dependencies..."
 if [ -f "requirements.txt" ]; then
-    python -m pip install -r requirements.txt
+    pip3 install --break-system-packages -r requirements.txt || \
+    python3 -m pip install --break-system-packages -r requirements.txt
     print_status "Python dependencies installed"
 else
     print_error "requirements.txt not found!"
@@ -196,7 +191,7 @@ fi
 
 # Initialize database
 print_info "Initializing database..."
-.venv/bin/python -c "
+python3 -c "
 import asyncio
 import sys
 sys.path.insert(0, '.')
