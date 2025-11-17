@@ -84,25 +84,22 @@
             
             {% if comments %}
             <div class="space-y-4">
-                {% for comment in comments %}
-                <!-- Only show non-internal comments to guests -->
-                {% if not comment.is_internal %}
+                {% for item in comments %}
                 <div class="border-l-4 border-blue-500 pl-4 py-2">
                     <div class="flex justify-between items-start mb-2">
                         <span class="font-medium text-gray-900">
-                            {% if comment.user %}
-                                {{ comment.user.full_name }} (Support Team)
+                            {% if item.user %}
+                                {{ item.user.full_name }} (Support Team)
                             {% else %}
                                 System
                             {% endif %}
                         </span>
                         <span class="text-sm text-gray-500">
-                            {{ comment.created_at.strftime('%b %d, %I:%M %p') }}
+                            {{ item.comment.created_at.strftime('%b %d, %I:%M %p') }}
                         </span>
                     </div>
-                    <div class="text-gray-700">{{ comment.content }}</div>
+                    <div class="text-gray-700">{{ item.comment.content }}</div>
                 </div>
-                {% endif %}
                 {% endfor %}
             </div>
             {% else %}

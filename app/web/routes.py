@@ -4691,16 +4691,22 @@ async def web_tickets_track_detail(
     )
     comments = comments_result.scalars().all()
     
-    # Load user info for comments
+    # Load user info for comments and create list of dicts
+    comments_with_users = []
     for comment in comments:
+        user = None
         if comment.user_id:
             user = (await db.execute(select(User).where(User.id == comment.user_id))).scalar_one_or_none()
-            comment.user = user
+        
+        comments_with_users.append({
+            'comment': comment,
+            'user': user
+        })
     
     return templates.TemplateResponse('tickets/track_detail.html', {
         'request': request,
         'ticket': ticket,
-        'comments': comments
+        'comments': comments_with_users
     })
 
 
