@@ -37,9 +37,14 @@ print_info() {
     echo -e "${YELLOW}[i]${NC} $1"
 }
 
+# Configuration - set APP_DIR based on user
+APP_NAME="crm-backend"
+SERVICE_NAME="crm-backend"
+PORT=8000
+
 # Check if running as root
 if [ "$EUID" -eq 0 ]; then 
-    print_info "Running as root - setting APP_DIR to /opt/crm-backend"
+    print_info "Running as root - installing to /opt/crm-backend"
     APP_DIR="/opt/$APP_NAME"
     # Use a regular user for service if possible
     if [ -z "$SUDO_USER" ]; then
@@ -48,9 +53,12 @@ if [ "$EUID" -eq 0 ]; then
         SERVICE_USER="$SUDO_USER"
     fi
 else
+    APP_DIR="$HOME/$APP_NAME"
     SERVICE_USER="$USER"
 fi
 
+print_info "Installation directory: $APP_DIR"
+print_info "Service will run as: $SERVICE_USER"
 print_info "Starting installation process..."
 
 # Update system packages
