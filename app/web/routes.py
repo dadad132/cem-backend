@@ -2088,7 +2088,8 @@ async def web_admin_comment_logs(request: Request, db: AsyncSession = Depends(ge
                 'modified': stat.st_mtime
             })
     
-    return enhanced_template_response(request, 'admin/comment_logs.html', {
+    return enhanced_template_response('admin/comment_logs.html', {
+        'request': request,
         'logs': logs,
         'user': user
     })
