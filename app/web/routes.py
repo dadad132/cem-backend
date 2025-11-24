@@ -43,15 +43,23 @@ _original_template_response = templates.TemplateResponse
 
 def enhanced_template_response(name: str, context: dict, *args, **kwargs):
     """Enhanced TemplateResponse that adds workspace from request state"""
+    print(f"[DEBUG] enhanced_template_response called for template: {name}")
     # ALWAYS add workspace to context if request is present
     if 'request' in context:
         request = context['request']
+        print(f"[DEBUG] Request found in context")
         # Check if workspace exists in request.state
         if hasattr(request, 'state') and hasattr(request.state, 'workspace'):
             context['workspace'] = request.state.workspace
+            print(f"[DEBUG] Workspace INJECTED from request.state: {request.state.workspace.name if request.state.workspace else 'None'}")
         # If not in state, try to get it from context (already passed)
         elif 'workspace' not in context:
             context['workspace'] = None
+            print(f"[DEBUG] No workspace in request.state, setting to None")
+        else:
+            print(f"[DEBUG] Workspace already in context")
+    else:
+        print(f"[DEBUG] No request in context")
     
     return _original_template_response(name, context, *args, **kwargs)
 
