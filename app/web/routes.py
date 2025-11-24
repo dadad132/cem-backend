@@ -5010,18 +5010,36 @@ async def web_tickets_archived(request: Request, db: AsyncSession = Depends(get_
     
     from app.models.ticket import Ticket
     
+    # Get search parameter
+    search_query = request.query_params.get('search', '').strip()
+    
     # Get archived tickets
-    tickets = (await db.execute(
-        select(Ticket).where(
-            Ticket.workspace_id == user.workspace_id,
-            Ticket.is_archived == True
-        ).order_by(Ticket.archived_at.desc())
-    )).scalars().all()
+    query = select(Ticket).where(
+        Ticket.workspace_id == user.workspace_id,
+        Ticket.is_archived == True
+    )
+    
+    # Search filter
+    if search_query:
+        from sqlalchemy import or_
+        search_pattern = f"%{search_query}%"
+        query = query.where(
+            or_(
+                Ticket.ticket_number.ilike(search_pattern),
+                Ticket.subject.ilike(search_pattern),
+                Ticket.description.ilike(search_pattern),
+                Ticket.guest_email.ilike(search_pattern)
+            )
+        )
+    
+    query = query.order_by(Ticket.archived_at.desc())
+    tickets = (await db.execute(query)).scalars().all()
     
     return templates.TemplateResponse('tickets/archived.html', {
         'request': request,
         'user': user,
-        'tickets': tickets
+        'tickets': tickets,
+        'search_query': search_query
     })
 
 
