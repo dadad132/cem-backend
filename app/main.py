@@ -89,10 +89,11 @@ class WorkspaceMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(WorkspaceMiddleware)
 
-BASE_DIR = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+# Import templates from web routes to get the enhanced version with workspace injection
+from app.web.routes import templates
 
 # Mount uploads directory for serving uploaded files (logos, attachments, etc.)
+BASE_DIR = Path(__file__).resolve().parent
 uploads_path = os.path.join(BASE_DIR, "uploads")
 os.makedirs(uploads_path, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=uploads_path), name="uploads")
@@ -139,5 +140,10 @@ app.include_router(web_routes.router, prefix="/web")
 # Minimal server-rendered pages
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    # Get workspace from request state (added by middleware)
+    workspace = getattr(request.state, 'workspace', None)
     # Render the landing page template
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "workspace": workspace
+    })
