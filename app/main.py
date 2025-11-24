@@ -78,6 +78,8 @@ class WorkspaceMiddleware(BaseHTTPMiddleware):
                         
                         if workspace:
                             request.state.workspace = workspace
+                            # DEBUG: Verify workspace has branding fields
+                            print(f"[Workspace] Set for user {user_id}: name={workspace.name}, logo={getattr(workspace, 'logo_url', 'NO ATTR')}, title={getattr(workspace, 'site_title', 'NO ATTR')}")
                             break
             except Exception as e:
                 # Log error but continue

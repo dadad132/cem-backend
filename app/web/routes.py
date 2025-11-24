@@ -43,16 +43,19 @@ _original_template_response = templates.TemplateResponse
 
 def enhanced_template_response(name: str, context: dict, *args, **kwargs):
     """Enhanced TemplateResponse that adds workspace from request state"""
-    # Add workspace to context if not already present
-    if 'workspace' not in context and 'request' in context:
+    # ALWAYS add workspace to context if request is present
+    if 'request' in context:
         request = context['request']
         # Check if workspace exists in request.state
         if hasattr(request, 'state') and hasattr(request.state, 'workspace'):
             context['workspace'] = request.state.workspace
+        # If not in state, try to get it from context (already passed)
+        elif 'workspace' not in context:
+            context['workspace'] = None
     
     return _original_template_response(name, context, *args, **kwargs)
 
-# Replace the TemplateResponse method
+# Replace the TemplateResponse method - this affects ALL template calls
 templates.TemplateResponse = enhanced_template_response
 
 # Convert UTC datetime to local time for display
