@@ -245,13 +245,15 @@ This is an automated message. Please do not reply to this email."""
                     company_name, auto_reply_enabled
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                1, "mail.kyotech.co.za", 587,
-                "support@kyotech.co.za", "CHANGE_ME",
-                "support@kyotech.co.za", "KyoTech Support", 1,
+                1, "smtp.example.com", 587,
+                "support@example.com", "CHANGE_ME_IN_ADMIN_SETTINGS",
+                "support@example.com", "Support Team", 1,
                 "Ticket Confirmation - #{ticket_number}", default_body,
-                "KyoTech Support", 1
+                "Your Company Name", 1
             ))
-            print("  ✓ Created default email settings")
+            print("  ✓ Created default email settings (PLEASE UPDATE IN ADMIN PANEL)")
+            print("  ⚠️  WARNING: Default email settings created with placeholder values")
+            print("  ⚠️  Go to Admin > Email Settings to configure your actual SMTP details")
         else:
             print("  - Email settings already exist")
         

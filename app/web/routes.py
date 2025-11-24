@@ -5195,7 +5195,7 @@ Subject: {ticket.subject}
 
 If you need further assistance, please:
 - Contact support at {email_settings.smtp_username} to request reopening this ticket
-- Or submit a new ticket at: https://kyotech.co.za/web/tickets/guest
+- Or submit a new support ticket
 
 Thank you.
 """
@@ -5295,6 +5295,10 @@ async def send_ticket_comment_email(ticket, content: str, user_id: int, db: Asyn
         
         if not email_settings:
             log(f"❌ No email settings configured for workspace {ticket.workspace_id}")
+            return
+        
+        if not email_settings.smtp_enabled:
+            log(f"❌ SMTP is disabled in email settings for workspace {ticket.workspace_id}")
             return
         
         log(f"[EMAIL] SMTP settings found: {email_settings.smtp_host}:{email_settings.smtp_port}")
