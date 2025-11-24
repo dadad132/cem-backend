@@ -5323,8 +5323,9 @@ async def send_ticket_comment_email(ticket, content: str, user_id: int, db: Asyn
             log(f"❌ No email settings configured for workspace {ticket.workspace_id}")
             return
         
-        if not email_settings.smtp_enabled:
-            log(f"❌ SMTP is disabled in email settings for workspace {ticket.workspace_id}")
+        # Check if SMTP settings are properly configured
+        if not email_settings.smtp_host or not email_settings.smtp_username or not email_settings.smtp_password:
+            log(f"❌ SMTP settings incomplete for workspace {ticket.workspace_id}")
             return
         
         log(f"[EMAIL] SMTP settings found: {email_settings.smtp_host}:{email_settings.smtp_port}")
