@@ -61,26 +61,24 @@ class WorkspaceMiddleware(BaseHTTPMiddleware):
                 from app.core.deps import get_session
                 from app.models.workspace import Workspace
                 async for db in get_session():
-                    try:
-                        # Get user first to find workspace_id
-                        user = (await db.execute(
-                            select(User).where(User.id == user_id)
+                    # Get user first to find workspace_id
+                    user = (await db.execute(
+                        select(User).where(User.id == user_id)
+                    )).scalar_one_or_none()
+                    
+                    if user and user.workspace_id:
+                        # Cache workspace_id in session for faster lookups
+                        if 'session' in request.scope:
+                            request.session['workspace_id'] = user.workspace_id
+                        
+                        # Fetch workspace
+                        workspace = (await db.execute(
+                            select(Workspace).where(Workspace.id == user.workspace_id)
                         )).scalar_one_or_none()
                         
-                        if user and user.workspace_id:
-                            # Cache workspace_id in session for faster lookups
-                            if 'session' in request.scope:
-                                request.session['workspace_id'] = user.workspace_id
-                            
-                            # Fetch workspace
-                            workspace = (await db.execute(
-                                select(Workspace).where(Workspace.id == user.workspace_id)
-                            )).scalar_one_or_none()
-                            
-                            if workspace:
-                                request.state.workspace = workspace
-                    finally:
-                        break
+                        if workspace:
+                            request.state.workspace = workspace
+                            break
             except Exception as e:
                 # Log error but continue
                 import logging

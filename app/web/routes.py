@@ -2096,7 +2096,7 @@ async def web_admin_comment_logs(request: Request, db: AsyncSession = Depends(ge
 
 @router.get('/admin/email-settings/comment-logs/{filename}')
 async def web_admin_download_comment_log(filename: str, request: Request, db: AsyncSession = Depends(get_session)):
-    """Download a specific comment email log file"""
+    """Download or view a specific comment email log file"""
     user_id = request.session.get('user_id')
     if not user_id:
         return JSONResponse({'success': False, 'error': 'Not authenticated'})
@@ -2106,16 +2106,23 @@ async def web_admin_download_comment_log(filename: str, request: Request, db: As
         return JSONResponse({'success': False, 'error': 'Admin access required'})
     
     from pathlib import Path
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, PlainTextResponse
     
     log_file = Path("logs/comment_emails") / filename
     
     # Security: prevent path traversal
-    if not log_file.is_relative_to(Path("logs/comment_emails")):
+    try:
+        log_file.resolve().relative_to(Path("logs/comment_emails").resolve())
+    except ValueError:
         return JSONResponse({'success': False, 'error': 'Invalid file path'})
     
     if not log_file.exists():
         return JSONResponse({'success': False, 'error': 'File not found'})
+    
+    # If viewing (not downloading), return as plain text
+    if request.query_params.get('view') == 'true':
+        content = log_file.read_text(encoding='utf-8')
+        return PlainTextResponse(content)
     
     return FileResponse(log_file, filename=filename, media_type='text/plain')
 
@@ -4518,6 +4525,7 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
     priority_filter = request.query_params.get('priority', 'all')
     assigned_filter = request.query_params.get('assigned', 'all')
     project_filter = request.query_params.get('project', 'all')  # New: filter by project scope
+    search_query = request.query_params.get('search', '').strip()
     
     # Base query - exclude archived
     query = select(Ticket).where(
@@ -4566,6 +4574,19 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
     elif assigned_filter == 'unassigned':
         query = query.where(Ticket.assigned_to_id.is_(None))
     
+    # Search filter
+    if search_query:
+        from sqlalchemy import or_
+        search_pattern = f"%{search_query}%"
+        query = query.where(
+            or_(
+                Ticket.ticket_number.ilike(search_pattern),
+                Ticket.subject.ilike(search_pattern),
+                Ticket.description.ilike(search_pattern),
+                Ticket.guest_email.ilike(search_pattern)
+            )
+        )
+    
     query = query.order_by(Ticket.created_at.desc())
     tickets = (await db.execute(query)).scalars().all()
     
@@ -4600,7 +4621,8 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
         'priority_filter': priority_filter,
         'assigned_filter': assigned_filter,
         'project_filter': project_filter,
-        'user_projects': user_projects
+        'user_projects': user_projects,
+        'search_query': search_query
     })
 
 
@@ -5246,8 +5268,10 @@ Thank you.
 
 
 
-async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, db: AsyncSession, write_log=None):
+async def send_ticket_comment_email(ticket, content: str, user_id: int, db: AsyncSession, write_log=None):
     """Send email notification in background (non-blocking)"""
+    from app.models.ticket import Ticket
+    
     def log(msg):
         if write_log:
             write_log(msg)
@@ -5354,6 +5378,7 @@ async def send_ticket_comment_email(ticket: Ticket, content: str, user_id: int, 
             
             # Send email in thread pool to avoid blocking
             import concurrent.futures
+            import asyncio
             loop = asyncio.get_event_loop()
             
             def send_email():
