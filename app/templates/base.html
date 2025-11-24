@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{{ title or (workspace.site_title if workspace and workspace.site_title else 'Kyotech Project Tracker') }}</title>
+    <title>{% block title %}{{ workspace.site_title if workspace and workspace.site_title else (workspace.name if workspace else 'CRM System') }}{% endblock %}</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://unpkg.com/htmx.org@1.9.12"></script>
@@ -76,7 +76,7 @@
           {% endif %}
           <div>
             <h1 class="text-xl font-bold text-white tracking-tight">
-              {{ workspace.site_title if workspace and workspace.site_title else 'Kyotech' }}
+              {{ workspace.site_title if workspace and workspace.site_title else (workspace.name if workspace else 'CRM') }}
             </h1>
             <p class="text-xs text-gray-400 font-medium">Project Tracker</p>
           </div>

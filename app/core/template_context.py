@@ -12,7 +12,7 @@ async def get_workspace_branding(db: AsyncSession, user_id: int = None):
     try:
         if not user_id:
             return {
-                'site_title': 'Kyotech Project Tracker',
+                'site_title': 'CRM System',
                 'logo_url': None,
                 'primary_color': '#2563eb'
             }
@@ -21,7 +21,7 @@ async def get_workspace_branding(db: AsyncSession, user_id: int = None):
         user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
         if not user:
             return {
-                'site_title': 'Kyotech Project Tracker',
+                'site_title': 'CRM System',
                 'logo_url': None,
                 'primary_color': '#2563eb'
             }
@@ -33,20 +33,20 @@ async def get_workspace_branding(db: AsyncSession, user_id: int = None):
         
         if not workspace:
             return {
-                'site_title': 'Kyotech Project Tracker',
+                'site_title': 'CRM System',
                 'logo_url': None,
                 'primary_color': '#2563eb'
             }
         
         return {
-            'site_title': workspace.site_title or workspace.name or 'Kyotech Project Tracker',
+            'site_title': workspace.site_title or workspace.name or 'CRM System',
             'logo_url': workspace.logo_url if hasattr(workspace, 'logo_url') else None,
             'primary_color': workspace.primary_color if hasattr(workspace, 'primary_color') else '#2563eb'
         }
     except Exception as e:
         # If there's any error (like missing columns), return defaults
         return {
-            'site_title': 'Kyotech Project Tracker',
+            'site_title': 'CRM System',
             'logo_url': None,
             'primary_color': '#2563eb'
         }

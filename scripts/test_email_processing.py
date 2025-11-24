@@ -31,7 +31,7 @@ async def test_email_configuration():
         if not settings:
             print("\n[ERROR] NO EMAIL SETTINGS FOUND!")
             print("\nYou need to configure email settings first.")
-            print("Run: python configure_kyotech_email.py")
+            print("Go to Admin > Email Settings in the web interface.")
             return False
         
         print(f"\n[OK] Email settings found for workspace {settings.workspace_id}")
@@ -76,7 +76,7 @@ async def test_email_configuration():
             print("\nTo route emails to project tasks:")
             print("1. Go to Projects")
             print("2. Edit a project")
-            print("3. Set the 'Support Email' field (e.g., project@kyotech.co.za)")
+            print("3. Set the 'Support Email' field (e.g., project@yourcompany.com)")
         
         print("\n" + "=" * 70)
         print("EMAIL ROUTING RULES")
