@@ -133,6 +133,7 @@ async def web_signup_post(
     request: Request,
     username: str = Form(...),
     password: str = Form(...),
+    company_name: str = Form(...),
     db: AsyncSession = Depends(get_session),
 ):
     # Import validation function
@@ -148,7 +149,10 @@ async def web_signup_post(
         return templates.TemplateResponse('auth/signup.html', {'request': request, 'error': 'Username already taken'}, status_code=400)
     # Create workspace and user
     # Self-registered users become admin of their own workspace
-    ws = Workspace(name=f"{username}'s Workspace")
+    ws = Workspace(
+        name=f"{username}'s Workspace",
+        site_title=company_name  # Use company name as the site title
+    )
     db.add(ws)
     await db.flush()
     user = User(
