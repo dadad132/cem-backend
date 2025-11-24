@@ -88,7 +88,9 @@ class EmailScheduler:
 
 
 # Global scheduler instance
-email_scheduler = EmailScheduler()
+from app.core.config import get_settings
+settings = get_settings()
+email_scheduler = EmailScheduler(check_interval=settings.email_check_interval)
 
 
 async def start_email_scheduler():

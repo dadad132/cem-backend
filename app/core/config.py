@@ -28,15 +28,13 @@ class Settings(BaseSettings):
     update_check_url: str = Field("", alias="UPDATE_CHECK_URL")
     update_check_interval: int = Field(86400, alias="UPDATE_CHECK_INTERVAL")
 
+    # Email-to-Ticket Configuration
+    email_check_interval: int = Field(60, alias="EMAIL_CHECK_INTERVAL")  # Default: 60 seconds (1 minute)
+
     # Google OAuth Configuration
     google_client_id: str = Field("", alias="GOOGLE_CLIENT_ID")
     google_client_secret: str = Field("", alias="GOOGLE_CLIENT_SECRET")
     google_redirect_uri: str = Field("http://localhost:8000/web/auth/google/callback", alias="GOOGLE_REDIRECT_URI")
-
-    # Email-to-Ticket Configuration
-    email_to_ticket_enabled: bool = Field(False, alias="EMAIL_TO_TICKET_ENABLED")
-    email_to_ticket_interval: int = Field(300, alias="EMAIL_TO_TICKET_CHECK_INTERVAL")  # 5 minutes
-    support_email: str = Field("support@example.com", alias="SUPPORT_EMAIL")
 
     class Config:
         env_file = ".env"
