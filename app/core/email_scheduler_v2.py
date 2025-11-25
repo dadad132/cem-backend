@@ -42,17 +42,14 @@ class EmailScheduler:
                     )
                     email_settings_list = result.scalars().all()
                     
+                    # Process all workspaces in parallel for faster response
+                    tasks = []
                     for settings in email_settings_list:
-                        try:
-                            tickets = await process_workspace_emails(db, settings.workspace_id)
-                            
-                            if tickets:
-                                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                                print(f"[{timestamp}] Workspace {settings.workspace_id}: Created {len(tickets)} ticket(s) from emails")
-                        
-                        except Exception as e:
-                            print(f"[Email-to-Ticket] Error processing workspace {settings.workspace_id}: {e}")
-                            continue
+                        tasks.append(self._process_workspace(db, settings.workspace_id))
+                    
+                    # Wait for all workspaces to complete processing
+                    if tasks:
+                        await asyncio.gather(*tasks, return_exceptions=True)
                 
                 # Wait for next check
                 await asyncio.sleep(self.check_interval)
@@ -60,6 +57,18 @@ class EmailScheduler:
             except Exception as e:
                 print(f"[Email-to-Ticket] Error in background task: {e}")
                 await asyncio.sleep(self.check_interval)
+    
+    async def _process_workspace(self, db: AsyncSession, workspace_id: int):
+        """Process emails for a single workspace"""
+        try:
+            tickets = await process_workspace_emails(db, workspace_id)
+            
+            if tickets:
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                print(f"[{timestamp}] Workspace {workspace_id}: Created {len(tickets)} ticket(s) from emails")
+        
+        except Exception as e:
+            print(f"[Email-to-Ticket] Error processing workspace {workspace_id}: {e}")
     
     async def start(self):
         """Start the scheduler"""
