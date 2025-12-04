@@ -668,38 +668,28 @@ Auto-created from email support request"""
         )
         db.add(history)
         
-        # Notify all users who have tickets assigned (excluding admins)
+        # Notify all non-admin users in the workspace about email reply
         from app.models.user import User
-        from sqlmodel import select, distinct
+        from sqlmodel import select
         
-        # Get all users who have tickets assigned to them, excluding admins
-        assigned_users_query = (
-            select(distinct(Ticket.assigned_to_id))
-            .where(Ticket.assigned_to_id.isnot(None))
-            .where(Ticket.workspace_id == ticket.workspace_id)
+        # Get all non-admin users in the workspace
+        users_query = (
+            select(User)
+            .where(User.workspace_id == ticket.workspace_id)
+            .where(User.is_admin == False)
         )
-        assigned_user_ids_result = await db.execute(assigned_users_query)
-        assigned_user_ids = [uid for uid in assigned_user_ids_result.scalars().all() if uid]
+        non_admin_users = (await db.execute(users_query)).scalars().all()
         
-        # Filter out admins
-        if assigned_user_ids:
-            users_query = (
-                select(User)
-                .where(User.id.in_(assigned_user_ids))
-                .where(User.is_admin == False)
+        # Create notification for each non-admin user
+        for user in non_admin_users:
+            notification = Notification(
+                user_id=user.id,
+                type='email_reply',
+                message=f'📧 Email reply received on ticket #{ticket.ticket_number} from {sender_email}',
+                url=f'/web/tickets/{ticket.id}',
+                related_id=ticket.id
             )
-            non_admin_users = (await db.execute(users_query)).scalars().all()
-            
-            # Create notification for each non-admin user with assigned tickets
-            for user in non_admin_users:
-                notification = Notification(
-                    user_id=user.id,
-                    type='email_reply',
-                    message=f'📧 Email reply received on ticket #{ticket.ticket_number} from {sender_email}',
-                    url=f'/web/tickets/{ticket.id}',
-                    related_id=ticket.id
-                )
-                db.add(notification)
+            db.add(notification)
         
         await db.commit()
         await db.refresh(comment)
