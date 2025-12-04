@@ -1113,15 +1113,21 @@ async def web_admin_generate_user_activity_pdf(
         .order_by(TaskHistory.created_at.desc())
     )).scalars().all()
     
-    # 4. Comments - Skip if causing issues
+    # 4. Comments - Using text() to avoid Pydantic attribute access issues
+    from sqlalchemy import text
     try:
-        comments = (await db.execute(
-            select(Comment)
-            .where(Comment.author_id == target_user_id)
-            .where(Comment.created_at >= start_dt)
-            .where(Comment.created_at < end_dt)
-            .order_by(Comment.created_at.desc())
-        )).scalars().all()
+        comments_result = await db.execute(
+            text("""
+                SELECT id, task_id, author_id, content, created_at 
+                FROM comment 
+                WHERE author_id = :user_id 
+                AND created_at >= :start_dt 
+                AND created_at < :end_dt 
+                ORDER BY created_at DESC
+            """),
+            {"user_id": target_user_id, "start_dt": start_dt, "end_dt": end_dt}
+        )
+        comments = comments_result.fetchall()
     except Exception as e:
         print(f"[!] Error fetching comments: {e}")
         comments = []
@@ -1396,10 +1402,12 @@ async def web_admin_generate_user_activity_pdf(
     if comments:
         comment_data = [['Date', 'Task ID', 'Comment']]
         for comment in comments[:10]:  # Limit to first 10
+            # comment is a tuple: (id, task_id, author_id, content, created_at)
+            comment_id, task_id, author_id, content, created_at = comment
             comment_data.append([
-                comment.created_at.strftime('%Y-%m-%d %H:%M'),
-                str(comment.task_id),
-                (comment.content or '')[:60],
+                created_at.strftime('%Y-%m-%d %H:%M') if isinstance(created_at, datetime) else str(created_at)[:16],
+                str(task_id),
+                (content or '')[:60],
             ])
         
         comment_table = Table(comment_data, colWidths=[1.5*inch, 0.8*inch, 4*inch])
