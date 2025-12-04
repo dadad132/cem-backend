@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlmodel import Field, Relationship, SQLModel
+from sqlmodel import Field, SQLModel, Column
+from sqlalchemy import Integer, String, DateTime, ForeignKey
 
 
 class CommentBase(SQLModel):
@@ -12,9 +13,11 @@ class CommentBase(SQLModel):
 
 
 class Comment(CommentBase, table=True):
+    __tablename__ = "comment"
+    
     id: Optional[int] = Field(default=None, primary_key=True)
-    task_id: int = Field(foreign_key="task.id")
-    author_id: int = Field(foreign_key="user.id")
+    task_id: int = Field(foreign_key="task.id", index=True)
+    author_id: int = Field(foreign_key="user.id", index=True)
 
 
 class CommentCreate(SQLModel):

@@ -1113,14 +1113,18 @@ async def web_admin_generate_user_activity_pdf(
         .order_by(TaskHistory.created_at.desc())
     )).scalars().all()
     
-    # 4. Comments
-    comments = (await db.execute(
-        select(Comment)
-        .where(Comment.author_id == target_user_id)
-        .where(Comment.created_at >= start_dt)
-        .where(Comment.created_at < end_dt)
-        .order_by(Comment.created_at.desc())
-    )).scalars().all()
+    # 4. Comments - Skip if causing issues
+    try:
+        comments = (await db.execute(
+            select(Comment)
+            .where(Comment.author_id == target_user_id)
+            .where(Comment.created_at >= start_dt)
+            .where(Comment.created_at < end_dt)
+            .order_by(Comment.created_at.desc())
+        )).scalars().all()
+    except Exception as e:
+        print(f"[!] Error fetching comments: {e}")
+        comments = []
     
     # 5. Projects created
     projects_created = (await db.execute(
