@@ -3363,7 +3363,7 @@ async def web_task_create(request: Request, project_id: int = Form(...), title: 
     # Auto-assign task to creator if they're not an admin
     if not user.is_admin:
         from app.models.assignment import Assignment
-        assignment = Assignment(task_id=task.id, assignee_id=user_id, assigner_id=user_id)
+        assignment = Assignment(task_id=task.id, assignee_id=user_id)
         db.add(assignment)
         await db.commit()
     
@@ -4171,7 +4171,7 @@ async def web_task_assign(request: Request, task_id: int, assignee_id: int = For
     # Check if already assigned
     existing = (await db.execute(select(Assignment).where(Assignment.task_id == task_id, Assignment.assignee_id == assignee_id))).scalar_one_or_none()
     if not existing:
-        assignment = Assignment(task_id=task_id, assignee_id=assignee_id, assigner_id=user_id)
+        assignment = Assignment(task_id=task_id, assignee_id=assignee_id)
         db.add(assignment)
         
         # Create notification for the assignee (don't notify if assigning to self)
