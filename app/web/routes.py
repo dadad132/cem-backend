@@ -1361,7 +1361,8 @@ async def web_admin_generate_user_activity_pdf(
     if task_assignments:
         assignment_data = [['Date', 'Title', 'Assigned By', 'Due Date', 'Status']]
         for task, assignment in task_assignments[:20]:
-            assigner = (await db.execute(select(User).where(User.id == assignment.assigner_id))).scalar_one_or_none()
+            # Task creator is the one who assigned it
+            assigner = (await db.execute(select(User).where(User.id == task.creator_id))).scalar_one_or_none()
             assigner_name = assigner.full_name or assigner.username if assigner else 'Unknown'
             due_str = task.due_date.strftime('%Y-%m-%d') if task.due_date else 'None'
             if task.due_date and is_overdue(task.due_date) and task.status.value not in ['completed', 'archived']:
