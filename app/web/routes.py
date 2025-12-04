@@ -1140,14 +1140,32 @@ async def web_admin_generate_user_activity_pdf(
         .order_by(Activity.created_at.desc())
     )).scalars().all()
     
-    # 7. Tickets closed (newly added)
-    from app.models.ticket import Ticket
+    # 7. Tickets closed
+    from app.models.ticket import Ticket, TicketComment
     tickets_closed = (await db.execute(
         select(Ticket)
         .where(Ticket.closed_by_id == target_user_id)
         .where(Ticket.closed_at >= start_dt)
         .where(Ticket.closed_at < end_dt)
         .order_by(Ticket.closed_at.desc())
+    )).scalars().all()
+    
+    # 8. Ticket comments
+    ticket_comments = (await db.execute(
+        select(TicketComment)
+        .where(TicketComment.author_id == target_user_id)
+        .where(TicketComment.created_at >= start_dt)
+        .where(TicketComment.created_at < end_dt)
+        .order_by(TicketComment.created_at.desc())
+    )).scalars().all()
+    
+    # 9. Tickets assigned
+    tickets_assigned = (await db.execute(
+        select(Ticket)
+        .where(Ticket.assigned_to_id == target_user_id)
+        .where(Ticket.created_at >= start_dt)
+        .where(Ticket.created_at < end_dt)
+        .order_by(Ticket.created_at.desc())
     )).scalars().all()
     
     # Generate PDF
@@ -1207,16 +1225,18 @@ async def web_admin_generate_user_activity_pdf(
     ))
     elements.append(Spacer(1, 0.3*inch))
     
-    # Summary section
+    # Summary section with enhanced metrics
     elements.append(Paragraph("Activity Summary", heading_style))
     summary_data = [
         ['Activity Type', 'Count'],
         ['Tasks Created', str(len(tasks_created))],
-        ['Task Assignments', str(len(task_assignments))],
-        ['Task Edits', str(len(task_edits))],
-        ['Comments Posted', str(len(comments))],
+        ['Task Assignments Received', str(len(task_assignments))],
+        ['Task Edits Made', str(len(task_edits))],
+        ['Task Comments Posted', str(len(comments))],
         ['Projects Created', str(len(projects_created))],
-        ['Activities Logged', str(len(activities))],
+        ['Activities Logged (Calls/Emails/Meetings)', str(len(activities))],
+        ['Tickets Assigned', str(len(tickets_assigned))],
+        ['Ticket Comments Posted', str(len(ticket_comments))],
         ['Tickets Closed', str(len(tickets_closed))],
     ]
     
@@ -1234,30 +1254,104 @@ async def web_admin_generate_user_activity_pdf(
     elements.append(summary_table)
     elements.append(Spacer(1, 0.3*inch))
     
-    # Tasks Created
-    if tasks_created:
-        elements.append(Paragraph("Tasks Created", heading_style))
-        task_data = [['Date', 'Title', 'Priority', 'Status']]
-        for task in tasks_created[:20]:  # Limit to first 20
-            task_data.append([
-                task.created_at.strftime('%Y-%m-%d %H:%M'),
-                task.title[:50],
+    # OVERDUE TASKS SECTION (Critical!)
+    now = datetime.now()
+    overdue_tasks = []
+    for task in tasks_created:
+        if task.due_date and task.due_date < now and task.status not in ['completed', 'archived']:
+            overdue_tasks.append(task)
+    for task, assignment in task_assignments:
+        if task.due_date and task.due_date < now and task.status not in ['completed', 'archived']:
+            if task not in overdue_tasks:
+                overdue_tasks.append(task)
+    
+    if overdue_tasks:
+        elements.append(Paragraph("⚠️ OVERDUE TASKS", heading_style))
+        overdue_data = [['Task Title', 'Due Date', 'Days Overdue', 'Priority', 'Status']]
+        for task in sorted(overdue_tasks, key=lambda t: t.due_date)[:15]:
+            days_overdue = (now - task.due_date).days
+            overdue_data.append([
+                task.title[:40],
+                task.due_date.strftime('%Y-%m-%d'),
+                str(days_overdue),
                 task.priority.value.title(),
                 task.status.value.replace('_', ' ').title(),
             ])
         
-        task_table = Table(task_data, colWidths=[1.5*inch, 2.5*inch, 1*inch, 1.5*inch])
+        overdue_table = Table(overdue_data, colWidths=[2.3*inch, 1*inch, 1.2*inch, 0.9*inch, 1*inch])
+        overdue_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#DC2626')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.lightpink, colors.mistyrose]),
+        ]))
+        elements.append(overdue_table)
+        elements.append(Spacer(1, 0.3*inch))
+    
+    # Tasks Created with enhanced details
+    if tasks_created:
+        elements.append(Paragraph("Tasks Created", heading_style))
+        task_data = [['Date Created', 'Title', 'Due Date', 'Priority', 'Status']]
+        for task in tasks_created[:25]:
+            due_str = task.due_date.strftime('%Y-%m-%d') if task.due_date else 'No due date'
+            if task.due_date and task.due_date < now and task.status not in ['completed', 'archived']:
+                due_str += ' (OVERDUE)'
+            task_data.append([
+                task.created_at.strftime('%Y-%m-%d'),
+                task.title[:35],
+                due_str,
+                task.priority.value.title(),
+                task.status.value.replace('_', ' ').title(),
+            ])
+        
+        task_table = Table(task_data, colWidths=[1.1*inch, 2*inch, 1.3*inch, 0.9*inch, 1.1*inch])
         task_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#10B981')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
             ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
             ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
             ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
         ]))
         elements.append(task_table)
+        elements.append(Spacer(1, 0.2*inch))
+    
+    # Task Assignments Received
+    if task_assignments:
+        elements.append(Paragraph("Task Assignments Received", heading_style))
+        assignment_data = [['Date', 'Title', 'Assigned By', 'Due Date', 'Status']]
+        for task, assignment in task_assignments[:20]:
+            assigner = (await db.execute(select(User).where(User.id == assignment.assigner_id))).scalar_one_or_none()
+            assigner_name = assigner.full_name or assigner.username if assigner else 'Unknown'
+            due_str = task.due_date.strftime('%Y-%m-%d') if task.due_date else 'None'
+            if task.due_date and task.due_date < now and task.status not in ['completed', 'archived']:
+                due_str += ' (LATE)'
+            assignment_data.append([
+                task.created_at.strftime('%Y-%m-%d'),
+                task.title[:30],
+                assigner_name[:15],
+                due_str,
+                task.status.value.replace('_', ' ').title(),
+            ])
+        
+        assignment_table = Table(assignment_data, colWidths=[1*inch, 1.8*inch, 1.2*inch, 1.2*inch, 1.2*inch])
+        assignment_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#6366F1')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+        ]))
+        elements.append(assignment_table)
         elements.append(Spacer(1, 0.2*inch))
     
     # Task Edits
@@ -1310,6 +1404,122 @@ async def web_admin_generate_user_activity_pdf(
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
         ]))
         elements.append(comment_table)
+        elements.append(Spacer(1, 0.2*inch))
+    
+    # Projects Created
+    if projects_created:
+        elements.append(Paragraph("Projects Created", heading_style))
+        from app.models.project_member import ProjectMember
+        project_data = [['Date', 'Project Name', 'Status', 'Members']]
+        for project in projects_created[:15]:
+            member_count = (await db.execute(
+                select(ProjectMember).where(ProjectMember.project_id == project.id)
+            )).scalars().all()
+            project_data.append([
+                project.created_at.strftime('%Y-%m-%d'),
+                project.name[:40],
+                project.status.value.title(),
+                str(len(member_count)),
+            ])
+        
+        project_table = Table(project_data, colWidths=[1.1*inch, 3*inch, 1.1*inch, 1.1*inch])
+        project_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8B5CF6')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lavender]),
+        ]))
+        elements.append(project_table)
+        elements.append(Spacer(1, 0.2*inch))
+    
+    # Activities Logged (Calls, Emails, Meetings, Notes)
+    if activities:
+        elements.append(Paragraph("Activities Logged (Calls, Emails, Meetings, Notes)", heading_style))
+        activity_data = [['Date', 'Type', 'Subject', 'Related To']]
+        for activity in activities[:15]:
+            related = ''
+            if activity.project_id:
+                proj = (await db.execute(select(Project).where(Project.id == activity.project_id))).scalar_one_or_none()
+                related = f"Project: {proj.name[:20]}" if proj else 'Project'
+            elif activity.contact_id:
+                related = f'Contact ID: {activity.contact_id}'
+            
+            activity_data.append([
+                activity.created_at.strftime('%Y-%m-%d'),
+                activity.activity_type.replace('_', ' ').title(),
+                (activity.subject or '')[:35],
+                related[:25],
+            ])
+        
+        activity_table = Table(activity_data, colWidths=[1*inch, 1.1*inch, 2.5*inch, 1.7*inch])
+        activity_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F59E0B')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgoldenrodyellow]),
+        ]))
+        elements.append(activity_table)
+        elements.append(Spacer(1, 0.2*inch))
+    
+    # Ticket Comments Posted
+    if ticket_comments:
+        elements.append(Paragraph("Ticket Comments Posted", heading_style))
+        tcomment_data = [['Date', 'Ticket ID', 'Comment Preview', 'Internal']]
+        for tc in ticket_comments[:15]:
+            tcomment_data.append([
+                tc.created_at.strftime('%Y-%m-%d'),
+                str(tc.ticket_id),
+                (tc.content or '')[:45],
+                'Yes' if tc.is_internal else 'No',
+            ])
+        
+        tcomment_table = Table(tcomment_data, colWidths=[1.1*inch, 1*inch, 3*inch, 1.2*inch])
+        tcomment_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#06B6D4')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightblue]),
+        ]))
+        elements.append(tcomment_table)
+        elements.append(Spacer(1, 0.2*inch))
+    
+    # Tickets Assigned to User
+    if tickets_assigned:
+        elements.append(Paragraph("Tickets Assigned to User", heading_style))
+        tassigned_data = [['Date Assigned', 'Ticket #', 'Subject', 'Priority', 'Status']]
+        for ticket in tickets_assigned[:15]:
+            tassigned_data.append([
+                ticket.created_at.strftime('%Y-%m-%d'),
+                ticket.ticket_number,
+                ticket.subject[:35],
+                ticket.priority.title(),
+                ticket.status.title(),
+            ])
+        
+        tassigned_table = Table(tassigned_data, colWidths=[1.2*inch, 1.1*inch, 2.2*inch, 0.9*inch, 0.9*inch])
+        tassigned_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#14B8A6')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+        ]))
+        elements.append(tassigned_table)
         elements.append(Spacer(1, 0.2*inch))
     
     # Tickets Closed
