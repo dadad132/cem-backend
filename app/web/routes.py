@@ -1258,10 +1258,10 @@ async def web_admin_generate_user_activity_pdf(
     now = datetime.now()
     overdue_tasks = []
     for task in tasks_created:
-        if task.due_date and task.due_date < now and task.status not in ['completed', 'archived']:
+        if task.due_date and task.due_date < now and task.status.value not in ['completed', 'archived']:
             overdue_tasks.append(task)
     for task, assignment in task_assignments:
-        if task.due_date and task.due_date < now and task.status not in ['completed', 'archived']:
+        if task.due_date and task.due_date < now and task.status.value not in ['completed', 'archived']:
             if task not in overdue_tasks:
                 overdue_tasks.append(task)
     
@@ -1298,7 +1298,7 @@ async def web_admin_generate_user_activity_pdf(
         task_data = [['Date Created', 'Title', 'Due Date', 'Priority', 'Status']]
         for task in tasks_created[:25]:
             due_str = task.due_date.strftime('%Y-%m-%d') if task.due_date else 'No due date'
-            if task.due_date and task.due_date < now and task.status not in ['completed', 'archived']:
+            if task.due_date and task.due_date < now and task.status.value not in ['completed', 'archived']:
                 due_str += ' (OVERDUE)'
             task_data.append([
                 task.created_at.strftime('%Y-%m-%d'),
@@ -1332,7 +1332,7 @@ async def web_admin_generate_user_activity_pdf(
             assigner = (await db.execute(select(User).where(User.id == assignment.assigner_id))).scalar_one_or_none()
             assigner_name = assigner.full_name or assigner.username if assigner else 'Unknown'
             due_str = task.due_date.strftime('%Y-%m-%d') if task.due_date else 'None'
-            if task.due_date and task.due_date < now and task.status not in ['completed', 'archived']:
+            if task.due_date and task.due_date < now and task.status.value not in ['completed', 'archived']:
                 due_str += ' (LATE)'
             assignment_data.append([
                 task.created_at.strftime('%Y-%m-%d'),
