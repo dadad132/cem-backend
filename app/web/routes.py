@@ -1168,6 +1168,19 @@ async def web_admin_generate_user_activity_pdf(
         .order_by(Ticket.created_at.desc())
     )).scalars().all()
     
+    # Debug logging
+    print(f"[DEBUG] Activity Report for user {target_user_id} ({target_user.username})")
+    print(f"[DEBUG] Date range: {start_dt} to {end_dt}")
+    print(f"[DEBUG] Tasks created: {len(tasks_created)}")
+    print(f"[DEBUG] Task assignments: {len(task_assignments)}")
+    print(f"[DEBUG] Task edits: {len(task_edits)}")
+    print(f"[DEBUG] Comments: {len(comments)}")
+    print(f"[DEBUG] Projects created: {len(projects_created)}")
+    print(f"[DEBUG] Activities: {len(activities)}")
+    print(f"[DEBUG] Tickets closed: {len(tickets_closed)}")
+    print(f"[DEBUG] Ticket comments: {len(ticket_comments)}")
+    print(f"[DEBUG] Tickets assigned: {len(tickets_assigned)}")
+    
     # Generate PDF
     from reportlab.lib.pagesizes import letter, A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -1392,24 +1405,30 @@ async def web_admin_generate_user_activity_pdf(
     if comments:
         comment_data = [['Date', 'Task ID', 'Comment']]
         for comment in comments[:10]:  # Limit to first 10
-            comment_data.append([
-                comment.created_at.strftime('%Y-%m-%d %H:%M'),
-                str(comment.task_id),
-                (comment.content or '')[:60],
-            ])
+            try:
+                created_at = comment.created_at.strftime('%Y-%m-%d %H:%M') if hasattr(comment, 'created_at') and comment.created_at else 'N/A'
+                task_id = str(comment.task_id) if hasattr(comment, 'task_id') else 'N/A'
+                content = (comment.content or '')[:60] if hasattr(comment, 'content') else ''
+                comment_data.append([created_at, task_id, content])
+            except Exception as e:
+                print(f"[!] Error processing comment: {e}")
+                continue
         
-        comment_table = Table(comment_data, colWidths=[1.5*inch, 0.8*inch, 4*inch])
-        comment_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8B5CF6')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
-        ]))
-        elements.append(comment_table)
+        if len(comment_data) > 1:  # Only create table if we have data beyond header
+            comment_table = Table(comment_data, colWidths=[1.5*inch, 0.8*inch, 4*inch])
+            comment_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8B5CF6')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+            ]))
+            elements.append(comment_table)
+        else:
+            elements.append(Paragraph("No comments posted during this period.", styles['Normal']))
     else:
         elements.append(Paragraph("No comments posted during this period.", styles['Normal']))
     elements.append(Spacer(1, 0.2*inch))
