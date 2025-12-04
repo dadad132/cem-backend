@@ -1293,8 +1293,8 @@ async def web_admin_generate_user_activity_pdf(
         elements.append(Spacer(1, 0.3*inch))
     
     # Tasks Created with enhanced details
+    elements.append(Paragraph("Tasks Created", heading_style))
     if tasks_created:
-        elements.append(Paragraph("Tasks Created", heading_style))
         task_data = [['Date Created', 'Title', 'Due Date', 'Priority', 'Status']]
         for task in tasks_created[:25]:
             due_str = task.due_date.strftime('%Y-%m-%d') if task.due_date else 'No due date'
@@ -1320,11 +1320,13 @@ async def web_admin_generate_user_activity_pdf(
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
         ]))
         elements.append(task_table)
-        elements.append(Spacer(1, 0.2*inch))
+    else:
+        elements.append(Paragraph("No tasks created during this period.", styles['Normal']))
+    elements.append(Spacer(1, 0.2*inch))
     
     # Task Assignments Received
+    elements.append(Paragraph("Task Assignments Received", heading_style))
     if task_assignments:
-        elements.append(Paragraph("Task Assignments Received", heading_style))
         assignment_data = [['Date', 'Title', 'Assigned By', 'Due Date', 'Status']]
         for task, assignment in task_assignments[:20]:
             assigner = (await db.execute(select(User).where(User.id == assignment.assigner_id))).scalar_one_or_none()
@@ -1352,11 +1354,13 @@ async def web_admin_generate_user_activity_pdf(
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
         ]))
         elements.append(assignment_table)
-        elements.append(Spacer(1, 0.2*inch))
+    else:
+        elements.append(Paragraph("No task assignments received during this period.", styles['Normal']))
+    elements.append(Spacer(1, 0.2*inch))
     
     # Task Edits
+    elements.append(Paragraph("Recent Task Edits", heading_style))
     if task_edits:
-        elements.append(Paragraph("Recent Task Edits", heading_style))
         edit_data = [['Date', 'Task ID', 'Field Changed', 'Old Value', 'New Value']]
         for edit in task_edits[:15]:  # Limit to first 15
             edit_data.append([
@@ -1379,11 +1383,13 @@ async def web_admin_generate_user_activity_pdf(
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
         ]))
         elements.append(edit_table)
-        elements.append(Spacer(1, 0.2*inch))
+    else:
+        elements.append(Paragraph("No task edits made during this period.", styles['Normal']))
+    elements.append(Spacer(1, 0.2*inch))
     
     # Comments
+    elements.append(Paragraph("Recent Comments", heading_style))
     if comments:
-        elements.append(Paragraph("Recent Comments", heading_style))
         comment_data = [['Date', 'Task ID', 'Comment']]
         for comment in comments[:10]:  # Limit to first 10
             comment_data.append([
@@ -1404,11 +1410,13 @@ async def web_admin_generate_user_activity_pdf(
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
         ]))
         elements.append(comment_table)
-        elements.append(Spacer(1, 0.2*inch))
+    else:
+        elements.append(Paragraph("No comments posted during this period.", styles['Normal']))
+    elements.append(Spacer(1, 0.2*inch))
     
     # Projects Created
+    elements.append(Paragraph("Projects Created", heading_style))
     if projects_created:
-        elements.append(Paragraph("Projects Created", heading_style))
         from app.models.project_member import ProjectMember
         project_data = [['Date', 'Project Name', 'Status', 'Members']]
         for project in projects_created[:15]:
@@ -1434,11 +1442,13 @@ async def web_admin_generate_user_activity_pdf(
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lavender]),
         ]))
         elements.append(project_table)
-        elements.append(Spacer(1, 0.2*inch))
+    else:
+        elements.append(Paragraph("No projects created during this period.", styles['Normal']))
+    elements.append(Spacer(1, 0.2*inch))
     
     # Activities Logged (Calls, Emails, Meetings, Notes)
+    elements.append(Paragraph("Activities Logged (Calls, Emails, Meetings, Notes)", heading_style))
     if activities:
-        elements.append(Paragraph("Activities Logged (Calls, Emails, Meetings, Notes)", heading_style))
         activity_data = [['Date', 'Type', 'Subject', 'Related To']]
         for activity in activities[:15]:
             related = ''
@@ -1467,11 +1477,13 @@ async def web_admin_generate_user_activity_pdf(
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgoldenrodyellow]),
         ]))
         elements.append(activity_table)
-        elements.append(Spacer(1, 0.2*inch))
+    else:
+        elements.append(Paragraph("No activities logged during this period.", styles['Normal']))
+    elements.append(Spacer(1, 0.2*inch))
     
     # Ticket Comments Posted
+    elements.append(Paragraph("Ticket Comments Posted", heading_style))
     if ticket_comments:
-        elements.append(Paragraph("Ticket Comments Posted", heading_style))
         tcomment_data = [['Date', 'Ticket ID', 'Comment Preview', 'Internal']]
         for tc in ticket_comments[:15]:
             tcomment_data.append([
@@ -1493,11 +1505,13 @@ async def web_admin_generate_user_activity_pdf(
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightblue]),
         ]))
         elements.append(tcomment_table)
-        elements.append(Spacer(1, 0.2*inch))
+    else:
+        elements.append(Paragraph("No ticket comments posted during this period.", styles['Normal']))
+    elements.append(Spacer(1, 0.2*inch))
     
     # Tickets Assigned to User
+    elements.append(Paragraph("Tickets Assigned to User", heading_style))
     if tickets_assigned:
-        elements.append(Paragraph("Tickets Assigned to User", heading_style))
         tassigned_data = [['Date Assigned', 'Ticket #', 'Subject', 'Priority', 'Status']]
         for ticket in tickets_assigned[:15]:
             tassigned_data.append([
@@ -1520,11 +1534,13 @@ async def web_admin_generate_user_activity_pdf(
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
         ]))
         elements.append(tassigned_table)
-        elements.append(Spacer(1, 0.2*inch))
+    else:
+        elements.append(Paragraph("No tickets assigned to this user during this period.", styles['Normal']))
+    elements.append(Spacer(1, 0.2*inch))
     
     # Tickets Closed
+    elements.append(Paragraph("Tickets Closed", heading_style))
     if tickets_closed:
-        elements.append(Paragraph("Tickets Closed", heading_style))
         ticket_data = [['Date Closed', 'Ticket #', 'Subject', 'Priority']]
         for ticket in tickets_closed[:20]:  # Limit to first 20
             ticket_data.append([
@@ -1545,6 +1561,10 @@ async def web_admin_generate_user_activity_pdf(
             ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
         ]))
+        elements.append(ticket_table)
+    else:
+        elements.append(Paragraph("No tickets closed during this period.", styles['Normal']))
+    elements.append(Spacer(1, 0.2*inch))
         elements.append(ticket_table)
         elements.append(Spacer(1, 0.2*inch))
     
