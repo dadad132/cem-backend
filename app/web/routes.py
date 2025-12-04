@@ -1565,8 +1565,6 @@ async def web_admin_generate_user_activity_pdf(
     else:
         elements.append(Paragraph("No tickets closed during this period.", styles['Normal']))
     elements.append(Spacer(1, 0.2*inch))
-        elements.append(ticket_table)
-        elements.append(Spacer(1, 0.2*inch))
     
     # Build PDF
     doc.build(elements)
