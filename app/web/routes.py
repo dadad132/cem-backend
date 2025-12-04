@@ -1274,25 +1274,37 @@ async def web_admin_generate_user_activity_pdf(
     elements.append(Spacer(1, 0.3*inch))
     
     # OVERDUE TASKS SECTION (Critical!)
+    from datetime import date as date_type
     now = datetime.now()
-    now_date = now.date()  # Convert to date for comparison
+    now_date = now.date()
+    
+    # Helper function to handle both date and datetime
+    def is_overdue(due_date):
+        if not due_date:
+            return False
+        # Convert to date if it's a datetime
+        if isinstance(due_date, datetime):
+            due_date = due_date.date()
+        return due_date < now_date
+    
     overdue_tasks = []
     for task in tasks_created:
-        if task.due_date and task.due_date < now_date and task.status.value not in ['completed', 'archived']:
+        if task.due_date and is_overdue(task.due_date) and task.status.value not in ['completed', 'archived']:
             overdue_tasks.append(task)
     for task, assignment in task_assignments:
-        if task.due_date and task.due_date < now_date and task.status.value not in ['completed', 'archived']:
+        if task.due_date and is_overdue(task.due_date) and task.status.value not in ['completed', 'archived']:
             if task not in overdue_tasks:
                 overdue_tasks.append(task)
     
     if overdue_tasks:
         elements.append(Paragraph("⚠️ OVERDUE TASKS", heading_style))
         overdue_data = [['Task Title', 'Due Date', 'Days Overdue', 'Priority', 'Status']]
-        for task in sorted(overdue_tasks, key=lambda t: t.due_date)[:15]:
-            days_overdue = (now_date - task.due_date).days
+        for task in sorted(overdue_tasks, key=lambda t: t.due_date if isinstance(t.due_date, date_type) else t.due_date.date())[:15]:
+            task_due_date = task.due_date if isinstance(task.due_date, date_type) else task.due_date.date()
+            days_overdue = (now_date - task_due_date).days
             overdue_data.append([
                 task.title[:40],
-                task.due_date.strftime('%Y-%m-%d'),
+                task_due_date.strftime('%Y-%m-%d'),
                 str(days_overdue),
                 task.priority.value.title(),
                 task.status.value.replace('_', ' ').title(),
@@ -1318,7 +1330,7 @@ async def web_admin_generate_user_activity_pdf(
         task_data = [['Date Created', 'Title', 'Due Date', 'Priority', 'Status']]
         for task in tasks_created[:25]:
             due_str = task.due_date.strftime('%Y-%m-%d') if task.due_date else 'No due date'
-            if task.due_date and task.due_date < now_date and task.status.value not in ['completed', 'archived']:
+            if task.due_date and is_overdue(task.due_date) and task.status.value not in ['completed', 'archived']:
                 due_str += ' (OVERDUE)'
             task_data.append([
                 task.created_at.strftime('%Y-%m-%d'),
@@ -1352,7 +1364,7 @@ async def web_admin_generate_user_activity_pdf(
             assigner = (await db.execute(select(User).where(User.id == assignment.assigner_id))).scalar_one_or_none()
             assigner_name = assigner.full_name or assigner.username if assigner else 'Unknown'
             due_str = task.due_date.strftime('%Y-%m-%d') if task.due_date else 'None'
-            if task.due_date and task.due_date < now_date and task.status.value not in ['completed', 'archived']:
+            if task.due_date and is_overdue(task.due_date) and task.status.value not in ['completed', 'archived']:
                 due_str += ' (LATE)'
             assignment_data.append([
                 task.created_at.strftime('%Y-%m-%d'),
