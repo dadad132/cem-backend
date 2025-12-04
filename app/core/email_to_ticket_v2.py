@@ -668,16 +668,38 @@ Auto-created from email support request"""
         )
         db.add(history)
         
-        # Notify assigned user
-        if ticket.assigned_to_id:
-            notification = Notification(
-                user_id=ticket.assigned_to_id,
-                type='ticket',
-                message=f'New email reply on ticket #{ticket.ticket_number} from {sender_email}',
-                url=f'/web/tickets/{ticket.id}',
-                related_id=ticket.id
+        # Notify all users who have tickets assigned (excluding admins)
+        from app.models.user import User
+        from sqlmodel import select, distinct
+        
+        # Get all users who have tickets assigned to them, excluding admins
+        assigned_users_query = (
+            select(distinct(Ticket.assigned_to_id))
+            .where(Ticket.assigned_to_id.isnot(None))
+            .where(Ticket.workspace_id == ticket.workspace_id)
+        )
+        assigned_user_ids_result = await db.execute(assigned_users_query)
+        assigned_user_ids = [uid for uid in assigned_user_ids_result.scalars().all() if uid]
+        
+        # Filter out admins
+        if assigned_user_ids:
+            users_query = (
+                select(User)
+                .where(User.id.in_(assigned_user_ids))
+                .where(User.is_admin == False)
             )
-            db.add(notification)
+            non_admin_users = (await db.execute(users_query)).scalars().all()
+            
+            # Create notification for each non-admin user with assigned tickets
+            for user in non_admin_users:
+                notification = Notification(
+                    user_id=user.id,
+                    type='email_reply',
+                    message=f'📧 Email reply received on ticket #{ticket.ticket_number} from {sender_email}',
+                    url=f'/web/tickets/{ticket.id}',
+                    related_id=ticket.id
+                )
+                db.add(notification)
         
         await db.commit()
         await db.refresh(comment)
