@@ -1160,14 +1160,23 @@ async def web_admin_generate_user_activity_pdf(
         .order_by(Ticket.closed_at.desc())
     )).scalars().all()
     
-    # 8. Ticket comments
-    ticket_comments = (await db.execute(
-        select(TicketComment)
-        .where(TicketComment.author_id == target_user_id)
-        .where(TicketComment.created_at >= start_dt)
-        .where(TicketComment.created_at < end_dt)
-        .order_by(TicketComment.created_at.desc())
-    )).scalars().all()
+    # 8. Ticket comments - Using raw SQL to avoid Pydantic issues
+    try:
+        ticket_comments_result = await db.execute(
+            text("""
+                SELECT id, ticket_id, author_id, user_id, content, is_internal, created_at 
+                FROM ticketcomment 
+                WHERE (author_id = :user_id OR user_id = :user_id)
+                AND created_at >= :start_dt 
+                AND created_at < :end_dt 
+                ORDER BY created_at DESC
+            """),
+            {"user_id": target_user_id, "start_dt": start_dt, "end_dt": end_dt}
+        )
+        ticket_comments = ticket_comments_result.fetchall()
+    except Exception as e:
+        print(f"[!] Error fetching ticket comments: {e}")
+        ticket_comments = []
     
     # 9. Tickets assigned
     tickets_assigned = (await db.execute(
@@ -1498,11 +1507,13 @@ async def web_admin_generate_user_activity_pdf(
     if ticket_comments:
         tcomment_data = [['Date', 'Ticket ID', 'Comment Preview', 'Internal']]
         for tc in ticket_comments[:15]:
+            # tc is a tuple: (id, ticket_id, author_id, user_id, content, is_internal, created_at)
+            tc_id, ticket_id, author_id, user_id, content, is_internal, created_at = tc
             tcomment_data.append([
-                tc.created_at.strftime('%Y-%m-%d'),
-                str(tc.ticket_id),
-                (tc.content or '')[:45],
-                'Yes' if tc.is_internal else 'No',
+                created_at.strftime('%Y-%m-%d') if isinstance(created_at, datetime) else str(created_at)[:10],
+                str(ticket_id),
+                (content or '')[:45],
+                'Yes' if is_internal else 'No',
             ])
         
         tcomment_table = Table(tcomment_data, colWidths=[1.1*inch, 1*inch, 3*inch, 1.2*inch])
