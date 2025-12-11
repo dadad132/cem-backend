@@ -64,31 +64,31 @@
       <label class="block text-xs mb-1">Working Days (for date calculation)</label>
       <div class="flex flex-wrap gap-3">
         <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
-          <input type="checkbox" name="working_days" value="1" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <input type="checkbox" name="working_days" value="0" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
           <span>Mon</span>
         </label>
         <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
-          <input type="checkbox" name="working_days" value="2" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <input type="checkbox" name="working_days" value="1" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
           <span>Tue</span>
         </label>
         <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
-          <input type="checkbox" name="working_days" value="3" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <input type="checkbox" name="working_days" value="2" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
           <span>Wed</span>
         </label>
         <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
-          <input type="checkbox" name="working_days" value="4" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <input type="checkbox" name="working_days" value="3" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
           <span>Thu</span>
         </label>
         <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
-          <input type="checkbox" name="working_days" value="5" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <input type="checkbox" name="working_days" value="4" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
           <span>Fri</span>
         </label>
         <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
-          <input type="checkbox" name="working_days" value="6" class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <input type="checkbox" name="working_days" value="5" class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
           <span>Sat</span>
         </label>
         <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
-          <input type="checkbox" name="working_days" value="0" class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <input type="checkbox" name="working_days" value="6" class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
           <span>Sun</span>
         </label>
       </div>
@@ -220,6 +220,13 @@
   }));
 
   // Working days date calculator
+  // Note: We use Python weekday convention: Mon=0, Tue=1, ... Sun=6
+  // JavaScript getDay() returns: Sun=0, Mon=1, ... Sat=6
+  // So we convert JS day to Python day: (jsDay + 6) % 7
+  function jsDayToPythonDay(jsDay) {
+    return (jsDay + 6) % 7;
+  }
+  
   function calculateDueDate(startDateId, durationId, targetDateId, checkboxSelector) {
     const startInput = document.getElementById(startDateId);
     const durationInput = document.getElementById(durationId);
@@ -232,7 +239,7 @@
     
     if (!startDate || !duration || duration < 1) return;
     
-    // Get selected working days (0=Sun, 1=Mon, ..., 6=Sat)
+    // Get selected working days (Python convention: 0=Mon, 1=Tue, ..., 6=Sun)
     const checkboxes = document.querySelectorAll(checkboxSelector + ':checked');
     const workingDays = Array.from(checkboxes).map(cb => parseInt(cb.value));
     
@@ -246,13 +253,15 @@
     let daysAdded = 0;
     
     // Start counting from start date if it's a working day
-    if (workingDays.includes(currentDate.getDay())) {
+    const startPythonDay = jsDayToPythonDay(currentDate.getDay());
+    if (workingDays.includes(startPythonDay)) {
       daysAdded = 1;
     }
     
     while (daysAdded < duration) {
       currentDate.setDate(currentDate.getDate() + 1);
-      if (workingDays.includes(currentDate.getDay())) {
+      const pythonDay = jsDayToPythonDay(currentDate.getDay());
+      if (workingDays.includes(pythonDay)) {
         daysAdded++;
       }
     }

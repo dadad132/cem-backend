@@ -69,6 +69,7 @@ def main():
     changes_made |= add_column_if_not_exists(cursor, "task", "is_archived", "BOOLEAN", "0")
     changes_made |= add_column_if_not_exists(cursor, "task", "archived_at", "DATETIME", "NULL")
     changes_made |= add_column_if_not_exists(cursor, "task", "parent_task_id", "INTEGER", "NULL")
+    changes_made |= add_column_if_not_exists(cursor, "task", "working_days", "VARCHAR", "'0,1,2,3,4'")
     
     # Ticket table - missing columns
     print("\n📋 Checking 'ticket' table...")
@@ -83,6 +84,7 @@ def main():
     changes_made |= add_column_if_not_exists(cursor, "ticket", "guest_company", "VARCHAR", "NULL")
     changes_made |= add_column_if_not_exists(cursor, "ticket", "guest_office_number", "VARCHAR", "NULL")
     changes_made |= add_column_if_not_exists(cursor, "ticket", "guest_branch", "VARCHAR", "NULL")
+    changes_made |= add_column_if_not_exists(cursor, "ticket", "working_days", "VARCHAR", "'0,1,2,3,4'")
     
     if changes_made:
         conn.commit()

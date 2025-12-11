@@ -18,6 +18,8 @@ class TaskBase(SQLModel):
     start_time: Optional[time] = None
     due_date: Optional[date] = None
     due_time: Optional[time] = None
+    # Working days (comma-separated: "0,1,2,3,4" for Mon-Fri, where Mon=0, Sun=6)
+    working_days: Optional[str] = Field(default="0,1,2,3,4")
     # Time tracking
     estimated_hours: Optional[float] = None
     time_spent_hours: Optional[float] = None

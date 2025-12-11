@@ -43,6 +43,8 @@ class TicketBase(SQLModel):
     
     # Scheduled date/time for calendar integration
     scheduled_date: Optional[datetime] = None
+    # Working days (comma-separated: "0,1,2,3,4" for Mon-Fri, where Mon=0, Sun=6)
+    working_days: Optional[str] = Field(default="0,1,2,3,4")
     
     # Archive support
     is_archived: bool = False

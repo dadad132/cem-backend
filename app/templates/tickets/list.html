@@ -316,31 +316,31 @@
                 <label class="block text-sm font-medium text-gray-700 mb-1">Working Days (for scheduling)</label>
                 <div class="flex flex-wrap gap-3">
                     <label class="inline-flex items-center gap-1 text-sm cursor-pointer">
-                        <input type="checkbox" name="ticket_working_days" value="1" checked class="ticket-working-day rounded border-gray-300" />
+                        <input type="checkbox" name="ticket_working_days" value="0" checked class="ticket-working-day rounded border-gray-300" />
                         <span>Mon</span>
                     </label>
                     <label class="inline-flex items-center gap-1 text-sm cursor-pointer">
-                        <input type="checkbox" name="ticket_working_days" value="2" checked class="ticket-working-day rounded border-gray-300" />
+                        <input type="checkbox" name="ticket_working_days" value="1" checked class="ticket-working-day rounded border-gray-300" />
                         <span>Tue</span>
                     </label>
                     <label class="inline-flex items-center gap-1 text-sm cursor-pointer">
-                        <input type="checkbox" name="ticket_working_days" value="3" checked class="ticket-working-day rounded border-gray-300" />
+                        <input type="checkbox" name="ticket_working_days" value="2" checked class="ticket-working-day rounded border-gray-300" />
                         <span>Wed</span>
                     </label>
                     <label class="inline-flex items-center gap-1 text-sm cursor-pointer">
-                        <input type="checkbox" name="ticket_working_days" value="4" checked class="ticket-working-day rounded border-gray-300" />
+                        <input type="checkbox" name="ticket_working_days" value="3" checked class="ticket-working-day rounded border-gray-300" />
                         <span>Thu</span>
                     </label>
                     <label class="inline-flex items-center gap-1 text-sm cursor-pointer">
-                        <input type="checkbox" name="ticket_working_days" value="5" checked class="ticket-working-day rounded border-gray-300" />
+                        <input type="checkbox" name="ticket_working_days" value="4" checked class="ticket-working-day rounded border-gray-300" />
                         <span>Fri</span>
                     </label>
                     <label class="inline-flex items-center gap-1 text-sm cursor-pointer">
-                        <input type="checkbox" name="ticket_working_days" value="6" class="ticket-working-day rounded border-gray-300" />
+                        <input type="checkbox" name="ticket_working_days" value="5" class="ticket-working-day rounded border-gray-300" />
                         <span>Sat</span>
                     </label>
                     <label class="inline-flex items-center gap-1 text-sm cursor-pointer">
-                        <input type="checkbox" name="ticket_working_days" value="0" class="ticket-working-day rounded border-gray-300" />
+                        <input type="checkbox" name="ticket_working_days" value="6" class="ticket-working-day rounded border-gray-300" />
                         <span>Sun</span>
                     </label>
                 </div>
@@ -375,6 +375,13 @@
 {% block scripts %}
 <script>
 // Working days date calculator for tickets
+// Note: We use Python weekday convention: Mon=0, Tue=1, ... Sun=6
+// JavaScript getDay() returns: Sun=0, Mon=1, ... Sat=6
+// So we convert JS day to Python day: (jsDay + 6) % 7
+function jsDayToPythonDay(jsDay) {
+    return (jsDay + 6) % 7;
+}
+
 function calculateTicketDueDate() {
     const durationInput = document.getElementById('ticket-duration');
     const targetInput = document.getElementById('ticket-scheduled-date');
@@ -384,7 +391,7 @@ function calculateTicketDueDate() {
     const duration = parseInt(durationInput.value);
     if (!duration || duration < 1) return;
     
-    // Get selected working days (0=Sun, 1=Mon, ..., 6=Sat)
+    // Get selected working days (Python convention: 0=Mon, 1=Tue, ..., 6=Sun)
     const checkboxes = document.querySelectorAll('.ticket-working-day:checked');
     const workingDays = Array.from(checkboxes).map(cb => parseInt(cb.value));
     
@@ -398,13 +405,15 @@ function calculateTicketDueDate() {
     let daysAdded = 0;
     
     // Start counting from today if it's a working day
-    if (workingDays.includes(currentDate.getDay())) {
+    const startPythonDay = jsDayToPythonDay(currentDate.getDay());
+    if (workingDays.includes(startPythonDay)) {
         daysAdded = 1;
     }
     
     while (daysAdded < duration) {
         currentDate.setDate(currentDate.getDate() + 1);
-        if (workingDays.includes(currentDate.getDay())) {
+        const pythonDay = jsDayToPythonDay(currentDate.getDay());
+        if (workingDays.includes(pythonDay)) {
             daysAdded++;
         }
     }

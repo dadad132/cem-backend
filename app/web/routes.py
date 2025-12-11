@@ -3352,7 +3352,7 @@ async def web_project_detail(request: Request, project_id: int, db: AsyncSession
 
 # Tasks
 @router.post('/tasks/create')
-async def web_task_create(request: Request, project_id: int = Form(...), title: str = Form(...), description: Optional[str] = Form(None), subtasks: Optional[str] = Form(None), priority: str = Form('medium'), start_date_value: Optional[str] = Form(None), start_time_value: Optional[str] = Form(None), due_date_value: Optional[str] = Form(None), due_time_value: Optional[str] = Form(None), db: AsyncSession = Depends(get_session)):
+async def web_task_create(request: Request, project_id: int = Form(...), title: str = Form(...), description: Optional[str] = Form(None), subtasks: Optional[str] = Form(None), priority: str = Form('medium'), start_date_value: Optional[str] = Form(None), start_time_value: Optional[str] = Form(None), due_date_value: Optional[str] = Form(None), due_time_value: Optional[str] = Form(None), working_days: Optional[List[str]] = Form(None), db: AsyncSession = Depends(get_session)):
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
@@ -3391,6 +3391,9 @@ async def web_task_create(request: Request, project_id: int = Form(...), title: 
     except ValueError:
         task_priority = TaskPriority.medium
     
+    # Parse working days (default to Mon-Fri if not provided)
+    working_days_str = ','.join(working_days) if working_days else '0,1,2,3,4'
+    
     task = Task(
         title=title, 
         description=description, 
@@ -3400,7 +3403,8 @@ async def web_task_create(request: Request, project_id: int = Form(...), title: 
         start_date=start_date,
         start_time=start_time_obj,
         due_date=due_date,
-        due_time=due_time_obj
+        due_time=due_time_obj,
+        working_days=working_days_str
     )
     db.add(task)
     await db.commit()
@@ -5019,6 +5023,7 @@ async def web_tickets_create(
     category: str = Form('general'),
     assigned_to_id: Optional[str] = Form(None),
     scheduled_date: Optional[str] = Form(None),
+    ticket_working_days: Optional[List[str]] = Form(None),
     db: AsyncSession = Depends(get_session)
 ):
     """Create a new ticket"""
@@ -5055,6 +5060,9 @@ async def web_tickets_create(
         except ValueError:
             pass
     
+    # Parse working days (default to Mon-Fri if not provided)
+    working_days_str = ','.join(ticket_working_days) if ticket_working_days else '0,1,2,3,4'
+    
     # Generate ticket number using MAX to avoid race conditions
     year = datetime.utcnow().year
     from sqlalchemy import func, text
@@ -5078,7 +5086,8 @@ async def web_tickets_create(
         assigned_to_id=assigned_to_user_id,
         created_by_id=user_id,
         workspace_id=user.workspace_id,
-        scheduled_date=scheduled_datetime
+        scheduled_date=scheduled_datetime,
+        working_days=working_days_str
     )
     db.add(ticket)
     await db.flush()
