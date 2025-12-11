@@ -50,6 +50,19 @@ def start_server(host=None, port=8000, use_public_ip=True):
             print("[!] Failed to restore database. Server may not start properly.")
             return
     
+    # Run attachment scanner to fix broken paths
+    print("[*] Scanning for attachments...")
+    try:
+        from app.core.attachment_scanner import run_attachment_scan
+        results = run_attachment_scan(db_path='data.db', fix_paths=True)
+        if results['fixed'] > 0:
+            print(f"[+] Fixed {results['fixed']} broken attachment paths")
+        if results['missing'] > 0:
+            print(f"[!] Warning: {results['missing']} attachments have missing files")
+        print(f"[+] Attachment scan complete ({results['ok']} OK, {results['scanned']} total)")
+    except Exception as e:
+        print(f"[!] Attachment scan failed: {e}")
+    
     # Detect IP if not provided
     if host is None:
         if use_public_ip:
