@@ -191,7 +191,13 @@ class UpdateManager:
             migrations_dir = self.app_dir / "migrations"
             if migrations_dir.exists():
                 logger.info("Running migration scripts...")
-                for migration_script in sorted(migrations_dir.glob("migrate_*.py")):
+                # Run all Python scripts in migrations folder that start with common patterns
+                migration_patterns = ["migrate_*.py", "add_*.py", "*_migration.py"]
+                migration_scripts = set()
+                for pattern in migration_patterns:
+                    migration_scripts.update(migrations_dir.glob(pattern))
+                
+                for migration_script in sorted(migration_scripts):
                     logger.info(f"Running {migration_script.name}...")
                     try:
                         if venv_python.exists():
@@ -220,8 +226,13 @@ class UpdateManager:
                     except Exception as e:
                         logger.error(f"Failed to run {migration_script.name}: {e}")
             
-            # Run standalone migration scripts in root directory
-            for migration_script in sorted(self.app_dir.glob("add_*.py")):
+            # Run standalone migration scripts in root directory (multiple patterns)
+            root_migration_patterns = ["add_*.py", "migrate_*.py", "fix_*.py", "rebuild_*.py"]
+            root_migrations = set()
+            for pattern in root_migration_patterns:
+                root_migrations.update(self.app_dir.glob(pattern))
+            
+            for migration_script in sorted(root_migrations):
                 logger.info(f"Running {migration_script.name}...")
                 try:
                     if venv_python.exists():
