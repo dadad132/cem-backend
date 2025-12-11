@@ -4908,6 +4908,7 @@ async def web_tickets_create(
     priority: str = Form('medium'),
     category: str = Form('general'),
     assigned_to_id: Optional[int] = Form(None),
+    scheduled_date: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_session)
 ):
     """Create a new ticket"""
@@ -4921,7 +4922,20 @@ async def web_tickets_create(
         return RedirectResponse('/web/login', status_code=303)
     
     from app.models.ticket import Ticket, TicketHistory
+    from app.models.meeting import Meeting
     from datetime import datetime
+    
+    # If non-admin and no assignee specified, auto-assign to creator
+    if not user.is_admin and not assigned_to_id:
+        assigned_to_id = user_id
+    
+    # Parse scheduled date if provided
+    scheduled_datetime = None
+    if scheduled_date:
+        try:
+            scheduled_datetime = datetime.fromisoformat(scheduled_date)
+        except:
+            pass
     
     # Generate ticket number
     year = datetime.utcnow().year
@@ -4940,7 +4954,8 @@ async def web_tickets_create(
         category=category,
         assigned_to_id=assigned_to_id,
         created_by_id=user_id,
-        workspace_id=user.workspace_id
+        workspace_id=user.workspace_id,
+        scheduled_date=scheduled_datetime
     )
     db.add(ticket)
     await db.flush()
@@ -4954,32 +4969,66 @@ async def web_tickets_create(
     )
     db.add(history)
     
+    # Create calendar event if scheduled date is set and ticket is assigned
+    if scheduled_datetime and assigned_to_id:
+        # Create a meeting/calendar event for the ticket
+        meeting = Meeting(
+            title=f"Ticket: {subject}",
+            description=f"Ticket #{ticket_number}\n\n{description or 'No description provided'}",
+            start_time=scheduled_datetime,
+            end_time=scheduled_datetime,  # Use same time for start and end (can be adjusted)
+            platform='other',
+            creator_id=user_id,
+            workspace_id=user.workspace_id
+        )
+        db.add(meeting)
+        await db.flush()
+        
+        # Add assigned user as attendee
+        from app.models.meeting import MeetingAttendee
+        attendee = MeetingAttendee(
+            meeting_id=meeting.id,
+            user_id=assigned_to_id,
+            status='pending'
+        )
+        db.add(attendee)
+    
     # Create notification if assigned
     if assigned_to_id and assigned_to_id != user_id:
+        calendar_info = ""
+        if scheduled_datetime:
+            calendar_info = f" scheduled for {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}"
+        
         notification = Notification(
             user_id=assigned_to_id,
             type='ticket',
-            message=f'{user.full_name or user.username} assigned you ticket #{ticket_number}: {subject}',
+            message=f'{user.full_name or user.username} assigned you ticket #{ticket_number}: {subject}{calendar_info}',
             url=f'/web/tickets/{ticket.id}',
             related_id=ticket.id
         )
         db.add(notification)
-    elif not assigned_to_id:
-        # Notify all admins if ticket is not assigned
-        admin_users = (await db.execute(
-            select(User).where(User.workspace_id == user.workspace_id).where(User.is_admin == True)
-        )).scalars().all()
-        
-        for admin in admin_users:
-            if admin.id != user_id:  # Don't notify the creator if they're admin
-                notification = Notification(
-                    user_id=admin.id,
-                    type='ticket',
-                    message=f'{user.full_name or user.username} created unassigned ticket #{ticket_number}: {subject}',
-                    url=f'/web/tickets/{ticket.id}',
-                    related_id=ticket.id
-                )
-                db.add(notification)
+    
+    # Notify admins about the ticket creation
+    admin_users = (await db.execute(
+        select(User).where(User.workspace_id == user.workspace_id).where(User.is_admin == True)
+    )).scalars().all()
+    
+    for admin in admin_users:
+        if admin.id != user_id:  # Don't notify the creator if they're admin
+            calendar_info = ""
+            if scheduled_datetime and assigned_to_id:
+                assigned_user = (await db.execute(select(User).where(User.id == assigned_to_id))).scalar_one_or_none()
+                assigned_name = assigned_user.full_name or assigned_user.username if assigned_user else "Unknown"
+                calendar_info = f" and added to calendar for {assigned_name} on {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}"
+            
+            notification = Notification(
+                user_id=admin.id,
+                type='ticket',
+                message=f'{user.full_name or user.username} created ticket #{ticket_number}: {subject}{calendar_info}',
+                url=f'/web/tickets/{ticket.id}',
+                related_id=ticket.id
+            )
+            db.add(notification)
     
     await db.commit()
     return RedirectResponse(f'/web/tickets/{ticket.id}', status_code=303)

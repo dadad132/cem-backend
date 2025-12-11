@@ -41,6 +41,9 @@ class TicketBase(SQLModel):
     closed_at: Optional[datetime] = None
     closed_by_id: Optional[int] = Field(default=None, foreign_key="user.id")  # Track who closed the ticket
     
+    # Scheduled date/time for calendar integration
+    scheduled_date: Optional[datetime] = None
+    
     # Archive support
     is_archived: bool = False
     archived_at: Optional[datetime] = None
