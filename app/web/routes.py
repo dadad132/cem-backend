@@ -83,6 +83,37 @@ def utc_to_local(utc_dt):
     local_dt = utc_dt - timedelta(seconds=offset_seconds)
     return local_dt
 
+def format_datetime_tz(dt, tz_name="UTC", format_str="%Y-%m-%d %H:%M"):
+    """Convert UTC datetime to specified timezone and format it"""
+    if dt is None:
+        return ""
+    
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        # Python < 3.9 fallback
+        try:
+            import pytz
+            if isinstance(dt, datetime):
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=pytz.UTC)
+                target_tz = pytz.timezone(tz_name)
+                local_dt = dt.astimezone(target_tz)
+                return local_dt.strftime(format_str)
+        except:
+            return dt.strftime(format_str) if isinstance(dt, datetime) else str(dt)
+    
+    # Python 3.9+ with zoneinfo
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            # Assume UTC if no timezone info
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        target_tz = ZoneInfo(tz_name)
+        local_dt = dt.astimezone(target_tz)
+        return local_dt.strftime(format_str)
+    
+    return str(dt)
+
 async def get_workspace_for_user(user_id: int, db: AsyncSession) -> Optional[Workspace]:
     """Get workspace with branding for a user"""
     try:
@@ -97,6 +128,9 @@ async def get_workspace_for_user(user_id: int, db: AsyncSession) -> Optional[Wor
 # Add helper functions to Jinja2 globals for use in templates
 templates.env.globals['now'] = datetime.utcnow
 templates.env.globals['utc_to_local'] = utc_to_local
+
+# Add timezone formatting filter
+templates.env.filters['format_datetime_tz'] = format_datetime_tz
 
 router = APIRouter(tags=['web'])
 
@@ -2621,6 +2655,7 @@ async def web_admin_site_settings_save(
     request: Request,
     site_title: str = Form(None),
     primary_color: str = Form("#2563eb"),
+    timezone: str = Form("UTC"),
     db: AsyncSession = Depends(get_session)
 ):
     """Save site branding settings"""
@@ -2641,6 +2676,7 @@ async def web_admin_site_settings_save(
         if workspace:
             workspace.site_title = site_title if site_title else None
             workspace.primary_color = primary_color
+            workspace.timezone = timezone
             
             await db.commit()
             request.session['success_message'] = 'Site settings saved successfully!'
@@ -2649,7 +2685,7 @@ async def web_admin_site_settings_save(
             
     except Exception as e:
         if "no such column" in str(e):
-            request.session['error_message'] = 'Database migration required. Run: python add_site_settings_columns.py'
+            request.session['error_message'] = 'Database migration required. Run: python migrations/add_workspace_timezone.py'
         else:
             request.session['error_message'] = f'Failed to save settings: {str(e)}'
     

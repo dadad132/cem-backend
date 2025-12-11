@@ -72,6 +72,30 @@
                                 <p class="text-xs text-gray-500 mt-1">Used for buttons, links, and accents</p>
                             </div>
 
+                            <!-- Timezone -->
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    Timezone
+                                </label>
+                                <select name="timezone" 
+                                        class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                    <option value="UTC" {% if not workspace.timezone or workspace.timezone == 'UTC' %}selected{% endif %}>UTC (Default)</option>
+                                    <option value="Africa/Johannesburg" {% if workspace.timezone == 'Africa/Johannesburg' %}selected{% endif %}>Africa/Johannesburg (SAST)</option>
+                                    <option value="America/New_York" {% if workspace.timezone == 'America/New_York' %}selected{% endif %}>America/New_York (EST/EDT)</option>
+                                    <option value="America/Chicago" {% if workspace.timezone == 'America/Chicago' %}selected{% endif %}>America/Chicago (CST/CDT)</option>
+                                    <option value="America/Denver" {% if workspace.timezone == 'America/Denver' %}selected{% endif %}>America/Denver (MST/MDT)</option>
+                                    <option value="America/Los_Angeles" {% if workspace.timezone == 'America/Los_Angeles' %}selected{% endif %}>America/Los_Angeles (PST/PDT)</option>
+                                    <option value="Europe/London" {% if workspace.timezone == 'Europe/London' %}selected{% endif %}>Europe/London (GMT/BST)</option>
+                                    <option value="Europe/Paris" {% if workspace.timezone == 'Europe/Paris' %}selected{% endif %}>Europe/Paris (CET/CEST)</option>
+                                    <option value="Asia/Dubai" {% if workspace.timezone == 'Asia/Dubai' %}selected{% endif %}>Asia/Dubai (GST)</option>
+                                    <option value="Asia/Kolkata" {% if workspace.timezone == 'Asia/Kolkata' %}selected{% endif %}>Asia/Kolkata (IST)</option>
+                                    <option value="Asia/Shanghai" {% if workspace.timezone == 'Asia/Shanghai' %}selected{% endif %}>Asia/Shanghai (CST)</option>
+                                    <option value="Asia/Tokyo" {% if workspace.timezone == 'Asia/Tokyo' %}selected{% endif %}>Asia/Tokyo (JST)</option>
+                                    <option value="Australia/Sydney" {% if workspace.timezone == 'Australia/Sydney' %}selected{% endif %}>Australia/Sydney (AEDT/AEST)</option>
+                                </select>
+                                <p class="text-xs text-gray-500 mt-1">All times will be displayed in this timezone</p>
+                            </div>
+
                             <!-- Save Button -->
                             <div class="pt-4">
                                 <button type="submit" 

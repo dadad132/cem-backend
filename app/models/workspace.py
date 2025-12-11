@@ -16,6 +16,7 @@ class Workspace(SQLModel, table=True):
     logo_url: Optional[str] = Field(default=None)
     favicon_url: Optional[str] = Field(default=None)
     primary_color: Optional[str] = Field(default="#2563eb")  # Default blue
+    timezone: Optional[str] = Field(default="UTC")  # Default timezone
     
     # Relationships are defined from User/Project side to avoid SQLAlchemy 2.0
     # typing issues with generic list annotations in this minimal setup.
