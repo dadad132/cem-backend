@@ -335,7 +335,9 @@ async def web_profile_post(
         try:
             user.preferred_meeting_platform = MeetingPlatform(preferred_meeting_platform)
         except ValueError:
-            pass
+            user.preferred_meeting_platform = None
+    else:
+        user.preferred_meeting_platform = None
     if calendar_color:
         user.calendar_color = calendar_color
     
@@ -4385,6 +4387,7 @@ async def web_meeting_create(
     platform: str = Form(...),
     meeting_url: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
+    auto_generate_meet: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_session)
 ):
     user_id = request.session.get('user_id')
@@ -4429,6 +4432,48 @@ async def web_meeting_create(
             
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f'Invalid datetime format: {str(e)}')
+    
+    # Auto-generate Google Meet link if requested
+    generated_meet_url = None
+    if auto_generate_meet == 'on' and platform == 'google_meet' and user.google_access_token:
+        try:
+            from app.core.google_oauth import create_calendar_event
+            
+            # Get attendee emails
+            form_data = await request.form()
+            attendee_ids = form_data.getlist('attendee_ids')
+            attendee_emails = []
+            
+            if attendee_ids:
+                attendees_result = await db.execute(
+                    select(User).where(User.id.in_([int(aid) for aid in attendee_ids]))
+                )
+                attendees = attendees_result.scalars().all()
+                attendee_emails = [a.email for a in attendees if a.email]
+            
+            # Create Google Calendar event with Meet link
+            calendar_event = create_calendar_event(
+                access_token=user.google_access_token,
+                refresh_token=user.google_refresh_token,
+                token_expiry=user.google_token_expiry,
+                summary=title,
+                description=description or '',
+                start_time=start_datetime,
+                end_time=end_datetime,
+                attendees=attendee_emails,
+                add_google_meet=True
+            )
+            
+            if calendar_event and 'hangoutLink' in calendar_event:
+                generated_meet_url = calendar_event['hangoutLink']
+                meeting_url = generated_meet_url
+                logger.info(f"Auto-generated Google Meet link: {generated_meet_url}")
+            else:
+                logger.warning("Failed to generate Google Meet link - no hangoutLink in response")
+                
+        except Exception as e:
+            logger.error(f"Error auto-generating Google Meet link: {e}")
+            # Continue with meeting creation without the auto-generated link
     
     # Create meeting
     meeting = Meeting(

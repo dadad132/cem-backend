@@ -207,10 +207,17 @@ def create_calendar_event(
     start_time: datetime,
     end_time: datetime,
     attendees: Optional[list] = None,
-    location: Optional[str] = None
+    location: Optional[str] = None,
+    add_google_meet: bool = False
 ) -> Optional[Dict[str, Any]]:
     """
     Create an event in user's Google Calendar
+    
+    Args:
+        add_google_meet: If True, automatically creates a Google Meet link for the event
+    
+    Returns:
+        Created event dict including 'hangoutLink' if Google Meet was added
     """
     try:
         service = get_calendar_service(access_token, refresh_token, token_expiry)
@@ -236,7 +243,25 @@ def create_calendar_event(
         if attendees:
             event['attendees'] = [{'email': email} for email in attendees]
         
-        created_event = service.events().insert(calendarId='primary', body=event).execute()
+        # Add Google Meet conference if requested
+        if add_google_meet:
+            import uuid
+            event['conferenceData'] = {
+                'createRequest': {
+                    'requestId': str(uuid.uuid4()),
+                    'conferenceSolutionKey': {
+                        'type': 'hangoutsMeet'
+                    }
+                }
+            }
+        
+        # Use conferenceDataVersion=1 to enable Google Meet link creation
+        created_event = service.events().insert(
+            calendarId='primary', 
+            body=event,
+            conferenceDataVersion=1 if add_google_meet else 0
+        ).execute()
+        
         return created_event
     
     except Exception as e:

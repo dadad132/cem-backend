@@ -117,12 +117,16 @@
           name="preferred_meeting_platform"
           class="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
         >
-          <option value="">Select a platform...</option>
-          <option value="zoom" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'zoom' %}selected{% endif %}>Zoom</option>
-          <option value="teams" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'teams' %}selected{% endif %}>Microsoft Teams</option>
-          <option value="meet" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'meet' %}selected{% endif %}>Google Meet</option>
-          <option value="webex" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'webex' %}selected{% endif %}>Webex</option>
+          <option value="">No preference</option>
+          <option value="google_meet" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'google_meet' %}selected{% endif %}>🎥 Google Meet</option>
+          <option value="teams" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'teams' %}selected{% endif %}>💼 Microsoft Teams</option>
+          <option value="zoom" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'zoom' %}selected{% endif %}>📹 Zoom</option>
+          <option value="discord" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'discord' %}selected{% endif %}>🎮 Discord</option>
+          <option value="phone" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'phone' %}selected{% endif %}>📞 Phone</option>
+          <option value="in_person" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'in_person' %}selected{% endif %}>🏢 In Person</option>
+          <option value="other" {% if user.preferred_meeting_platform and user.preferred_meeting_platform.value == 'other' %}selected{% endif %}>📋 Other</option>
         </select>
+        <p class="text-xs text-slate-500 mt-1">Your preference will be shown to meeting organizers when scheduling</p>
       </div>
 
       <div>
