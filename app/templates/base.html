@@ -832,6 +832,9 @@
           },
           
           init() {
+            // Store reference globally so startCall can access it
+            window.callManager = this;
+            
             // Restore active call state from sessionStorage
             const savedCall = sessionStorage.getItem('activeCall');
             if (savedCall) {
@@ -1188,11 +1191,17 @@
         };
       }
       
+      // Store reference to call manager globally
+      window.callManager = null;
+      
       // Global function to initiate calls from any page
       window.startCall = function(userId, userName, callType) {
-        const container = document.getElementById('global-call-container');
-        if (container && container.__x) {
-          container.__x.$data.initiateCall(userId, userName, callType);
+        console.log('startCall called:', userId, userName, callType);
+        if (window.callManager) {
+          window.callManager.initiateCall(userId, userName, callType);
+        } else {
+          console.error('Call manager not initialized');
+          alert('Call system is initializing, please try again in a moment.');
         }
       };
       
