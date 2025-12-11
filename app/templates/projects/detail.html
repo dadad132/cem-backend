@@ -46,7 +46,7 @@
     </div>
     <div>
       <label class="block text-xs mb-1">Start date</label>
-      <input name="start_date_value" type="date" class="w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+      <input name="start_date_value" id="task-start-date" type="date" class="w-full rounded border border-slate-300 px-3 py-2 text-sm" />
     </div>
     <div>
       <label class="block text-xs mb-1">Start time</label>
@@ -54,11 +54,54 @@
     </div>
     <div>
       <label class="block text-xs mb-1">Due date</label>
-      <input name="due_date_value" type="date" class="w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+      <input name="due_date_value" type="date" id="task-due-date" class="w-full rounded border border-slate-300 px-3 py-2 text-sm" />
     </div>
     <div>
       <label class="block text-xs mb-1">Due time</label>
       <input name="due_time_value" type="time" class="w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+    </div>
+    <div class="lg:col-span-6">
+      <label class="block text-xs mb-1">Working Days (for date calculation)</label>
+      <div class="flex flex-wrap gap-3">
+        <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
+          <input type="checkbox" name="working_days" value="1" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <span>Mon</span>
+        </label>
+        <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
+          <input type="checkbox" name="working_days" value="2" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <span>Tue</span>
+        </label>
+        <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
+          <input type="checkbox" name="working_days" value="3" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <span>Wed</span>
+        </label>
+        <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
+          <input type="checkbox" name="working_days" value="4" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <span>Thu</span>
+        </label>
+        <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
+          <input type="checkbox" name="working_days" value="5" checked class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <span>Fri</span>
+        </label>
+        <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
+          <input type="checkbox" name="working_days" value="6" class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <span>Sat</span>
+        </label>
+        <label class="inline-flex items-center gap-1 text-xs cursor-pointer">
+          <input type="checkbox" name="working_days" value="0" class="working-day-check rounded border-slate-300" data-target="task-due-date" data-start="task-start-date" />
+          <span>Sun</span>
+        </label>
+      </div>
+      <p class="text-[10px] text-slate-500 mt-1">Select your working days. Due date will adjust to skip non-working days.</p>
+    </div>
+    <div class="lg:col-span-6">
+      <label class="block text-xs mb-1">Duration (working days)</label>
+      <div class="flex items-center gap-2">
+        <input type="number" name="duration_days" id="task-duration" min="1" placeholder="e.g. 5" 
+               class="w-24 rounded border border-slate-300 px-3 py-2 text-sm" 
+               data-target="task-due-date" data-start="task-start-date" />
+        <span class="text-xs text-slate-500">days → auto-calculates due date</span>
+      </div>
     </div>
     <div>
       <button type="submit" class="px-3 py-2 rounded bg-slate-900 text-white text-sm">Add task</button>
@@ -175,5 +218,75 @@
       }
     }
   }));
+
+  // Working days date calculator
+  function calculateDueDate(startDateId, durationId, targetDateId, checkboxSelector) {
+    const startInput = document.getElementById(startDateId);
+    const durationInput = document.getElementById(durationId);
+    const targetInput = document.getElementById(targetDateId);
+    
+    if (!startInput || !durationInput || !targetInput) return;
+    
+    const startDate = startInput.value;
+    const duration = parseInt(durationInput.value);
+    
+    if (!startDate || !duration || duration < 1) return;
+    
+    // Get selected working days (0=Sun, 1=Mon, ..., 6=Sat)
+    const checkboxes = document.querySelectorAll(checkboxSelector + ':checked');
+    const workingDays = Array.from(checkboxes).map(cb => parseInt(cb.value));
+    
+    if (workingDays.length === 0) {
+      alert('Please select at least one working day');
+      return;
+    }
+    
+    // Calculate due date
+    let currentDate = new Date(startDate);
+    let daysAdded = 0;
+    
+    // Start counting from start date if it's a working day
+    if (workingDays.includes(currentDate.getDay())) {
+      daysAdded = 1;
+    }
+    
+    while (daysAdded < duration) {
+      currentDate.setDate(currentDate.getDate() + 1);
+      if (workingDays.includes(currentDate.getDay())) {
+        daysAdded++;
+      }
+    }
+    
+    // Format date as YYYY-MM-DD
+    const year = currentDate.getFullYear();
+    const month = String(currentDate.getMonth() + 1).padStart(2, '0');
+    const day = String(currentDate.getDate()).padStart(2, '0');
+    targetInput.value = `${year}-${month}-${day}`;
+  }
+
+  // Setup event listeners for task form
+  const taskDuration = document.getElementById('task-duration');
+  const taskStartDate = document.getElementById('task-start-date');
+  
+  if (taskDuration && taskStartDate) {
+    taskDuration.addEventListener('input', () => {
+      calculateDueDate('task-start-date', 'task-duration', 'task-due-date', 'input.working-day-check[data-target="task-due-date"]');
+    });
+    
+    taskStartDate.addEventListener('change', () => {
+      if (taskDuration.value) {
+        calculateDueDate('task-start-date', 'task-duration', 'task-due-date', 'input.working-day-check[data-target="task-due-date"]');
+      }
+    });
+    
+    // Also recalculate when working days change
+    document.querySelectorAll('input.working-day-check[data-target="task-due-date"]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        if (taskDuration.value && taskStartDate.value) {
+          calculateDueDate('task-start-date', 'task-duration', 'task-due-date', 'input.working-day-check[data-target="task-due-date"]');
+        }
+      });
+    });
+  }
 </script>
 {% endblock %}
