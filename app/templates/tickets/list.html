@@ -174,7 +174,7 @@
                             <div class="flex flex-wrap items-center gap-3 sm:gap-4 text-xs sm:text-sm text-gray-500">
                                 <span class="whitespace-nowrap">
                                     <i class="far fa-clock mr-1"></i>
-                                    {{ ticket.created_at.strftime('%b %d, %Y %I:%M %p') }}
+                                    {{ ticket.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y %I:%M %p') }}
                                 </span>
                             {% if ticket.assigned_to_id %}
                                 {% for u in users %}

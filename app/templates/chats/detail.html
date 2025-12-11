@@ -44,7 +44,7 @@
                   </div>
                 {% endif %}
                 <div class="text-xs mt-1 {% if message.sender_id == user.id %}text-blue-100{% else %}text-slate-500{% endif %}">
-                  {{ utc_to_local(message.created_at).strftime('%d/%m/%Y %I:%M %p') }}
+                  {{ message.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%d/%m/%Y %I:%M %p') }}
                 </div>
               </div>
             </div>

@@ -136,7 +136,7 @@
                                     {% endif %}
                                 </div>
                                 <span class="text-sm text-gray-500">
-                                    {{ comment.created_at.strftime('%b %d, %Y %I:%M %p') }}
+                                    {{ comment.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y %I:%M %p') }}
                                 </span>
                             </div>
                             <p class="text-gray-700 whitespace-pre-wrap">{{ comment.content }}</p>
@@ -185,7 +185,7 @@
                     {% for entry in history %}
                     <div class="flex gap-3 text-sm">
                         <div class="text-gray-500">
-                            {{ entry.created_at.strftime('%b %d, %I:%M %p') }}
+                            {{ entry.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %I:%M %p') }}
                         </div>
                         <div class="flex-1">
                             <span class="font-medium text-gray-700">{{ entry.action|replace('_', ' ')|title }}</span>
@@ -259,7 +259,7 @@
                     <div>
                         <dt class="text-gray-500">Created</dt>
                         <dd class="text-gray-900 font-medium">
-                            {{ ticket.created_at.strftime('%b %d, %Y %I:%M %p') }}
+                            {{ ticket.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y %I:%M %p') }}
                         </dd>
                     </div>
                     <div>
@@ -271,14 +271,14 @@
                     <div>
                         <dt class="text-gray-500">Last Updated</dt>
                         <dd class="text-gray-900 font-medium">
-                            {{ ticket.updated_at.strftime('%b %d, %Y %I:%M %p') }}
+                            {{ ticket.updated_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y %I:%M %p') }}
                         </dd>
                     </div>
                     {% if ticket.resolved_at %}
                     <div>
                         <dt class="text-gray-500">Resolved</dt>
                         <dd class="text-gray-900 font-medium">
-                            {{ ticket.resolved_at.strftime('%b %d, %Y %I:%M %p') }}
+                            {{ ticket.resolved_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y %I:%M %p') }}
                         </dd>
                     </div>
                     {% endif %}
@@ -286,7 +286,7 @@
                     <div>
                         <dt class="text-gray-500">Closed</dt>
                         <dd class="text-gray-900 font-medium">
-                            {{ ticket.closed_at.strftime('%b %d, %Y %I:%M %p') }}
+                            {{ ticket.closed_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y %I:%M %p') }}
                             {% if closed_by_user %}
                             <div class="text-sm text-gray-600 mt-1">
                                 by {{ closed_by_user.full_name or closed_by_user.username }}

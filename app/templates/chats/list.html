@@ -52,7 +52,7 @@
               {% if chat.is_group %}Group Chat{% else %}1-on-1{% endif %}
             </p>
           </div>
-          <span class="text-xs text-slate-400">{{ chat.created_at.strftime('%b %d') }}</span>
+          <span class="text-xs text-slate-400">{{ chat.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d') }}</span>
         </div>
       </a>
     {% endfor %}
