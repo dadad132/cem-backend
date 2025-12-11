@@ -3352,7 +3352,11 @@ async def web_project_detail(request: Request, project_id: int, db: AsyncSession
 
 # Tasks
 @router.post('/tasks/create')
-async def web_task_create(request: Request, project_id: int = Form(...), title: str = Form(...), description: Optional[str] = Form(None), subtasks: Optional[str] = Form(None), priority: str = Form('medium'), start_date_value: Optional[str] = Form(None), start_time_value: Optional[str] = Form(None), due_date_value: Optional[str] = Form(None), due_time_value: Optional[str] = Form(None), working_days: Optional[List[str]] = Form(None), db: AsyncSession = Depends(get_session)):
+async def web_task_create(request: Request, project_id: int = Form(...), title: str = Form(...), description: Optional[str] = Form(None), subtasks: Optional[str] = Form(None), priority: str = Form('medium'), start_date_value: Optional[str] = Form(None), start_time_value: Optional[str] = Form(None), due_date_value: Optional[str] = Form(None), due_time_value: Optional[str] = Form(None), db: AsyncSession = Depends(get_session)):
+    # Get working_days from raw form data (multiple values with same name)
+    form_data = await request.form()
+    working_days_list = form_data.getlist('working_days')
+    
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
@@ -3392,7 +3396,7 @@ async def web_task_create(request: Request, project_id: int = Form(...), title: 
         task_priority = TaskPriority.medium
     
     # Parse working days (default to Mon-Fri if not provided)
-    working_days_str = ','.join(working_days) if working_days else '0,1,2,3,4'
+    working_days_str = ','.join(working_days_list) if working_days_list else '0,1,2,3,4'
     
     task = Task(
         title=title, 
@@ -5023,10 +5027,13 @@ async def web_tickets_create(
     category: str = Form('general'),
     assigned_to_id: Optional[str] = Form(None),
     scheduled_date: Optional[str] = Form(None),
-    ticket_working_days: Optional[List[str]] = Form(None),
     db: AsyncSession = Depends(get_session)
 ):
     """Create a new ticket"""
+    # Get working_days from raw form data (multiple values with same name)
+    form_data = await request.form()
+    ticket_working_days_list = form_data.getlist('ticket_working_days')
+    
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
@@ -5061,7 +5068,7 @@ async def web_tickets_create(
             pass
     
     # Parse working days (default to Mon-Fri if not provided)
-    working_days_str = ','.join(ticket_working_days) if ticket_working_days else '0,1,2,3,4'
+    working_days_str = ','.join(ticket_working_days_list) if ticket_working_days_list else '0,1,2,3,4'
     
     # Generate ticket number using MAX to avoid race conditions
     year = datetime.utcnow().year
