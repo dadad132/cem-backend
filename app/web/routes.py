@@ -7,6 +7,10 @@ import calendar as pycalendar
 import os
 import uuid
 import asyncio
+import logging
+
+# Set up logger for this module
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, File, UploadFile, Query, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
@@ -44,23 +48,15 @@ _original_template_response = templates.TemplateResponse
 
 def enhanced_template_response(name: str, context: dict, *args, **kwargs):
     """Enhanced TemplateResponse that adds workspace from request state"""
-    print(f"[DEBUG] enhanced_template_response called for template: {name}")
     # ALWAYS add workspace to context if request is present
     if 'request' in context:
         request = context['request']
-        print(f"[DEBUG] Request found in context")
         # Check if workspace exists in request.state
         if hasattr(request, 'state') and hasattr(request.state, 'workspace'):
             context['workspace'] = request.state.workspace
-            print(f"[DEBUG] Workspace INJECTED from request.state: {request.state.workspace.name if request.state.workspace else 'None'}")
         # If not in state, try to get it from context (already passed)
         elif 'workspace' not in context:
             context['workspace'] = None
-            print(f"[DEBUG] No workspace in request.state, setting to None")
-        else:
-            print(f"[DEBUG] Workspace already in context")
-    else:
-        print(f"[DEBUG] No request in context")
     
     return _original_template_response(name, context, *args, **kwargs)
 
@@ -133,6 +129,32 @@ templates.env.globals['utc_to_local'] = utc_to_local
 templates.env.filters['format_datetime_tz'] = format_datetime_tz
 
 router = APIRouter(tags=['web'])
+
+
+# --------------------------
+# Authentication Dependencies
+# --------------------------
+async def get_current_user(request: Request, db: AsyncSession = Depends(get_session)) -> User:
+    """Get current authenticated user or raise HTTPException"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_active:
+        request.session.clear()
+        raise HTTPException(status_code=401, detail="User not found or inactive")
+    
+    return user
+
+
+async def get_current_admin(request: Request, db: AsyncSession = Depends(get_session)) -> User:
+    """Get current authenticated admin user or raise HTTPException"""
+    user = await get_current_user(request, db)
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
 
 # --------------------------
 # Auth (session-based for web)
@@ -425,22 +447,17 @@ async def web_google_oauth_link(request: Request, db: AsyncSession = Depends(get
         
         # Check if Google OAuth is configured
         if not settings.google_client_id or not settings.google_client_secret:
-            print(f"[!] Google OAuth not configured. Client ID: {settings.google_client_id[:20] if settings.google_client_id else 'EMPTY'}, Secret: {'SET' if settings.google_client_secret else 'EMPTY'}")
+            logger.warning("Google OAuth not configured")
             return RedirectResponse('/web/profile?error=google_config', status_code=303)
         
-        print(f"[*] Starting Google OAuth for user {user_id}")
-        print(f"[*] Client ID: {settings.google_client_id[:50]}...")
-        print(f"[*] Redirect URI: {settings.google_redirect_uri}")
+        logger.info(f"Starting Google OAuth for user {user_id}")
         
         auth_url, state = get_authorization_url(user_id)
         # Store state in session for verification
         request.session['google_oauth_state'] = state
-        print(f"[*] Redirecting to Google OAuth URL")
         return RedirectResponse(auth_url, status_code=303)
     except Exception as e:
-        print(f"[!] Error initiating Google OAuth: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error initiating Google OAuth: {e}", exc_info=True)
         return RedirectResponse('/web/profile?error=google_config', status_code=303)
 
 
@@ -493,9 +510,7 @@ async def web_google_oauth_callback(
         return RedirectResponse('/web/profile?success=google_linked', status_code=303)
         
     except Exception as e:
-        print(f"Error in Google OAuth callback: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error in Google OAuth callback: {e}", exc_info=True)
         return RedirectResponse(f'/web/profile?error=google_failed', status_code=303)
 
 
@@ -1163,7 +1178,7 @@ async def web_admin_generate_user_activity_pdf(
         )
         comments = comments_result.fetchall()
     except Exception as e:
-        print(f"[!] Error fetching comments: {e}")
+        logger.error(f"Error fetching comments: {e}")
         comments = []
     
     # 5. Projects created
@@ -1209,7 +1224,7 @@ async def web_admin_generate_user_activity_pdf(
         )
         ticket_comments = ticket_comments_result.fetchall()
     except Exception as e:
-        print(f"[!] Error fetching ticket comments: {e}")
+        logger.error(f"Error fetching ticket comments: {e}")
         ticket_comments = []
     
     # 9. Tickets assigned
@@ -2314,7 +2329,7 @@ async def web_admin_check_emails(request: Request, db: AsyncSession = Depends(ge
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
-        print(f"Email check error: {error_details}")
+        logger.error(f"Email check error: {error_details}")
         return JSONResponse({'success': False, 'error': str(e), 'details': error_details})
 
 
@@ -2477,21 +2492,21 @@ async def web_admin_preview_inbox(request: Request, db: AsyncSession = Depends(g
         mail = None
         try:
             if settings.incoming_mail_use_ssl:
-                print(f"[Preview] Connecting to {settings.incoming_mail_host}:{settings.incoming_mail_port or 993} (SSL)")
+                logger.debug(f"Connecting to {settings.incoming_mail_host}:{settings.incoming_mail_port or 993} (SSL)")
                 mail = imaplib.IMAP4_SSL(
                     settings.incoming_mail_host,
                     settings.incoming_mail_port or 993,
                     timeout=10
                 )
             else:
-                print(f"[Preview] Connecting to {settings.incoming_mail_host}:{settings.incoming_mail_port or 143} (no SSL)")
+                logger.debug(f"Connecting to {settings.incoming_mail_host}:{settings.incoming_mail_port or 143} (no SSL)")
                 mail = imaplib.IMAP4(
                     settings.incoming_mail_host,
                     settings.incoming_mail_port or 143,
                     timeout=10
                 )
             
-            print(f"[Preview] Logging in as {settings.incoming_mail_username}")
+            logger.debug(f"Logging in as {settings.incoming_mail_username}")
             mail.login(settings.incoming_mail_username, settings.incoming_mail_password)
         except (imaplib.IMAP4.error, OSError, TimeoutError) as e:
             error_msg = str(e) if str(e) else 'Connection refused or timeout'
@@ -2583,7 +2598,7 @@ async def web_admin_preview_inbox(request: Request, db: AsyncSession = Depends(g
                 })
                 
             except Exception as e:
-                print(f"Error fetching email {email_id}: {e}")
+                logger.warning(f"Error fetching email {email_id}: {e}")
                 continue
         
         mail.close()
@@ -2598,7 +2613,7 @@ async def web_admin_preview_inbox(request: Request, db: AsyncSession = Depends(g
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
-        print(f"Inbox preview error: {error_details}")
+        logger.error(f"Inbox preview error: {error_details}")
         return JSONResponse({
             'success': False, 
             'error': str(e),
@@ -4981,13 +4996,18 @@ async def web_tickets_create(
         except:
             pass
     
-    # Generate ticket number
+    # Generate ticket number using MAX to avoid race conditions
     year = datetime.utcnow().year
+    from sqlalchemy import func, text
+    # Get the highest ticket number for this year in this workspace
     result = await db.execute(
-        select(Ticket).where(Ticket.workspace_id == user.workspace_id)
+        select(func.count(Ticket.id)).where(
+            Ticket.workspace_id == user.workspace_id,
+            Ticket.ticket_number.like(f"TKT-{year}-%")
+        )
     )
-    ticket_count = len(result.scalars().all()) + 1
-    ticket_number = f"TKT-{year}-{ticket_count:05d}"
+    ticket_count = result.scalar() or 0
+    ticket_number = f"TKT-{year}-{ticket_count + 1:05d}"
     
     # Create ticket
     ticket = Ticket(
@@ -5238,7 +5258,7 @@ async def web_tickets_guest_submit(
                 db.add(processed)
                 await db.commit()
         except Exception as e:
-            print(f"Failed to send confirmation email: {e}")
+            logger.warning(f"Failed to send confirmation email: {e}")
             # Continue even if email fails
         
         return templates.TemplateResponse('tickets/guest.html', {
@@ -5599,7 +5619,7 @@ Thank you.
                     server.send_message(msg)
                     server.quit()
             except Exception as e:
-                print(f"Error sending closed ticket notification: {e}")
+                logger.warning(f"Error sending closed ticket notification: {e}")
         
         # Redirect with error message
         request.session['error_message'] = 'This ticket is closed and cannot accept new comments. Please contact support to reopen.'
@@ -5663,7 +5683,7 @@ async def send_ticket_comment_email(ticket, content: str, user_id: int, db: Asyn
         if write_log:
             write_log(msg)
         else:
-            print(msg)
+            logger.debug(msg)
     
     try:
         log(f"[EMAIL] send_ticket_comment_email called for ticket #{ticket.ticket_number}")

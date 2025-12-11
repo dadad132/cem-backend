@@ -13,12 +13,12 @@ class TicketBase(SQLModel):
     ticket_number: str = Field(index=True, unique=True)  # e.g., "TKT-2024-00001"
     subject: str
     description: Optional[str] = None
-    priority: str = Field(default="medium")  # low, medium, high, urgent
-    status: str = Field(default="open")  # open, in_progress, waiting, resolved, closed
-    category: str = Field(default="general")  # support, bug, feature, billing, general
-    assigned_to_id: Optional[int] = Field(default=None, foreign_key="user.id")
-    created_by_id: Optional[int] = Field(default=None, foreign_key="user.id")  # Optional for guest tickets
-    workspace_id: int = Field(foreign_key="workspace.id")
+    priority: str = Field(default="medium", index=True)  # low, medium, high, urgent
+    status: str = Field(default="open", index=True)  # open, in_progress, waiting, resolved, closed
+    category: str = Field(default="general", index=True)  # support, bug, feature, billing, general
+    assigned_to_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    created_by_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)  # Optional for guest tickets
+    workspace_id: int = Field(foreign_key="workspace.id", index=True)
     
     # Guest submission fields (for clients without accounts)
     is_guest: bool = Field(default=False)
@@ -56,8 +56,8 @@ class Ticket(TicketBase, table=True):
 class TicketComment(SQLModel, table=True):
     """Comments on tickets"""
     id: Optional[int] = Field(default=None, primary_key=True)
-    ticket_id: int = Field(foreign_key="ticket.id", ondelete="CASCADE")
-    user_id: Optional[int] = Field(default=None, foreign_key="user.id")  # Optional for guest email comments
+    ticket_id: int = Field(foreign_key="ticket.id", ondelete="CASCADE", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)  # Optional for guest email comments
     content: str
     is_internal: bool = False  # Internal notes vs public comments
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -66,7 +66,7 @@ class TicketComment(SQLModel, table=True):
 class TicketAttachment(SQLModel, table=True):
     """File attachments for tickets"""
     id: Optional[int] = Field(default=None, primary_key=True)
-    ticket_id: int = Field(foreign_key="ticket.id", ondelete="CASCADE")
+    ticket_id: int = Field(foreign_key="ticket.id", ondelete="CASCADE", index=True)
     filename: str
     file_path: str
     file_size: int  # in bytes
@@ -78,7 +78,7 @@ class TicketAttachment(SQLModel, table=True):
 class TicketHistory(SQLModel, table=True):
     """Track all changes to tickets"""
     id: Optional[int] = Field(default=None, primary_key=True)
-    ticket_id: int = Field(foreign_key="ticket.id", ondelete="CASCADE")
+    ticket_id: int = Field(foreign_key="ticket.id", ondelete="CASCADE", index=True)
     user_id: Optional[int] = Field(default=None, foreign_key="user.id")  # Nullable for guest actions
     action: str  # created, status_changed, priority_changed, assigned, commented, closed, etc.
     old_value: Optional[str] = None
