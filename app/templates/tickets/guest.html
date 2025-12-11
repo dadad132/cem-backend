@@ -7,12 +7,12 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
-<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
+<body class="bg-gradient-to-br from-slate-50 via-slate-100 to-blue-50 min-h-screen">
     <div class="container mx-auto px-4 py-12">
         <div class="max-w-3xl mx-auto">
             <!-- Header -->
             <div class="text-center mb-8">
-                <div class="inline-block p-4 bg-blue-600 rounded-full mb-4">
+                <div class="inline-block p-4 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl shadow-lg mb-4">
                     <i class="fas fa-ticket-alt text-4xl text-white"></i>
                 </div>
                 <h1 class="text-4xl font-bold text-gray-900 mb-2">Support Center</h1>
@@ -23,7 +23,7 @@
             {% if not success %}
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
                 <button onclick="showForm('submit')" id="btn-submit"
-                        class="p-6 bg-blue-600 text-white rounded-xl shadow-lg hover:bg-blue-700 transition-all duration-200 flex flex-col items-center gap-3">
+                        class="p-6 bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-xl shadow-lg hover:from-blue-600 hover:to-blue-700 hover:shadow-xl transition-all duration-200 flex flex-col items-center gap-3">
                     <i class="fas fa-plus-circle text-4xl"></i>
                     <div>
                         <div class="font-semibold text-lg">Submit a Ticket</div>
@@ -32,7 +32,7 @@
                 </button>
                 
                 <button onclick="showForm('track')" id="btn-track"
-                        class="p-6 bg-white border-2 border-gray-300 text-gray-700 rounded-xl shadow-lg hover:border-blue-500 hover:text-blue-600 transition-all duration-200 flex flex-col items-center gap-3">
+                        class="p-6 bg-white border border-slate-200 text-slate-700 rounded-xl shadow-lg hover:border-blue-400 hover:text-blue-600 hover:shadow-xl transition-all duration-200 flex flex-col items-center gap-3">
                     <i class="fas fa-search text-4xl"></i>
                     <div>
                         <div class="font-semibold text-lg">Track a Ticket</div>
@@ -61,11 +61,11 @@
                         </p>
                         <div class="flex gap-3 mt-4">
                             <a href="/web/tickets/track" 
-                               class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                               class="px-4 py-2.5 bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-lg hover:from-blue-600 hover:to-blue-700 shadow-sm hover:shadow-md transition-all">
                                 <i class="fas fa-search mr-2"></i>Track This Ticket
                             </a>
                             <button onclick="location.reload()" 
-                                    class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700">
+                                    class="px-4 py-2.5 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg hover:from-green-600 hover:to-green-700 shadow-sm hover:shadow-md transition-all">
                                 Submit Another Ticket
                             </button>
                         </div>
@@ -90,7 +90,7 @@
             <!-- Form -->
             {% if not success %}
             <!-- Ticket Tracking Form (hidden by default) -->
-            <div id="track-form" class="bg-white rounded-xl shadow-xl overflow-hidden mb-6" style="display: none;">
+            <div id="track-form" class="bg-white rounded-xl shadow-xl overflow-hidden mb-6 border border-slate-200" style="display: none;">
                 <div class="p-8">
                     <h2 class="text-2xl font-semibold text-gray-900 mb-4 flex items-center">
                         <i class="fas fa-search text-blue-600 mr-3"></i>
@@ -127,7 +127,7 @@
                         
                         <div class="flex justify-end">
                             <button type="submit"
-                                    class="px-8 py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 shadow-lg hover:shadow-xl transition-all duration-200 flex items-center gap-2">
+                                    class="px-8 py-3 bg-gradient-to-r from-blue-500 to-blue-600 text-white font-semibold rounded-xl hover:from-blue-600 hover:to-blue-700 shadow-lg hover:shadow-xl transition-all duration-200 flex items-center gap-2">
                                 <i class="fas fa-search"></i>
                                 Track Ticket
                             </button>
@@ -137,7 +137,7 @@
             </div>
 
             <!-- Submit Ticket Form -->
-            <div id="submit-form" class="bg-white rounded-xl shadow-xl overflow-hidden">
+            <div id="submit-form" class="bg-white rounded-xl shadow-xl overflow-hidden border border-slate-200">
                 <form method="post" action="/web/tickets/guest" class="p-8" autocomplete="off">
                     <!-- Personal Information -->
                     <div class="mb-8">
@@ -257,7 +257,7 @@
                     <!-- Submit Button -->
                     <div class="flex justify-end pt-6 border-t border-gray-200">
                         <button type="submit"
-                                class="px-8 py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 shadow-lg hover:shadow-xl transition-all duration-200 flex items-center gap-2">
+                                class="px-8 py-3 bg-gradient-to-r from-blue-500 to-blue-600 text-white font-semibold rounded-xl hover:from-blue-600 hover:to-blue-700 shadow-lg hover:shadow-xl transition-all duration-200 flex items-center gap-2">
                             <i class="fas fa-paper-plane"></i>
                             Submit Ticket
                         </button>
@@ -286,13 +286,13 @@
             if (type === 'submit') {
                 submitForm.style.display = 'block';
                 trackForm.style.display = 'none';
-                btnSubmit.className = 'p-6 bg-blue-600 text-white rounded-xl shadow-lg hover:bg-blue-700 transition-all duration-200 flex flex-col items-center gap-3';
-                btnTrack.className = 'p-6 bg-white border-2 border-gray-300 text-gray-700 rounded-xl shadow-lg hover:border-blue-500 hover:text-blue-600 transition-all duration-200 flex flex-col items-center gap-3';
+                btnSubmit.className = 'p-6 bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-xl shadow-lg hover:from-blue-600 hover:to-blue-700 hover:shadow-xl transition-all duration-200 flex flex-col items-center gap-3';
+                btnTrack.className = 'p-6 bg-white border border-slate-200 text-slate-700 rounded-xl shadow-lg hover:border-blue-400 hover:text-blue-600 hover:shadow-xl transition-all duration-200 flex flex-col items-center gap-3';
             } else {
                 submitForm.style.display = 'none';
                 trackForm.style.display = 'block';
-                btnTrack.className = 'p-6 bg-blue-600 text-white rounded-xl shadow-lg hover:bg-blue-700 transition-all duration-200 flex flex-col items-center gap-3';
-                btnSubmit.className = 'p-6 bg-white border-2 border-gray-300 text-gray-700 rounded-xl shadow-lg hover:border-blue-500 hover:text-blue-600 transition-all duration-200 flex flex-col items-center gap-3';
+                btnTrack.className = 'p-6 bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-xl shadow-lg hover:from-blue-600 hover:to-blue-700 hover:shadow-xl transition-all duration-200 flex flex-col items-center gap-3';
+                btnSubmit.className = 'p-6 bg-white border border-slate-200 text-slate-700 rounded-xl shadow-lg hover:border-blue-400 hover:text-blue-600 hover:shadow-xl transition-all duration-200 flex flex-col items-center gap-3';
             }
         }
         
