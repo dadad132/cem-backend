@@ -5008,13 +5008,15 @@ async def web_tickets_create(
     # Create calendar event if scheduled date is set and ticket is assigned
     if scheduled_datetime and assigned_to_id:
         # Create a meeting/calendar event for the ticket
+        # Split datetime into date and time components for Meeting model
         meeting = Meeting(
             title=f"Ticket: {subject}",
             description=f"Ticket #{ticket_number}\n\n{description or 'No description provided'}",
-            start_time=scheduled_datetime,
-            end_time=scheduled_datetime,  # Use same time for start and end (can be adjusted)
+            date=scheduled_datetime.date(),
+            start_time=scheduled_datetime.time(),
+            duration_minutes=30,  # Default 30 minutes
             platform='other',
-            creator_id=user_id,
+            organizer_id=user_id,
             workspace_id=user.workspace_id
         )
         db.add(meeting)
