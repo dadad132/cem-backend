@@ -3352,9 +3352,20 @@ async def web_project_detail(request: Request, project_id: int, db: AsyncSession
 
 # Tasks
 @router.post('/tasks/create')
-async def web_task_create(request: Request, project_id: int = Form(...), title: str = Form(...), description: Optional[str] = Form(None), subtasks: Optional[str] = Form(None), priority: str = Form('medium'), start_date_value: Optional[str] = Form(None), start_time_value: Optional[str] = Form(None), due_date_value: Optional[str] = Form(None), due_time_value: Optional[str] = Form(None), db: AsyncSession = Depends(get_session)):
-    # Get working_days from raw form data (multiple values with same name)
+async def web_task_create(request: Request, db: AsyncSession = Depends(get_session)):
+    # Get all form data
     form_data = await request.form()
+    
+    # Extract form fields
+    project_id = int(form_data.get('project_id'))
+    title = form_data.get('title')
+    description = form_data.get('description') or None
+    subtasks = form_data.get('subtasks') or None
+    priority = form_data.get('priority', 'medium')
+    start_date_value = form_data.get('start_date_value') or None
+    start_time_value = form_data.get('start_time_value') or None
+    due_date_value = form_data.get('due_date_value') or None
+    due_time_value = form_data.get('due_time_value') or None
     working_days_list = form_data.getlist('working_days')
     
     user_id = request.session.get('user_id')
@@ -5021,17 +5032,19 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
 @router.post('/tickets/create')
 async def web_tickets_create(
     request: Request,
-    subject: str = Form(...),
-    description: Optional[str] = Form(None),
-    priority: str = Form('medium'),
-    category: str = Form('general'),
-    assigned_to_id: Optional[str] = Form(None),
-    scheduled_date: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_session)
 ):
     """Create a new ticket"""
-    # Get working_days from raw form data (multiple values with same name)
+    # Get all form data
     form_data = await request.form()
+    
+    # Extract form fields
+    subject = form_data.get('subject')
+    description = form_data.get('description') or None
+    priority = form_data.get('priority', 'medium')
+    category = form_data.get('category', 'general')
+    assigned_to_id = form_data.get('assigned_to_id') or None
+    scheduled_date = form_data.get('scheduled_date') or None
     ticket_working_days_list = form_data.getlist('ticket_working_days')
     
     user_id = request.session.get('user_id')
