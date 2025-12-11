@@ -4,6 +4,24 @@
 
 {% block content %}
 <div class="container mx-auto px-3 sm:px-4 py-4 sm:py-6">
+    <!-- Success/Error Messages -->
+    {% if request.session.get('success_message') %}
+    <div class="mb-4 bg-green-50 border-l-4 border-green-500 p-4 rounded">
+        <div class="flex items-center">
+            <i class="fas fa-check-circle text-green-500 mr-3"></i>
+            <p class="text-green-700">{{ request.session.pop('success_message') }}</p>
+        </div>
+    </div>
+    {% endif %}
+    {% if request.session.get('error_message') %}
+    <div class="mb-4 bg-red-50 border-l-4 border-red-500 p-4 rounded">
+        <div class="flex items-center">
+            <i class="fas fa-exclamation-circle text-red-500 mr-3"></i>
+            <p class="text-red-700">{{ request.session.pop('error_message') }}</p>
+        </div>
+    </div>
+    {% endif %}
+
     <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 mb-6">
         <h1 class="text-2xl sm:text-3xl font-bold text-gray-900">Support Tickets</h1>
         <div class="flex flex-wrap gap-2">

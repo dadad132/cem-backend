@@ -96,7 +96,7 @@ def format_datetime_tz(dt, tz_name="UTC", format_str="%Y-%m-%d %H:%M"):
                 target_tz = pytz.timezone(tz_name)
                 local_dt = dt.astimezone(target_tz)
                 return local_dt.strftime(format_str)
-        except:
+        except (ImportError, Exception):
             return dt.strftime(format_str) if isinstance(dt, datetime) else str(dt)
     
     # Python 3.9+ with zoneinfo
@@ -118,7 +118,7 @@ async def get_workspace_for_user(user_id: int, db: AsyncSession) -> Optional[Wor
             return None
         workspace = (await db.execute(select(Workspace).where(Workspace.id == user.workspace_id))).scalar_one_or_none()
         return workspace
-    except:
+    except Exception:
         return None
 
 # Add helper functions to Jinja2 globals for use in templates
@@ -773,9 +773,10 @@ async def web_search(
     if q and len(q.strip()) >= 2:
         search_term = f"%{q.strip()}%"
         
-        # Search tasks
+        # Search tasks - include project info in query to avoid N+1
+        from sqlalchemy.orm import selectinload
         task_query = (
-            select(Task)
+            select(Task, Project.name.label('project_name'))
             .join(Project, Task.project_id == Project.id)
             .where(Project.workspace_id == user.workspace_id)
             .where(
@@ -784,23 +785,29 @@ async def web_search(
             )
             .limit(20)
         )
-        tasks = (await db.execute(task_query)).scalars().all()
+        task_results = (await db.execute(task_query)).all()
         
-        for task in tasks:
-            project = (await db.execute(select(Project).where(Project.id == task.project_id))).scalar_one_or_none()
+        for task, project_name in task_results:
             results['tasks'].append({
                 'id': task.id,
                 'title': task.title,
                 'description': task.description or '',
                 'status': task.status.value if task.status else 'todo',
                 'priority': task.priority.value if task.priority else 'medium',
-                'project_name': project.name if project else 'Unknown',
-                'project_id': project.id if project else None,
+                'project_name': project_name or 'Unknown',
+                'project_id': task.project_id,
             })
         
-        # Search projects
+        # Search projects - use subquery for task count to avoid N+1
+        from sqlalchemy import func
+        task_count_subquery = (
+            select(func.count(Task.id))
+            .where(Task.project_id == Project.id)
+            .correlate(Project)
+            .scalar_subquery()
+        )
         project_query = (
-            select(Project)
+            select(Project, task_count_subquery.label('task_count'))
             .where(Project.workspace_id == user.workspace_id)
             .where(
                 (Project.name.ilike(search_term)) | 
@@ -808,46 +815,46 @@ async def web_search(
             )
             .limit(20)
         )
-        projects = (await db.execute(project_query)).scalars().all()
+        project_results = (await db.execute(project_query)).all()
         
-        for project in projects:
-            task_count = (await db.execute(
-                select(Task).where(Task.project_id == project.id)
-            )).scalars().all()
+        for project, task_count in project_results:
             results['projects'].append({
                 'id': project.id,
                 'name': project.name,
                 'description': project.description or '',
-                'task_count': len(task_count),
+                'task_count': task_count or 0,
             })
         
-        # Search comments
+        # Search comments - join all related tables in single query
         comment_query = (
-            select(Comment)
+            select(
+                Comment,
+                Task.id.label('task_id'),
+                Task.title.label('task_title'),
+                User.full_name.label('author_full_name'),
+                User.username.label('author_username'),
+                Project.id.label('project_id'),
+                Project.name.label('project_name')
+            )
             .join(Task, Comment.task_id == Task.id)
             .join(Project, Task.project_id == Project.id)
+            .outerjoin(User, Comment.author_id == User.id)
             .where(Project.workspace_id == user.workspace_id)
             .where(Comment.content.ilike(search_term))
             .limit(20)
         )
-        comments = (await db.execute(comment_query)).scalars().all()
+        comment_results = (await db.execute(comment_query)).all()
         
-        for comment in comments:
-            task = (await db.execute(select(Task).where(Task.id == comment.task_id))).scalar_one_or_none()
-            author = (await db.execute(select(User).where(User.id == comment.author_id))).scalar_one_or_none()
-            project = None
-            if task:
-                project = (await db.execute(select(Project).where(Project.id == task.project_id))).scalar_one_or_none()
-            
+        for comment, task_id, task_title, author_full_name, author_username, project_id, project_name in comment_results:
             results['comments'].append({
                 'id': comment.id,
                 'content': comment.content,
                 'created_at': comment.created_at,
-                'task_id': comment.task_id,
-                'task_title': task.title if task else 'Unknown Task',
-                'author_name': author.full_name or author.username if author else 'Unknown',
-                'project_name': project.name if project else 'Unknown',
-                'project_id': project.id if project else None,
+                'task_id': task_id,
+                'task_title': task_title or 'Unknown Task',
+                'author_name': author_full_name or author_username or 'Unknown',
+                'project_name': project_name or 'Unknown',
+                'project_id': project_id,
             })
     
     return templates.TemplateResponse('search/results.html', {
@@ -2563,7 +2570,7 @@ async def web_admin_preview_inbox(request: Request, db: AsyncSession = Depends(g
                 try:
                     date_obj = email.utils.parsedate_to_datetime(date_header)
                     date_str = date_obj.strftime('%b %d, %H:%M')
-                except:
+                except (ValueError, TypeError):
                     date_str = date_header[:20] if date_header else 'Unknown'
                 
                 # Get In-Reply-To
@@ -2577,12 +2584,12 @@ async def web_admin_preview_inbox(request: Request, db: AsyncSession = Depends(g
                             try:
                                 body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
                                 break
-                            except:
+                            except (UnicodeDecodeError, AttributeError):
                                 pass
                 else:
                     try:
                         body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
-                    except:
+                    except (UnicodeDecodeError, AttributeError):
                         body = str(msg.get_payload())
                 
                 # Clean body for preview
@@ -4993,7 +5000,7 @@ async def web_tickets_create(
     if scheduled_date:
         try:
             scheduled_datetime = datetime.fromisoformat(scheduled_date)
-        except:
+        except ValueError:
             pass
     
     # Generate ticket number using MAX to avoid race conditions
