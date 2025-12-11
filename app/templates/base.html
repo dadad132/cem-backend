@@ -962,6 +962,12 @@
           },
           
           async initiateCall(userId, userName, callType) {
+            // Check if mediaDevices is available (requires HTTPS or localhost)
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+              alert('Calling requires a secure connection (HTTPS). Please contact your administrator to enable HTTPS on this server.');
+              return;
+            }
+            
             try {
               const initResponse = await fetch('/web/calls/initiate', {
                 method: 'POST',
@@ -1023,6 +1029,13 @@
           
           async acceptIncomingCall() {
             if (!this.incomingCall) return;
+            
+            // Check if mediaDevices is available (requires HTTPS or localhost)
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+              alert('Calling requires a secure connection (HTTPS). Please contact your administrator to enable HTTPS on this server.');
+              this.declineIncomingCall();
+              return;
+            }
             
             try {
               const callId = this.incomingCall.id;
