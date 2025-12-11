@@ -86,15 +86,15 @@
   
   {% set tasks_by_day = {} %}
   {% for t in tasks %}
-    {# Get working days as list of integers (default Mon-Fri: 0,1,2,3,4) #}
-    {% set task_working_days = (t.working_days or '0,1,2,3,4').split(',') | map('int') | list %}
+    {# Get working days string (default Mon-Fri: 0,1,2,3,4) #}
+    {% set task_wd = (t.working_days or '0,1,2,3,4').split(',') %}
     
     {# If task has both start_date and due_date, show it on all days in range #}
     {% if t.start_date and t.due_date %}
       {% for week in weeks %}
         {% for day in week %}
           {# Only show on this day if it's within date range AND is a working day #}
-          {% if day >= t.start_date and day <= t.due_date and day.weekday() in task_working_days %}
+          {% if day >= t.start_date and day <= t.due_date and day.weekday()|string in task_wd %}
             {% if day in tasks_by_day %}
               {% set _ = tasks_by_day[day].append(t) %}
             {% else %}
@@ -106,7 +106,7 @@
     {% elif t.due_date %}
       {# If only due_date, show on due date only if it's a working day #}
       {% set k = t.due_date %}
-      {% if k.weekday() in task_working_days %}
+      {% if k.weekday()|string in task_wd %}
         {% if k in tasks_by_day %}
           {% set _ = tasks_by_day[k].append(t) %}
         {% else %}
