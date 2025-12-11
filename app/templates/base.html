@@ -152,6 +152,13 @@
             <span>Meetings</span>
           </a>
           
+          <a href="/web/calls" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/calls' in current_path else '' }}">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/>
+            </svg>
+            <span>Calls</span>
+          </a>
+          
           <!-- Section: Admin -->
           <div class="pt-4 pb-2 px-4 text-xs font-bold text-red-400 uppercase tracking-wider">Admin</div>
           
@@ -664,6 +671,537 @@
         document.getElementById('htmx-loading').style.opacity = '0';
       });
     </script>
+
+    <!-- Global Call Manager - Persists across page navigation -->
+    {% if request.session.get('user_id') %}
+    <div id="global-call-container" x-data="globalCallManager()" x-init="init()">
+      <!-- Incoming Call Notification (floating) -->
+      <div x-show="incomingCall" 
+           x-transition:enter="transition ease-out duration-300"
+           x-transition:enter-start="opacity-0 translate-y-4"
+           x-transition:enter-end="opacity-100 translate-y-0"
+           class="fixed bottom-4 right-4 z-[200] bg-white rounded-2xl shadow-2xl p-4 w-80 border-2 border-green-400"
+           style="display: none;">
+        <div class="flex items-center gap-3 mb-3">
+          <div class="w-12 h-12 rounded-full bg-gradient-to-br from-green-400 to-green-600 flex items-center justify-center animate-pulse">
+            <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/>
+            </svg>
+          </div>
+          <div>
+            <p class="font-semibold text-slate-800" x-text="incomingCall?.caller_name || 'Unknown'"></p>
+            <p class="text-sm text-slate-500" x-text="incomingCall?.call_type === 'video' ? 'Video Call' : 'Voice Call'"></p>
+          </div>
+        </div>
+        <div class="flex gap-2">
+          <button @click="declineIncomingCall()" class="flex-1 py-2 px-4 rounded-full bg-red-500 text-white text-sm font-medium hover:bg-red-600">
+            Decline
+          </button>
+          <button @click="acceptIncomingCall()" class="flex-1 py-2 px-4 rounded-full bg-green-500 text-white text-sm font-medium hover:bg-green-600">
+            Answer
+          </button>
+        </div>
+      </div>
+
+      <!-- Active Call Overlay (fullscreen) -->
+      <div x-show="activeCall" 
+           x-transition:enter="transition ease-out duration-200"
+           x-transition:enter-start="opacity-0"
+           x-transition:enter-end="opacity-100"
+           class="fixed inset-0 z-[150] bg-slate-900 flex flex-col"
+           style="display: none;">
+        <!-- Video Container -->
+        <div class="flex-1 relative bg-black">
+          <!-- Remote Video -->
+          <video x-ref="remoteVideo" autoplay playsinline class="w-full h-full object-cover"></video>
+          
+          <!-- Audio-only placeholder -->
+          <div x-show="activeCall?.call_type !== 'video' || isVideoOff" 
+               class="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-slate-800 to-slate-900">
+            <div class="text-center">
+              <div class="w-24 h-24 mx-auto rounded-full bg-slate-700 flex items-center justify-center mb-4">
+                <span class="text-3xl font-bold text-white" x-text="(activeCall?.remote_name || 'U').substring(0,2).toUpperCase()"></span>
+              </div>
+              <p class="text-xl text-white font-medium" x-text="activeCall?.remote_name || 'Connected'"></p>
+            </div>
+          </div>
+          
+          <!-- Local Video (PiP) -->
+          <div class="absolute bottom-4 right-4 w-40 h-28 rounded-lg overflow-hidden shadow-2xl border-2 border-white bg-slate-800">
+            <video x-ref="localVideo" autoplay playsinline muted class="w-full h-full object-cover"></video>
+          </div>
+          
+          <!-- Call Info -->
+          <div class="absolute top-4 left-4 text-white">
+            <p class="text-lg font-semibold" x-text="activeCall?.remote_name || 'Connecting...'"></p>
+            <p class="text-sm opacity-75" x-text="callDuration"></p>
+          </div>
+          
+          <!-- Status Badge -->
+          <div class="absolute top-4 right-4">
+            <span class="px-3 py-1 rounded-full text-sm font-medium"
+                  :class="activeCall?.status === 'active' ? 'bg-green-500 text-white' : 'bg-yellow-500 text-black'"
+                  x-text="activeCall?.status === 'active' ? 'Connected' : 'Connecting...'"></span>
+          </div>
+        </div>
+        
+        <!-- Call Controls -->
+        <div class="bg-slate-800 p-6">
+          <div class="flex justify-center items-center gap-6">
+            <!-- Mute -->
+            <button @click="toggleMute()" 
+                    class="w-14 h-14 rounded-full flex items-center justify-center transition-colors"
+                    :class="isMuted ? 'bg-red-500 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'">
+              <svg x-show="!isMuted" class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"/>
+              </svg>
+              <svg x-show="isMuted" class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2"/>
+              </svg>
+            </button>
+            
+            <!-- Video Toggle -->
+            <button @click="toggleVideo()" 
+                    x-show="activeCall?.call_type === 'video'"
+                    class="w-14 h-14 rounded-full flex items-center justify-center transition-colors"
+                    :class="isVideoOff ? 'bg-red-500 text-white' : 'bg-slate-700 text-white hover:bg-slate-600'">
+              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+              </svg>
+            </button>
+            
+            <!-- End Call -->
+            <button @click="endCall()"
+                    class="w-16 h-16 rounded-full bg-red-500 text-white flex items-center justify-center hover:bg-red-600 transition-colors">
+              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 8l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M5 3a2 2 0 00-2 2v1c0 8.284 6.716 15 15 15h1a2 2 0 002-2v-3.28a1 1 0 00-.684-.948l-4.493-1.498a1 1 0 00-1.21.502l-1.13 2.257a11.042 11.042 0 01-5.516-5.517l2.257-1.128a1 1 0 00.502-1.21L9.228 3.683A1 1 0 008.279 3H5z"/>
+              </svg>
+            </button>
+            
+            <!-- Minimize -->
+            <button @click="minimizeCall()"
+                    class="w-14 h-14 rounded-full bg-slate-700 text-white flex items-center justify-center hover:bg-slate-600 transition-colors">
+              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Minimized Call Bar -->
+      <div x-show="activeCall && isMinimized" 
+           class="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-[150] bg-green-600 text-white rounded-full px-6 py-3 shadow-lg flex items-center gap-4 cursor-pointer"
+           @click="maximizeCall()"
+           style="display: none;">
+        <div class="w-3 h-3 bg-white rounded-full animate-pulse"></div>
+        <span class="font-medium" x-text="activeCall?.remote_name || 'Call'"></span>
+        <span class="text-green-200" x-text="callDuration"></span>
+        <button @click.stop="endCall()" class="ml-2 p-1 rounded-full hover:bg-green-700">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <script>
+      // Global Call Manager - maintains call state across page navigation
+      function globalCallManager() {
+        return {
+          incomingCall: null,
+          activeCall: null,
+          localStream: null,
+          peerConnection: null,
+          isMuted: false,
+          isVideoOff: false,
+          isMinimized: false,
+          callDuration: '00:00',
+          callStartTime: null,
+          durationInterval: null,
+          pollingInterval: null,
+          statusPollingInterval: null,
+          lastIceCandidateId: 0,
+          
+          rtcConfig: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+          },
+          
+          init() {
+            // Restore active call state from sessionStorage
+            const savedCall = sessionStorage.getItem('activeCall');
+            if (savedCall) {
+              const callData = JSON.parse(savedCall);
+              // Check if call is still active on server
+              this.checkAndRestoreCall(callData);
+            }
+            
+            // Start polling for incoming calls
+            this.startIncomingCallPolling();
+            
+            // Listen for call initiation from other pages
+            window.addEventListener('storage', (e) => {
+              if (e.key === 'initiateCall') {
+                const data = JSON.parse(e.newValue);
+                this.initiateCall(data.userId, data.userName, data.callType);
+                localStorage.removeItem('initiateCall');
+              }
+            });
+            
+            // Handle page unload
+            window.addEventListener('beforeunload', () => {
+              if (this.activeCall) {
+                sessionStorage.setItem('activeCall', JSON.stringify(this.activeCall));
+              }
+            });
+          },
+          
+          async checkAndRestoreCall(callData) {
+            try {
+              const response = await fetch(`/web/calls/${callData.id}/status`);
+              if (response.ok) {
+                const data = await response.json();
+                if (data.status === 'active') {
+                  // Call is still active, restore it
+                  this.activeCall = callData;
+                  await this.reconnectToCall(callData);
+                } else {
+                  // Call ended, clear storage
+                  sessionStorage.removeItem('activeCall');
+                }
+              }
+            } catch (e) {
+              sessionStorage.removeItem('activeCall');
+            }
+          },
+          
+          async reconnectToCall(callData) {
+            try {
+              const constraints = { audio: true, video: callData.call_type === 'video' };
+              this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+              
+              this.peerConnection = new RTCPeerConnection(this.rtcConfig);
+              this.localStream.getTracks().forEach(track => {
+                this.peerConnection.addTrack(track, this.localStream);
+              });
+              
+              this.peerConnection.onicecandidate = async (event) => {
+                if (event.candidate) {
+                  await this.sendIceCandidate(callData.id, event.candidate);
+                }
+              };
+              
+              this.peerConnection.ontrack = (event) => {
+                if (this.$refs.remoteVideo) {
+                  this.$refs.remoteVideo.srcObject = event.streams[0];
+                }
+              };
+              
+              if (this.$refs.localVideo) {
+                this.$refs.localVideo.srcObject = this.localStream;
+              }
+              
+              // Renegotiate connection
+              if (callData.isCaller) {
+                const offer = await this.peerConnection.createOffer();
+                await this.peerConnection.setLocalDescription(offer);
+                await fetch(`/web/calls/${callData.id}/offer`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ offer: JSON.stringify(offer) })
+                });
+              }
+              
+              this.startCallTimer();
+              this.startStatusPolling();
+              
+            } catch (e) {
+              console.error('Failed to reconnect call:', e);
+              this.cleanup();
+            }
+          },
+          
+          startIncomingCallPolling() {
+            this.pollingInterval = setInterval(async () => {
+              if (this.activeCall) return;
+              
+              try {
+                const response = await fetch('/web/calls/check-incoming');
+                if (response.ok) {
+                  const data = await response.json();
+                  if (data.incoming && !this.incomingCall) {
+                    this.incomingCall = {
+                      id: data.call_id,
+                      call_type: data.call_type,
+                      caller_name: data.caller?.name || 'Unknown',
+                      caller_id: data.caller?.id
+                    };
+                    this.playRingtone();
+                  }
+                }
+              } catch (e) {
+                console.error('Poll error:', e);
+              }
+            }, 2000);
+          },
+          
+          playRingtone() {
+            if ('Notification' in window && Notification.permission === 'granted') {
+              new Notification('Incoming Call', {
+                body: `${this.incomingCall?.caller_name} is calling`,
+                requireInteraction: true
+              });
+            }
+          },
+          
+          async initiateCall(userId, userName, callType) {
+            try {
+              const initResponse = await fetch('/web/calls/initiate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ recipient_id: userId, call_type: callType })
+              });
+              
+              if (!initResponse.ok) {
+                const error = await initResponse.json();
+                alert(error.error || 'Failed to initiate call');
+                return;
+              }
+              
+              const initData = await initResponse.json();
+              const callId = initData.call_id;
+              
+              const constraints = { audio: true, video: callType === 'video' };
+              this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+              
+              this.peerConnection = new RTCPeerConnection(this.rtcConfig);
+              this.localStream.getTracks().forEach(track => {
+                this.peerConnection.addTrack(track, this.localStream);
+              });
+              
+              this.peerConnection.onicecandidate = async (event) => {
+                if (event.candidate) await this.sendIceCandidate(callId, event.candidate);
+              };
+              
+              this.peerConnection.ontrack = (event) => {
+                if (this.$refs.remoteVideo) this.$refs.remoteVideo.srcObject = event.streams[0];
+              };
+              
+              const offer = await this.peerConnection.createOffer();
+              await this.peerConnection.setLocalDescription(offer);
+              
+              await fetch(`/web/calls/${callId}/offer`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ offer: JSON.stringify(offer) })
+              });
+              
+              this.activeCall = { id: callId, call_type: callType, remote_name: userName, status: 'ringing', isCaller: true };
+              this.isMinimized = false;
+              
+              if (this.$refs.localVideo) this.$refs.localVideo.srcObject = this.localStream;
+              
+              this.startStatusPolling();
+              
+            } catch (error) {
+              console.error('Call error:', error);
+              if (error.name === 'NotAllowedError') {
+                alert('Please allow camera/microphone access');
+              } else {
+                alert('Failed to start call: ' + error.message);
+              }
+              this.cleanup();
+            }
+          },
+          
+          async acceptIncomingCall() {
+            if (!this.incomingCall) return;
+            
+            try {
+              const callId = this.incomingCall.id;
+              const callType = this.incomingCall.call_type;
+              
+              const offerResponse = await fetch(`/web/calls/${callId}/offer`);
+              const offerData = await offerResponse.json();
+              
+              const constraints = { audio: true, video: callType === 'video' };
+              this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+              
+              this.peerConnection = new RTCPeerConnection(this.rtcConfig);
+              this.localStream.getTracks().forEach(track => {
+                this.peerConnection.addTrack(track, this.localStream);
+              });
+              
+              this.peerConnection.onicecandidate = async (event) => {
+                if (event.candidate) await this.sendIceCandidate(callId, event.candidate);
+              };
+              
+              this.peerConnection.ontrack = (event) => {
+                if (this.$refs.remoteVideo) this.$refs.remoteVideo.srcObject = event.streams[0];
+              };
+              
+              const offer = JSON.parse(offerData.offer);
+              await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+              
+              const answer = await this.peerConnection.createAnswer();
+              await this.peerConnection.setLocalDescription(answer);
+              
+              await fetch(`/web/calls/${callId}/answer`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ answer: JSON.stringify(answer) })
+              });
+              
+              this.activeCall = { id: callId, call_type: callType, remote_name: this.incomingCall.caller_name, status: 'active', isCaller: false };
+              this.incomingCall = null;
+              this.isMinimized = false;
+              
+              if (this.$refs.localVideo) this.$refs.localVideo.srcObject = this.localStream;
+              
+              this.startCallTimer();
+              this.startStatusPolling();
+              
+            } catch (error) {
+              console.error('Answer error:', error);
+              alert('Failed to answer: ' + error.message);
+              this.cleanup();
+            }
+          },
+          
+          async declineIncomingCall() {
+            if (!this.incomingCall) return;
+            try {
+              await fetch(`/web/calls/${this.incomingCall.id}/decline`, { method: 'POST' });
+            } catch (e) {}
+            this.incomingCall = null;
+          },
+          
+          async endCall() {
+            if (!this.activeCall) return;
+            try {
+              const formData = new FormData();
+              formData.append('reason', 'ended');
+              await fetch(`/web/calls/${this.activeCall.id}/end`, { method: 'POST', body: formData });
+            } catch (e) {}
+            this.cleanup();
+          },
+          
+          async sendIceCandidate(callId, candidate) {
+            try {
+              await fetch(`/web/calls/${callId}/ice`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ candidate })
+              });
+            } catch (e) {}
+          },
+          
+          startStatusPolling() {
+            this.statusPollingInterval = setInterval(async () => {
+              if (!this.activeCall?.id) return;
+              
+              try {
+                const statusResponse = await fetch(`/web/calls/${this.activeCall.id}/status`);
+                if (statusResponse.ok) {
+                  const data = await statusResponse.json();
+                  
+                  if (this.activeCall.status !== data.status) {
+                    this.activeCall.status = data.status;
+                    if (data.status === 'active' && !this.callStartTime) this.startCallTimer();
+                  }
+                  
+                  if (this.activeCall.isCaller && data.has_answer && this.peerConnection?.signalingState === 'have-local-offer') {
+                    const answerResponse = await fetch(`/web/calls/${this.activeCall.id}/answer`);
+                    if (answerResponse.ok) {
+                      const answerData = await answerResponse.json();
+                      if (answerData.answer) {
+                        const answer = JSON.parse(answerData.answer);
+                        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+                      }
+                    }
+                  }
+                  
+                  if (['ended', 'declined', 'missed'].includes(data.status)) {
+                    this.cleanup();
+                    return;
+                  }
+                }
+                
+                const iceResponse = await fetch(`/web/calls/${this.activeCall.id}/ice?since_id=${this.lastIceCandidateId}`);
+                if (iceResponse.ok) {
+                  const iceData = await iceResponse.json();
+                  for (const item of iceData.candidates) {
+                    try {
+                      const candidate = typeof item.candidate === 'string' ? JSON.parse(item.candidate) : item.candidate;
+                      await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                      this.lastIceCandidateId = Math.max(this.lastIceCandidateId, item.id);
+                    } catch (e) {}
+                  }
+                }
+              } catch (e) {}
+            }, 1000);
+          },
+          
+          startCallTimer() {
+            this.callStartTime = Date.now();
+            this.durationInterval = setInterval(() => {
+              const elapsed = Math.floor((Date.now() - this.callStartTime) / 1000);
+              this.callDuration = `${Math.floor(elapsed / 60).toString().padStart(2, '0')}:${(elapsed % 60).toString().padStart(2, '0')}`;
+            }, 1000);
+          },
+          
+          toggleMute() {
+            if (this.localStream) {
+              const track = this.localStream.getAudioTracks()[0];
+              if (track) { track.enabled = !track.enabled; this.isMuted = !track.enabled; }
+            }
+          },
+          
+          toggleVideo() {
+            if (this.localStream) {
+              const track = this.localStream.getVideoTracks()[0];
+              if (track) { track.enabled = !track.enabled; this.isVideoOff = !track.enabled; }
+            }
+          },
+          
+          minimizeCall() { this.isMinimized = true; },
+          maximizeCall() { this.isMinimized = false; },
+          
+          cleanup() {
+            if (this.localStream) { this.localStream.getTracks().forEach(t => t.stop()); this.localStream = null; }
+            if (this.peerConnection) { this.peerConnection.close(); this.peerConnection = null; }
+            if (this.durationInterval) { clearInterval(this.durationInterval); this.durationInterval = null; }
+            if (this.statusPollingInterval) { clearInterval(this.statusPollingInterval); this.statusPollingInterval = null; }
+            this.activeCall = null;
+            this.isMinimized = false;
+            this.isMuted = false;
+            this.isVideoOff = false;
+            this.callDuration = '00:00';
+            this.callStartTime = null;
+            this.lastIceCandidateId = 0;
+            sessionStorage.removeItem('activeCall');
+          }
+        };
+      }
+      
+      // Global function to initiate calls from any page
+      window.startCall = function(userId, userName, callType) {
+        const container = document.getElementById('global-call-container');
+        if (container && container.__x) {
+          container.__x.$data.initiateCall(userId, userName, callType);
+        }
+      };
+      
+      // Request notification permission
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission();
+      }
+    </script>
+    {% endif %}
 
     {% block scripts %}{% endblock %}
   </body>

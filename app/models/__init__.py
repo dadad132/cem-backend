@@ -20,6 +20,7 @@ from .activity import Activity, ActivityType
 from .ticket import Ticket, TicketComment, TicketAttachment, TicketHistory
 from .email_settings import EmailSettings
 from .processed_mail import ProcessedMail
+from .call import Call, CallIceCandidate, CallStatus, CallType
 from .task_extensions import (
     TaskDependency,
     TaskAttachment,
@@ -66,6 +67,10 @@ __all__ = [
     "TicketHistory",
     "EmailSettings",
     "ProcessedMail",
+    "Call",
+    "CallIceCandidate",
+    "CallStatus",
+    "CallType",
     "TaskDependency",
     "TaskAttachment",
     "TimeLog",

@@ -6888,3 +6888,477 @@ async def web_activity_feed(
         'stats': stats,
         'user_stats': user_stats
     })
+
+
+# --------------------------
+# WebRTC Calling Routes
+# --------------------------
+from app.models.call import Call, CallIceCandidate, CallStatus, CallType
+
+
+@router.get('/calls')
+async def web_calls_page(request: Request, db: AsyncSession = Depends(get_session)):
+    """Main calls page showing call history and online users"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+    
+    # Get workspace users
+    workspace_users = (await db.execute(
+        select(User).where(User.workspace_id == user.workspace_id, User.id != user.id)
+    )).scalars().all()
+    
+    # Get recent calls (last 50)
+    recent_calls = (await db.execute(
+        select(Call)
+        .where(
+            Call.workspace_id == user.workspace_id,
+            (Call.caller_id == user.id) | (Call.recipient_id == user.id)
+        )
+        .order_by(Call.created_at.desc())
+        .limit(50)
+    )).scalars().all()
+    
+    # Get user details for calls
+    call_data = []
+    for call in recent_calls:
+        other_user_id = call.recipient_id if call.caller_id == user.id else call.caller_id
+        other_user = (await db.execute(select(User).where(User.id == other_user_id))).scalar_one_or_none()
+        call_data.append({
+            'call': call,
+            'other_user': other_user,
+            'is_outgoing': call.caller_id == user.id
+        })
+    
+    # Check for incoming call
+    incoming_call = (await db.execute(
+        select(Call)
+        .where(
+            Call.recipient_id == user.id,
+            Call.status == CallStatus.RINGING
+        )
+        .order_by(Call.created_at.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    
+    incoming_caller = None
+    if incoming_call:
+        incoming_caller = (await db.execute(
+            select(User).where(User.id == incoming_call.caller_id)
+        )).scalar_one_or_none()
+    
+    return templates.TemplateResponse('calls/index.html', {
+        'request': request,
+        'user': user,
+        'workspace_users': workspace_users,
+        'call_history': call_data,
+        'incoming_call': incoming_call,
+        'incoming_caller': incoming_caller
+    })
+
+
+@router.post('/calls/initiate')
+async def web_initiate_call(
+    request: Request,
+    db: AsyncSession = Depends(get_session)
+):
+    """Initiate a new call"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+    
+    # Handle both JSON and Form data
+    content_type = request.headers.get('content-type', '')
+    if 'application/json' in content_type:
+        body = await request.json()
+        recipient_id = body.get('recipient_id')
+        call_type = body.get('call_type', 'voice')
+    else:
+        form = await request.form()
+        recipient_id = int(form.get('recipient_id'))
+        call_type = form.get('call_type', 'voice')
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        return JSONResponse({'error': 'User not found'}, status_code=404)
+    
+    # Check recipient exists and is in same workspace
+    recipient = (await db.execute(
+        select(User).where(User.id == recipient_id, User.workspace_id == user.workspace_id)
+    )).scalar_one_or_none()
+    
+    if not recipient:
+        return JSONResponse({'error': 'Recipient not found'}, status_code=404)
+    
+    # Check if recipient already has an active call
+    active_call = (await db.execute(
+        select(Call).where(
+            (Call.caller_id == recipient_id) | (Call.recipient_id == recipient_id),
+            Call.status.in_([CallStatus.RINGING, CallStatus.ACTIVE])
+        )
+    )).scalar_one_or_none()
+    
+    if active_call:
+        return JSONResponse({'error': 'User is busy', 'status': 'busy'}, status_code=409)
+    
+    # Create new call
+    call = Call(
+        caller_id=user_id,
+        recipient_id=recipient_id,
+        workspace_id=user.workspace_id,
+        call_type=CallType(call_type),
+        status=CallStatus.RINGING
+    )
+    db.add(call)
+    await db.commit()
+    await db.refresh(call)
+    
+    # Create notification for recipient
+    notification = Notification(
+        user_id=recipient_id,
+        workspace_id=user.workspace_id,
+        type='incoming_call',
+        message=f'{user.full_name or user.email} is calling you',
+        url=f'/web/calls?call_id={call.id}'
+    )
+    db.add(notification)
+    await db.commit()
+    
+    return JSONResponse({
+        'call_id': call.id,
+        'status': 'ringing',
+        'recipient': {
+            'id': recipient.id,
+            'name': recipient.full_name or recipient.email
+        }
+    })
+
+
+@router.post('/calls/{call_id}/offer')
+async def web_call_offer(
+    request: Request,
+    call_id: int,
+    db: AsyncSession = Depends(get_session)
+):
+    """Store the caller's SDP offer"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+    
+    body = await request.json()
+    offer_sdp = body.get('offer')
+    
+    call = (await db.execute(
+        select(Call).where(Call.id == call_id, Call.caller_id == user_id)
+    )).scalar_one_or_none()
+    
+    if not call:
+        return JSONResponse({'error': 'Call not found'}, status_code=404)
+    
+    call.offer_sdp = offer_sdp
+    await db.commit()
+    
+    return JSONResponse({'status': 'ok'})
+
+
+@router.get('/calls/{call_id}/offer')
+async def web_get_call_offer(
+    request: Request,
+    call_id: int,
+    db: AsyncSession = Depends(get_session)
+):
+    """Get the caller's SDP offer (for recipient)"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+    
+    call = (await db.execute(
+        select(Call).where(Call.id == call_id, Call.recipient_id == user_id)
+    )).scalar_one_or_none()
+    
+    if not call:
+        return JSONResponse({'error': 'Call not found'}, status_code=404)
+    
+    return JSONResponse({
+        'offer': call.offer_sdp,
+        'call_type': call.call_type.value,
+        'status': call.status.value
+    })
+
+
+@router.post('/calls/{call_id}/answer')
+async def web_call_answer(
+    request: Request,
+    call_id: int,
+    db: AsyncSession = Depends(get_session)
+):
+    """Answer a call with SDP answer"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+    
+    body = await request.json()
+    answer_sdp = body.get('answer')
+    
+    call = (await db.execute(
+        select(Call).where(Call.id == call_id, Call.recipient_id == user_id)
+    )).scalar_one_or_none()
+    
+    if not call:
+        return JSONResponse({'error': 'Call not found'}, status_code=404)
+    
+    call.answer_sdp = answer_sdp
+    call.status = CallStatus.ACTIVE
+    call.answered_at = datetime.utcnow()
+    await db.commit()
+    
+    return JSONResponse({'status': 'ok'})
+
+
+@router.get('/calls/{call_id}/answer')
+async def web_get_call_answer(
+    request: Request,
+    call_id: int,
+    db: AsyncSession = Depends(get_session)
+):
+    """Get the recipient's SDP answer (for caller)"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+    
+    call = (await db.execute(
+        select(Call).where(Call.id == call_id, Call.caller_id == user_id)
+    )).scalar_one_or_none()
+    
+    if not call:
+        return JSONResponse({'error': 'Call not found'}, status_code=404)
+    
+    return JSONResponse({
+        'answer': call.answer_sdp,
+        'status': call.status.value
+    })
+
+
+@router.post('/calls/{call_id}/ice')
+async def web_call_ice_candidate(
+    request: Request,
+    call_id: int,
+    db: AsyncSession = Depends(get_session)
+):
+    """Add an ICE candidate"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+    
+    body = await request.json()
+    candidate_data = body.get('candidate')
+    
+    call = (await db.execute(
+        select(Call).where(
+            Call.id == call_id,
+            (Call.caller_id == user_id) | (Call.recipient_id == user_id)
+        )
+    )).scalar_one_or_none()
+    
+    if not call:
+        return JSONResponse({'error': 'Call not found'}, status_code=404)
+    
+    import json
+    ice = CallIceCandidate(
+        call_id=call_id,
+        from_user_id=user_id,
+        candidate_data=json.dumps(candidate_data) if isinstance(candidate_data, dict) else candidate_data
+    )
+    db.add(ice)
+    await db.commit()
+    
+    return JSONResponse({'status': 'ok'})
+
+
+@router.get('/calls/{call_id}/ice')
+async def web_get_ice_candidates(
+    request: Request,
+    call_id: int,
+    since_id: int = 0,
+    db: AsyncSession = Depends(get_session)
+):
+    """Get ICE candidates from the other party"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+    
+    call = (await db.execute(
+        select(Call).where(
+            Call.id == call_id,
+            (Call.caller_id == user_id) | (Call.recipient_id == user_id)
+        )
+    )).scalar_one_or_none()
+    
+    if not call:
+        return JSONResponse({'error': 'Call not found'}, status_code=404)
+    
+    # Get candidates from the OTHER user
+    candidates = (await db.execute(
+        select(CallIceCandidate)
+        .where(
+            CallIceCandidate.call_id == call_id,
+            CallIceCandidate.from_user_id != user_id,
+            CallIceCandidate.id > since_id
+        )
+        .order_by(CallIceCandidate.id.asc())
+    )).scalars().all()
+    
+    import json
+    return JSONResponse({
+        'candidates': [
+            {
+                'id': c.id,
+                'candidate': json.loads(c.candidate_data) if c.candidate_data.startswith('{') else c.candidate_data
+            }
+            for c in candidates
+        ]
+    })
+
+
+@router.post('/calls/{call_id}/end')
+async def web_end_call(
+    request: Request,
+    call_id: int,
+    reason: str = Form('ended'),
+    db: AsyncSession = Depends(get_session)
+):
+    """End a call"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+    
+    call = (await db.execute(
+        select(Call).where(
+            Call.id == call_id,
+            (Call.caller_id == user_id) | (Call.recipient_id == user_id)
+        )
+    )).scalar_one_or_none()
+    
+    if not call:
+        return JSONResponse({'error': 'Call not found'}, status_code=404)
+    
+    # Calculate duration if call was answered
+    duration = None
+    if call.answered_at:
+        duration = int((datetime.utcnow() - call.answered_at).total_seconds())
+    
+    call.status = CallStatus.ENDED
+    call.ended_at = datetime.utcnow()
+    call.duration_seconds = duration
+    call.end_reason = reason
+    await db.commit()
+    
+    return JSONResponse({
+        'status': 'ended',
+        'duration': duration
+    })
+
+
+@router.post('/calls/{call_id}/decline')
+async def web_decline_call(
+    request: Request,
+    call_id: int,
+    db: AsyncSession = Depends(get_session)
+):
+    """Decline an incoming call"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+    
+    call = (await db.execute(
+        select(Call).where(Call.id == call_id, Call.recipient_id == user_id)
+    )).scalar_one_or_none()
+    
+    if not call:
+        return JSONResponse({'error': 'Call not found'}, status_code=404)
+    
+    call.status = CallStatus.DECLINED
+    call.ended_at = datetime.utcnow()
+    call.end_reason = 'declined'
+    await db.commit()
+    
+    return JSONResponse({'status': 'declined'})
+
+
+@router.get('/calls/{call_id}/status')
+async def web_call_status(
+    request: Request,
+    call_id: int,
+    db: AsyncSession = Depends(get_session)
+):
+    """Get current call status (for polling)"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+    
+    call = (await db.execute(
+        select(Call).where(
+            Call.id == call_id,
+            (Call.caller_id == user_id) | (Call.recipient_id == user_id)
+        )
+    )).scalar_one_or_none()
+    
+    if not call:
+        return JSONResponse({'error': 'Call not found'}, status_code=404)
+    
+    return JSONResponse({
+        'status': call.status.value,
+        'has_answer': call.answer_sdp is not None,
+        'duration': int((datetime.utcnow() - call.answered_at).total_seconds()) if call.answered_at else None
+    })
+
+
+@router.get('/calls/check-incoming')
+async def web_check_incoming_call(
+    request: Request,
+    db: AsyncSession = Depends(get_session)
+):
+    """Check for incoming calls (for polling)"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        return JSONResponse({'error': 'User not found'}, status_code=404)
+    
+    # Check for ringing calls
+    incoming = (await db.execute(
+        select(Call)
+        .where(
+            Call.recipient_id == user_id,
+            Call.status == CallStatus.RINGING,
+            Call.created_at > datetime.utcnow() - timedelta(minutes=2)  # Only recent calls
+        )
+        .order_by(Call.created_at.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    
+    if incoming:
+        caller = (await db.execute(
+            select(User).where(User.id == incoming.caller_id)
+        )).scalar_one_or_none()
+        
+        return JSONResponse({
+            'incoming': True,
+            'call_id': incoming.id,
+            'call_type': incoming.call_type.value,
+            'caller': {
+                'id': caller.id,
+                'name': caller.full_name or caller.email,
+                'profile_picture': caller.profile_picture
+            } if caller else None
+        })
+    
+    return JSONResponse({'incoming': False})
+

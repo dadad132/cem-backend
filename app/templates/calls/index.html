@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block title %}Calls - {{ workspace.site_title if workspace and workspace.site_title else 'CRM' }}{% endblock %}
+
+{% block content %}
+<div class="p-4 lg:p-6 space-y-6">
+    <!-- Header -->
+    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-bold text-slate-800">📞 Calls</h1>
+            <p class="text-slate-600 mt-1">Make voice and video calls with team members</p>
+        </div>
+        <div class="flex items-center gap-2">
+            <span class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm bg-green-100 text-green-700">
+                <span class="w-2 h-2 rounded-full bg-green-500"></span>
+                <span>Ready</span>
+            </span>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- Users List -->
+        <div class="lg:col-span-1 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <div class="p-4 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-white">
+                <h2 class="font-semibold text-slate-800 flex items-center gap-2">
+                    <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/>
+                    </svg>
+                    Team Members
+                </h2>
+            </div>
+            <div class="divide-y divide-slate-100 max-h-96 overflow-y-auto">
+                {% for user_item in workspace_users %}
+                <div class="p-4 hover:bg-slate-50 transition-colors flex items-center justify-between">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-semibold text-sm overflow-hidden">
+                            {% if user_item.profile_picture %}
+                            <img src="{{ user_item.profile_picture }}" alt="{{ user_item.full_name or user_item.email }}" class="w-10 h-10 rounded-full object-cover">
+                            {% else %}
+                            {{ (user_item.full_name or user_item.email)[:2].upper() }}
+                            {% endif %}
+                        </div>
+                        <div>
+                            <p class="font-medium text-slate-800">{{ user_item.full_name or user_item.email }}</p>
+                            <p class="text-sm text-slate-500">{{ user_item.email }}</p>
+                        </div>
+                    </div>
+                    <div class="flex gap-2">
+                        <button onclick="startCall({{ user_item.id }}, '{{ user_item.full_name or user_item.email }}', 'voice')"
+                                class="p-2 rounded-lg bg-green-100 text-green-600 hover:bg-green-200 transition-colors"
+                                title="Audio call">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/>
+                            </svg>
+                        </button>
+                        <button onclick="startCall({{ user_item.id }}, '{{ user_item.full_name or user_item.email }}', 'video')"
+                                class="p-2 rounded-lg bg-blue-100 text-blue-600 hover:bg-blue-200 transition-colors"
+                                title="Video call">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                {% endfor %}
+                {% if workspace_users|length == 0 %}
+                <div class="p-8 text-center text-slate-500">
+                    <svg class="w-12 h-12 mx-auto text-slate-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/>
+                    </svg>
+                    <p>No other team members available</p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Call History -->
+        <div class="lg:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <div class="p-4 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-white">
+                <h2 class="font-semibold text-slate-800 flex items-center gap-2">
+                    <svg class="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    Recent Calls
+                </h2>
+            </div>
+            <div class="divide-y divide-slate-100 max-h-96 overflow-y-auto">
+                {% for item in call_history %}
+                {% set call = item.call %}
+                {% set other_user = item.other_user %}
+                <div class="p-4 hover:bg-slate-50 transition-colors">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 rounded-full flex items-center justify-center
+                                {% if call.status.value == 'ended' %}bg-green-100 text-green-600
+                                {% elif call.status.value == 'missed' %}bg-red-100 text-red-600
+                                {% elif call.status.value == 'declined' %}bg-orange-100 text-orange-600
+                                {% else %}bg-slate-100 text-slate-600{% endif %}">
+                                {% if call.call_type.value == 'video' %}
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                                </svg>
+                                {% else %}
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/>
+                                </svg>
+                                {% endif %}
+                            </div>
+                            <div>
+                                <p class="font-medium text-slate-800">
+                                    {{ other_user.full_name or other_user.email if other_user else 'Unknown' }}
+                                    <span class="text-slate-400 text-sm">{{ '(outgoing)' if item.is_outgoing else '(incoming)' }}</span>
+                                </p>
+                                <p class="text-sm text-slate-500">
+                                    {{ call.call_type.value|capitalize }} call • 
+                                    {% if call.duration_seconds %}
+                                    {{ (call.duration_seconds // 60)|int }}:{{ '%02d'|format(call.duration_seconds % 60) }}
+                                    {% else %}
+                                    --:--
+                                    {% endif %}
+                                </p>
+                            </div>
+                        </div>
+                        <div class="text-right">
+                            <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium
+                                {% if call.status.value == 'ended' %}bg-green-100 text-green-700
+                                {% elif call.status.value == 'missed' %}bg-red-100 text-red-700
+                                {% elif call.status.value == 'declined' %}bg-orange-100 text-orange-700
+                                {% elif call.status.value == 'active' %}bg-blue-100 text-blue-700
+                                {% else %}bg-slate-100 text-slate-700{% endif %}">
+                                {{ call.status.value|capitalize }}
+                            </span>
+                            <p class="text-sm text-slate-500 mt-1">
+                                {{ call.created_at.strftime('%b %d, %H:%M') if call.created_at else '' }}
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                {% else %}
+                <div class="p-8 text-center text-slate-500">
+                    <svg class="w-12 h-12 mx-auto text-slate-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/>
+                    </svg>
+                    <p>No call history yet</p>
+                    <p class="text-sm mt-1">Start a call with a team member!</p>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
