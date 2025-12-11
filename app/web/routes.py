@@ -4085,11 +4085,18 @@ async def preview_comment_attachment(
     
     # Handle both absolute paths (old) and relative paths (new)
     file_path = Path(attachment.file_path)
+    logger.debug(f"Attachment file_path from DB: {attachment.file_path}")
+    logger.debug(f"Is absolute: {file_path.is_absolute()}")
+    
     if not file_path.is_absolute():
         # Relative path - resolve from current working directory
         file_path = Path.cwd() / file_path
     
+    logger.debug(f"Resolved file_path: {file_path}")
+    logger.debug(f"File exists: {file_path.exists()}")
+    
     if not file_path.exists():
+        logger.error(f"File not found: {file_path}")
         raise HTTPException(status_code=404, detail=f'File not found on disk: {file_path}')
     
     # Serve file inline for preview with proper headers for PDF embedding
@@ -6290,11 +6297,16 @@ async def download_chat_attachment(
     if not membership:
         raise HTTPException(status_code=403, detail='Access denied')
     
-    if not os.path.exists(attachment.file_path):
+    # Handle both absolute paths (old) and relative paths (new)
+    file_path = Path(attachment.file_path)
+    if not file_path.is_absolute():
+        file_path = Path.cwd() / file_path
+    
+    if not file_path.exists():
         raise HTTPException(status_code=404, detail='File not found on disk')
     
     return FileResponse(
-        path=attachment.file_path,
+        path=str(file_path),
         filename=attachment.filename,
         media_type=attachment.mime_type or 'application/octet-stream'
     )
