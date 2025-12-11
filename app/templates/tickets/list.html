@@ -122,7 +122,11 @@
     <div class="space-y-3">
         {% if tickets %}
             {% for ticket in tickets %}
-            <div class="bg-white rounded-lg shadow-sm hover:shadow-md transition-shadow">
+            <div class="bg-white rounded-lg shadow-sm hover:shadow-md transition-shadow border-l-4 
+                {% if ticket.priority == 'urgent' %}border-red-500
+                {% elif ticket.priority == 'high' %}border-orange-500
+                {% elif ticket.priority == 'medium' %}border-yellow-500
+                {% else %}border-gray-300{% endif %}">
                 <a href="/web/tickets/{{ ticket.id }}" class="block p-3 sm:p-4">
                     <div class="flex items-start justify-between gap-3">
                         <div class="flex-1 min-w-0">

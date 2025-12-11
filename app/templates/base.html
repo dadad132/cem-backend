@@ -4,6 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{% block title %}{{ workspace.site_title if workspace and workspace.site_title else (workspace.name if workspace else 'CRM System') }}{% endblock %}</title>
+    {# Set current path for active nav highlighting #}
+    {% set current_path = request.url.path %}
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://unpkg.com/htmx.org@1.9.12"></script>
@@ -18,6 +20,11 @@
       }
       .nav-item:hover {
         transform: translateX(2px);
+      }
+      .nav-item.active {
+        background: linear-gradient(135deg, rgba(220, 38, 38, 0.2) 0%, rgba(153, 27, 27, 0.3) 100%);
+        color: #fff;
+        border-left: 3px solid #dc2626;
       }
       .gradient-primary {
         background: linear-gradient(135deg, {{ workspace.primary_color if workspace and workspace.primary_color else '#dc2626' }} 0%, {{ workspace.primary_color if workspace and workspace.primary_color else '#991b1b' }} 100%);
@@ -83,7 +90,7 @@
 
         <nav class="flex flex-col gap-1 text-sm flex-1">
           <!-- Activity Feed -->
-          <a href="/web/activity" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 font-medium text-gray-300 hover:text-white flex items-center gap-3 transition-all">
+          <a href="/web/activity" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 font-medium text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if current_path == '/web/activity' else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"/>
             </svg>
@@ -93,35 +100,35 @@
           <!-- Section: Views -->
           <div class="pt-4 pb-2 px-4 text-xs font-bold text-red-400 uppercase tracking-wider">Views</div>
           
-          <a href="/web/tasks/list" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all">
+          <a href="/web/tasks/list" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/tasks' in current_path else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
             </svg>
             <span>List View</span>
           </a>
           
-          <a href="/web/projects" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all">
+          <a href="/web/projects" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/projects' in current_path else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v7a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v7a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 16a1 1 0 011-1h4a1 1 0 011 1v3a1 1 0 01-1 1H5a1 1 0 01-1-1v-3zM14 16a1 1 0 011-1h4a1 1 0 011 1v3a1 1 0 01-1 1h-4a1 1 0 01-1-1v-3z"/>
             </svg>
             <span>Board View</span>
           </a>
           
-          <a href="/web/calendar" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all">
+          <a href="/web/calendar" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/calendar' in current_path else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
             </svg>
             <span>Calendar</span>
           </a>
           
-          <a href="/web/my-tasks" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all">
+          <a href="/web/my-tasks" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if current_path == '/web/my-tasks' else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
             </svg>
             <span>My Tasks</span>
           </a>
           
-          <a href="/web/tickets" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all">
+          <a href="/web/tickets" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/tickets' in current_path else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 5v2m0 4v2m0 4v2M5 5a2 2 0 00-2 2v3a2 2 0 110 4v3a2 2 0 002 2h14a2 2 0 002-2v-3a2 2 0 110-4V7a2 2 0 00-2-2H5z"/>
             </svg>
@@ -131,14 +138,14 @@
           <!-- Section: Collaborate -->
           <div class="pt-4 pb-2 px-4 text-xs font-bold text-red-400 uppercase tracking-wider">Collaborate</div>
           
-          <a href="/web/chats" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all">
+          <a href="/web/chats" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/chats' in current_path or '/web/chat' in current_path else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
             </svg>
             <span>Chat</span>
           </a>
           
-          <a href="/web/meetings" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all">
+          <a href="/web/meetings" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/meetings' in current_path else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
             </svg>
@@ -148,7 +155,7 @@
           <!-- Section: Admin -->
           <div class="pt-4 pb-2 px-4 text-xs font-bold text-red-400 uppercase tracking-wider">Admin</div>
           
-          <a href="/web/admin/users" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all">
+          <a href="/web/admin/users" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/admin/users' in current_path else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/>
             </svg>
@@ -156,28 +163,28 @@
           </a>
           
           {% if user is defined and user.is_admin %}
-          <a href="/web/admin/site-settings" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all">
+          <a href="/web/admin/site-settings" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/admin/site-settings' in current_path else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"/>
             </svg>
             <span>Site Settings</span>
           </a>
           
-          <a href="/web/admin/backups" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all">
+          <a href="/web/admin/backups" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/admin/backups' in current_path else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/>
             </svg>
             <span>Database Backups</span>
           </a>
           
-          <a href="/web/admin/email-settings" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all">
+          <a href="/web/admin/email-settings" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/admin/email-settings' in current_path else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
             </svg>
             <span>Email Settings</span>
           </a>
           
-          <a href="/web/admin/updates" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all">
+          <a href="/web/admin/updates" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/admin/updates' in current_path else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
             </svg>
@@ -216,7 +223,16 @@
           </div>
           
           <div class="flex items-center gap-2 lg:gap-3">
-            <!-- Search - Hidden on mobile -->
+            <!-- Mobile Search Button -->
+            <button onclick="document.getElementById('mobile-search-modal').classList.remove('hidden')" 
+                    class="md:hidden p-2 rounded-lg border border-gray-300 hover:bg-gray-50 transition-all" 
+                    title="Search">
+              <svg class="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+              </svg>
+            </button>
+            
+            <!-- Search - Hidden on mobile, visible on desktop -->
             <form method="get" action="/web/search" class="relative hidden md:block">
               <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
@@ -609,6 +625,43 @@
             }
           });
         });
+      });
+    </script>
+
+    <!-- Mobile Search Modal -->
+    <div id="mobile-search-modal" class="hidden fixed inset-0 z-[70] bg-black/50" onclick="this.classList.add('hidden')">
+      <div class="absolute top-4 left-4 right-4 bg-white rounded-xl shadow-2xl p-4" onclick="event.stopPropagation()">
+        <form method="get" action="/web/search" class="relative">
+          <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+          <input type="search" name="q" placeholder="Search tasks, projects, tickets..." autofocus
+                 class="w-full h-12 pl-10 pr-4 rounded-lg border border-gray-300 bg-white text-gray-800 placeholder-gray-400 text-base focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent" />
+          <button type="button" onclick="document.getElementById('mobile-search-modal').classList.add('hidden')" 
+                  class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <!-- HTMX Loading Indicator -->
+    <div id="htmx-loading" class="htmx-indicator fixed top-0 left-0 right-0 h-1 z-[100]">
+      <div class="h-full bg-gradient-to-r from-red-500 via-red-600 to-red-500 animate-pulse"></div>
+    </div>
+    <style>
+      .htmx-indicator { opacity: 0; transition: opacity 0.2s ease-in-out; }
+      .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
+    </style>
+    <script>
+      // Make loading bar show on HTMX requests
+      document.body.addEventListener('htmx:beforeRequest', function() {
+        document.getElementById('htmx-loading').style.opacity = '1';
+      });
+      document.body.addEventListener('htmx:afterRequest', function() {
+        document.getElementById('htmx-loading').style.opacity = '0';
       });
     </script>
 
