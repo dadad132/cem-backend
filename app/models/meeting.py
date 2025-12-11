@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, date, time
+from datetime import datetime, date as date_type, time as time_type
 from typing import Optional
 
 from sqlmodel import Field, SQLModel
@@ -13,8 +13,8 @@ class Meeting(SQLModel, table=True):
     workspace_id: int = Field(foreign_key="workspace.id", index=True)
     title: str
     description: Optional[str] = None
-    date: date = Field(index=True)
-    start_time: time
+    date: date_type = Field(index=True)
+    start_time: time_type
     duration_minutes: int = 30
     platform: MeetingPlatform
     url: Optional[str] = None
