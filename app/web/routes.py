@@ -6919,13 +6919,8 @@ async def web_activity_feed(
     })
 
 
-# --------------------------
-# WebRTC Calling Routes
-# --------------------------
-from app.models.call import Call, CallIceCandidate, CallStatus, CallType
 
 
-@router.get('/calls')
 async def web_calls_page(request: Request, db: AsyncSession = Depends(get_session)):
     """Main calls page showing call history and online users"""
     user_id = request.session.get('user_id')
@@ -7389,5 +7384,3 @@ async def web_check_incoming_call(
             } if caller else None
         })
     
-    return JSONResponse({'incoming': False})
-
