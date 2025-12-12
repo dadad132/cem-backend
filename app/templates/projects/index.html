@@ -132,45 +132,6 @@
               <input class="w-full rounded border border-slate-300 px-3 py-2 text-sm" 
                      type="text" name="description" value="{{ p.description or '' }}" placeholder="Optional" />
             </div>
-            <!-- Email-to-Task Settings -->
-            <div class="border-t pt-3 mt-3">
-              <h4 class="text-sm font-medium mb-2">📧 Email-to-Task Settings</h4>
-              <p class="text-xs text-slate-500 mb-3">Configure an email inbox to automatically create tasks from incoming emails</p>
-              
-              <div class="space-y-2">
-                <div>
-                  <label class="block text-xs mb-1">IMAP Host</label>
-                  <input class="w-full rounded border border-slate-300 px-3 py-1.5 text-sm" 
-                         type="text" name="imap_host" value="{{ p.imap_host or '' }}" 
-                         placeholder="imap.gmail.com" />
-                </div>
-                <div class="grid grid-cols-2 gap-2">
-                  <div>
-                    <label class="block text-xs mb-1">Port</label>
-                    <input class="w-full rounded border border-slate-300 px-3 py-1.5 text-sm" 
-                           type="number" name="imap_port" value="{{ p.imap_port or 993 }}" />
-                  </div>
-                  <div class="flex items-end pb-1">
-                    <label class="flex items-center gap-2 text-sm">
-                      <input type="checkbox" name="imap_use_ssl" value="1" {{ 'checked' if p.imap_use_ssl != False else '' }} />
-                      Use SSL
-                    </label>
-                  </div>
-                </div>
-                <div>
-                  <label class="block text-xs mb-1">Username/Email</label>
-                  <input class="w-full rounded border border-slate-300 px-3 py-1.5 text-sm" 
-                         type="text" name="imap_username" value="{{ p.imap_username or '' }}" 
-                         placeholder="project@company.com" />
-                </div>
-                <div>
-                  <label class="block text-xs mb-1">Password / App Password</label>
-                  <input class="w-full rounded border border-slate-300 px-3 py-1.5 text-sm" 
-                         type="password" name="imap_password" value="{{ p.imap_password or '' }}" 
-                         placeholder="Enter password" />
-                </div>
-              </div>
-            </div>
             <div class="flex justify-end gap-2 pt-2">
               <button type="button" onclick="document.getElementById('editProject{{ p.id }}').close()" 
                       class="px-3 py-2 rounded border border-slate-300 text-sm">Cancel</button>

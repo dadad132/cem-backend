@@ -1,6 +1,6 @@
 """
 Email-to-Ticket Scheduler V2
-Uses database settings for each workspace AND per-project IMAP settings
+Uses database settings for each workspace
 """
 
 import asyncio
@@ -9,10 +9,9 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select
 
 from app.core.database import engine
-from app.core.email_to_ticket_v2 import process_workspace_emails, process_project_emails
+from app.core.email_to_ticket_v2 import process_workspace_emails
 from app.models.workspace import Workspace
 from app.models.email_settings import EmailSettings
-from app.models.project import Project
 
 
 class EmailScheduler:
@@ -36,9 +35,8 @@ class EmailScheduler:
         
         while self.running:
             try:
-                # Get list of workspaces and projects to process
+                # Get list of workspaces to process
                 workspace_ids = []
-                project_ids = []
                 
                 async with AsyncSession(engine) as db:
                     # Get all workspaces with email settings
@@ -46,20 +44,10 @@ class EmailScheduler:
                         select(EmailSettings.workspace_id).where(EmailSettings.incoming_mail_host.isnot(None))
                     )
                     workspace_ids = [row[0] for row in result.all()]
-                    
-                    # Get projects with their own IMAP settings
-                    project_result = await db.execute(
-                        select(Project.id).where(Project.imap_host.isnot(None))
-                    )
-                    project_ids = [row[0] for row in project_result.all()]
                 
                 # Process workspaces sequentially (each gets its own session)
                 for ws_id in workspace_ids:
                     await self._process_workspace(ws_id)
-                
-                # Process projects sequentially (each gets its own session)
-                for proj_id in project_ids:
-                    await self._process_project_by_id(proj_id)
                 
                 # Wait for next check
                 await asyncio.sleep(self.check_interval)
@@ -80,24 +68,6 @@ class EmailScheduler:
         
         except Exception as e:
             print(f"[Email-to-Ticket] Error processing workspace {workspace_id}: {e}")
-    
-    async def _process_project_by_id(self, project_id: int):
-        """Process emails for a project with its own session"""
-        try:
-            async with AsyncSession(engine) as db:
-                # Get project
-                result = await db.execute(select(Project).where(Project.id == project_id))
-                project = result.scalar_one_or_none()
-                
-                if project and project.imap_host:
-                    tasks_created = await process_project_emails(db, project)
-                    
-                    if tasks_created:
-                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        print(f"[{timestamp}] Project '{project.name}': Created {len(tasks_created)} task(s) from emails")
-        
-        except Exception as e:
-            print(f"[Email-to-Ticket] Error processing project {project_id}: {e}")
     
     async def start(self):
         """Start the scheduler"""
