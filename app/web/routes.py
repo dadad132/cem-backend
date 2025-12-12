@@ -3018,6 +3018,16 @@ async def web_projects_edit(request: Request, project_id: int, db: AsyncSession 
         project.name = form.get('name', project.name)
         project.description = form.get('description') or None
         project.support_email = form.get('support_email') or None
+        # IMAP settings for board email integration
+        project.imap_host = form.get('imap_host') or None
+        imap_port = form.get('imap_port')
+        project.imap_port = int(imap_port) if imap_port else None
+        project.imap_username = form.get('imap_username') or None
+        # Only update password if provided (don't clear existing)
+        imap_password = form.get('imap_password')
+        if imap_password:
+            project.imap_password = imap_password
+        project.imap_use_ssl = form.get('imap_use_ssl') == 'on'
         await db.commit()
     
     return RedirectResponse('/web/projects', status_code=303)

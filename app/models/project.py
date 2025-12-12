@@ -10,6 +10,12 @@ class ProjectBase(SQLModel):
     name: str
     description: Optional[str] = None
     support_email: Optional[str] = None  # Email address for auto-creating tickets
+    # IMAP settings for project-specific email processing
+    imap_host: Optional[str] = None
+    imap_port: Optional[int] = None
+    imap_username: Optional[str] = None
+    imap_password: Optional[str] = None
+    imap_use_ssl: bool = True
     is_archived: bool = False
     archived_at: Optional[datetime] = None
     start_date: Optional[date] = None  # Project start date for calendar display
@@ -39,6 +45,11 @@ class ProjectUpdate(SQLModel):
     name: Optional[str] = None
     description: Optional[str] = None
     support_email: Optional[str] = None
+    imap_host: Optional[str] = None
+    imap_port: Optional[int] = None
+    imap_username: Optional[str] = None
+    imap_password: Optional[str] = None
+    imap_use_ssl: Optional[bool] = None
     is_archived: Optional[bool] = None
     start_date: Optional[date] = None
     due_date: Optional[date] = None

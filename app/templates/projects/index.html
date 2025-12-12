@@ -115,11 +115,11 @@
       
       <!-- Edit project dialog for project {{ p.id }} -->
       {% if user is defined and user.is_admin %}
-      <dialog id="editProject{{ p.id }}" class="rounded-xl p-0">
+      <dialog id="editProject{{ p.id }}" class="rounded-xl p-0 max-h-[90vh] overflow-y-auto">
         <form method="dialog">
           <button class="absolute right-3 top-2 text-slate-500">✕</button>
         </form>
-        <form method="post" action="/web/projects/{{ p.id }}/edit" class="w-96 p-5">
+        <form method="post" action="/web/projects/{{ p.id }}/edit" class="w-[500px] p-5">
           <h3 class="text-lg font-medium mb-3">Edit Project</h3>
           <div class="space-y-3">
             <div>
@@ -132,6 +132,70 @@
               <input class="w-full rounded border border-slate-300 px-3 py-2 text-sm" 
                      type="text" name="description" value="{{ p.description or '' }}" placeholder="Optional" />
             </div>
+            
+            <!-- Email Integration Section -->
+            <div class="border-t border-slate-200 pt-3 mt-3">
+              <h4 class="text-sm font-medium text-slate-700 mb-2 flex items-center gap-2">
+                <svg class="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+                </svg>
+                Board Email Integration
+              </h4>
+              <p class="text-xs text-slate-500 mb-3">Configure an email address to automatically create tasks on this board from incoming emails.</p>
+              
+              <div>
+                <label class="block text-sm mb-1">Support Email Address</label>
+                <input class="w-full rounded border border-slate-300 px-3 py-2 text-sm" 
+                       type="email" name="support_email" value="{{ p.support_email or '' }}" 
+                       placeholder="e.g., support@company.com" />
+                <p class="text-xs text-slate-400 mt-1">Emails sent to this address will create tasks on this board</p>
+              </div>
+              
+              <!-- IMAP Settings -->
+              <div class="mt-3 p-3 bg-slate-50 rounded-lg">
+                <h5 class="text-xs font-medium text-slate-600 mb-2">IMAP Settings (for separate mailbox)</h5>
+                <p class="text-xs text-slate-400 mb-2">Optional: If this project has its own email account, configure IMAP to fetch emails directly.</p>
+                
+                <div class="grid grid-cols-2 gap-2">
+                  <div>
+                    <label class="block text-xs mb-1">IMAP Host</label>
+                    <input class="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" 
+                           type="text" name="imap_host" value="{{ p.imap_host or '' }}" 
+                           placeholder="imap.gmail.com" />
+                  </div>
+                  <div>
+                    <label class="block text-xs mb-1">Port</label>
+                    <input class="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" 
+                           type="number" name="imap_port" value="{{ p.imap_port or '' }}" 
+                           placeholder="993" />
+                  </div>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-2 mt-2">
+                  <div>
+                    <label class="block text-xs mb-1">Username/Email</label>
+                    <input class="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" 
+                           type="text" name="imap_username" value="{{ p.imap_username or '' }}" 
+                           placeholder="email@company.com" />
+                  </div>
+                  <div>
+                    <label class="block text-xs mb-1">Password</label>
+                    <input class="w-full rounded border border-slate-300 px-2 py-1.5 text-sm" 
+                           type="password" name="imap_password" 
+                           placeholder="{{ '••••••••' if p.imap_password else 'App password' }}" />
+                  </div>
+                </div>
+                
+                <div class="mt-2">
+                  <label class="inline-flex items-center gap-2 text-xs cursor-pointer">
+                    <input type="checkbox" name="imap_use_ssl" class="rounded border-slate-300" 
+                           {{ 'checked' if p.imap_use_ssl != False else '' }} />
+                    <span>Use SSL/TLS</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+            
             <div class="flex justify-end gap-2 pt-2">
               <button type="button" onclick="document.getElementById('editProject{{ p.id }}').close()" 
                       class="px-3 py-2 rounded border border-slate-300 text-sm">Cancel</button>
