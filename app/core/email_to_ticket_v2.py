@@ -3,6 +3,7 @@ Email-to-Ticket Service V2
 IMAP-based email processing, uses database settings, keeps emails on server
 """
 
+import asyncio
 import imaplib
 import email
 from email.header import decode_header
@@ -63,6 +64,52 @@ class EmailToTicketService:
         except Exception as e:
             print(f"Failed to connect to IMAP server: {e}")
             raise
+    
+    def _fetch_raw_emails_sync(self) -> List[dict]:
+        """
+        Synchronous method to fetch raw emails from IMAP server.
+        This runs in a thread pool to avoid blocking the event loop.
+        
+        Returns list of dicts with: email_id, msg_bytes, message_id
+        """
+        raw_emails = []
+        mail = None
+        
+        try:
+            mail = self.connect_imap()
+            mail.select('INBOX')
+            
+            # Search for unread emails
+            status, messages = mail.search(None, 'UNSEEN')
+            email_ids = messages[0].split()
+            
+            print(f"[IMAP] Found {len(email_ids)} unread messages")
+            
+            for email_id in email_ids:
+                try:
+                    status, msg_data = mail.fetch(email_id, '(RFC822)')
+                    if msg_data and msg_data[0]:
+                        raw_emails.append({
+                            'email_id': email_id,
+                            'msg_bytes': msg_data[0][1],
+                            'mail': mail  # Pass mail connection for marking as read later
+                        })
+                except Exception as e:
+                    print(f"[IMAP] Error fetching email {email_id}: {e}")
+                    continue
+            
+            # Don't close here - we need to mark emails as read later
+            return raw_emails
+            
+        except Exception as e:
+            print(f"[IMAP] Error connecting to IMAP: {e}")
+            if mail:
+                try:
+                    mail.close()
+                    mail.logout()
+                except:
+                    pass
+            return []
     
     def decode_header_value(self, header: str) -> str:
         """Decode email header"""
@@ -709,32 +756,58 @@ Auto-created from email support request"""
         return comment
     
     async def fetch_imap_emails(self, db: AsyncSession) -> List[Ticket]:
-        """Fetch emails from IMAP server and create tickets"""
+        """Fetch emails from IMAP server and create tickets.
+        
+        Uses asyncio.to_thread() to run blocking IMAP operations in a thread pool,
+        preventing the event loop from blocking and keeping the website responsive.
+        """
         tickets_created = []
+        mail = None
         
         try:
-            mail = self.connect_imap()
-            mail.select('INBOX')
+            # Run blocking IMAP connection in a thread pool
+            def connect_and_fetch():
+                """Synchronous function to connect and fetch emails"""
+                nonlocal mail
+                mail = self.connect_imap()
+                mail.select('INBOX')
+                
+                status, messages = mail.search(None, 'UNSEEN')
+                email_ids = messages[0].split()
+                
+                raw_emails = []
+                for email_id in email_ids:
+                    try:
+                        status, msg_data = mail.fetch(email_id, '(RFC822)')
+                        if msg_data and msg_data[0]:
+                            raw_emails.append({
+                                'email_id': email_id,
+                                'msg_bytes': msg_data[0][1]
+                            })
+                    except Exception as e:
+                        print(f"[IMAP] Error fetching email {email_id}: {e}")
+                        continue
+                
+                return raw_emails
             
-            # Search for unread emails
-            status, messages = mail.search(None, 'UNSEEN')
-            email_ids = messages[0].split()
+            # Run IMAP fetch in thread pool (non-blocking)
+            raw_emails = await asyncio.to_thread(connect_and_fetch)
             
-            print(f"[IMAP] Found {len(email_ids)} unread messages")
+            print(f"[IMAP] Found {len(raw_emails)} unread messages")
             
-            for email_id in email_ids:
+            # Process each email (async operations can use event loop)
+            for raw_email in raw_emails:
+                email_id = raw_email['email_id']
                 try:
-                    # Fetch email
-                    status, msg_data = mail.fetch(email_id, '(RFC822)')
-                    msg = email.message_from_bytes(msg_data[0][1])
+                    msg = email.message_from_bytes(raw_email['msg_bytes'])
                     
                     # Get message ID
                     message_id = msg.get('Message-ID', f'no-id-{email_id.decode()}')
                     
                     # Check if already processed
                     if await self.is_email_processed(db, message_id):
-                        # Mark as read but don't process again
-                        mail.store(email_id, '+FLAGS', '\\Seen')
+                        # Mark as read but don't process again (run in thread)
+                        await asyncio.to_thread(mail.store, email_id, '+FLAGS', '\\Seen')
                         continue
                     
                     # Extract email info
@@ -792,8 +865,8 @@ Auto-created from email support request"""
                             db, message_id, sender_email, subject, existing_ticket.id
                         )
                         
-                        # Mark email as read (keeps it on server)
-                        mail.store(email_id, '+FLAGS', '\\Seen')
+                        # Mark email as read (run in thread - blocking operation)
+                        await asyncio.to_thread(mail.store, email_id, '+FLAGS', '\\Seen')
                         
                         print(f"[IMAP] Added comment to ticket {existing_ticket.ticket_number} from {sender_email}")
                     else:
@@ -809,8 +882,8 @@ Auto-created from email support request"""
                                 db, message_id, sender_email, subject, task.id
                             )
                             
-                            # Mark email as read (keeps it on server)
-                            mail.store(email_id, '+FLAGS', '\\Seen')
+                            # Mark email as read (run in thread)
+                            await asyncio.to_thread(mail.store, email_id, '+FLAGS', '\\Seen')
                             
                             print(f"[IMAP] Created task '{task.title}' for project '{project.name}' from {sender_email}")
                         else:
@@ -824,8 +897,8 @@ Auto-created from email support request"""
                                 db, message_id, sender_email, subject, ticket.id
                             )
                             
-                            # Mark email as read (keeps it on server)
-                            mail.store(email_id, '+FLAGS', '\\Seen')
+                            # Mark email as read (run in thread)
+                            await asyncio.to_thread(mail.store, email_id, '+FLAGS', '\\Seen')
                             
                             tickets_created.append(ticket)
                             print(f"[IMAP] Created ticket {ticket.ticket_number} from {sender_email}")
@@ -834,11 +907,17 @@ Auto-created from email support request"""
                     print(f"[IMAP] Error processing email {email_id}: {e}")
                     continue
             
-            mail.close()
-            mail.logout()
+            # Close connection in thread pool
+            if mail:
+                await asyncio.to_thread(lambda: (mail.close(), mail.logout()))
             
         except Exception as e:
             print(f"[IMAP] Error fetching emails: {e}")
+            if mail:
+                try:
+                    await asyncio.to_thread(lambda: (mail.close(), mail.logout()))
+                except:
+                    pass
         
         return tickets_created
     
@@ -882,6 +961,9 @@ async def process_project_emails(db: AsyncSession, project) -> List:
     Process emails for a project using its own IMAP settings
     Creates tasks (not tickets) from incoming emails
     
+    Uses asyncio.to_thread() for blocking IMAP operations to prevent
+    blocking the event loop and slowing down the website.
+    
     Args:
         db: Database session
         project: Project with IMAP settings
@@ -895,32 +977,52 @@ async def process_project_emails(db: AsyncSession, project) -> List:
         return []
     
     tasks_created = []
+    mail = None
     
     try:
         import imaplib
         import email as email_lib
         from email.header import decode_header
         
-        # Connect to IMAP
-        if project.imap_use_ssl:
-            mail = imaplib.IMAP4_SSL(project.imap_host, project.imap_port or 993)
-        else:
-            mail = imaplib.IMAP4(project.imap_host, project.imap_port or 143)
+        # Run blocking IMAP operations in thread pool
+        def connect_and_fetch():
+            """Synchronous IMAP connection and fetch"""
+            nonlocal mail
+            if project.imap_use_ssl:
+                mail = imaplib.IMAP4_SSL(project.imap_host, project.imap_port or 993)
+            else:
+                mail = imaplib.IMAP4(project.imap_host, project.imap_port or 143)
+            
+            mail.login(project.imap_username, project.imap_password)
+            mail.select('INBOX')
+            
+            status, messages = mail.search(None, 'UNSEEN')
+            email_ids = messages[0].split()
+            
+            raw_emails = []
+            for email_id in email_ids:
+                try:
+                    status, msg_data = mail.fetch(email_id, '(RFC822)')
+                    if msg_data and msg_data[0]:
+                        raw_emails.append({
+                            'email_id': email_id,
+                            'msg_bytes': msg_data[0][1]
+                        })
+                except Exception as e:
+                    print(f"[Project IMAP] Error fetching email {email_id}: {e}")
+                    continue
+            
+            return raw_emails
         
-        mail.login(project.imap_username, project.imap_password)
-        mail.select('INBOX')
+        # Fetch emails in thread pool (non-blocking)
+        raw_emails = await asyncio.to_thread(connect_and_fetch)
         
-        # Search for unread emails
-        status, messages = mail.search(None, 'UNSEEN')
-        email_ids = messages[0].split()
+        print(f"[Project IMAP] {project.name}: Found {len(raw_emails)} unread messages")
         
-        print(f"[Project IMAP] {project.name}: Found {len(email_ids)} unread messages")
-        
-        for email_id in email_ids:
+        for raw_email in raw_emails:
+            email_id = raw_email['email_id']
             try:
-                # Fetch email
-                status, msg_data = mail.fetch(email_id, '(RFC822)')
-                msg = email_lib.message_from_bytes(msg_data[0][1])
+                msg = email_lib.message_from_bytes(raw_email['msg_bytes'])
                 
                 # Get message ID
                 message_id = msg.get('Message-ID', f'no-id-{email_id.decode()}')
@@ -931,7 +1033,7 @@ async def process_project_emails(db: AsyncSession, project) -> List:
                     select(ProcessedMail).where(ProcessedMail.message_id == message_id)
                 )
                 if existing.scalar_one_or_none():
-                    mail.store(email_id, '+FLAGS', '\\Seen')
+                    await asyncio.to_thread(mail.store, email_id, '+FLAGS', '\\Seen')
                     continue
                 
                 # Extract email info
@@ -1015,8 +1117,8 @@ async def process_project_emails(db: AsyncSession, project) -> List:
                 db.add(processed)
                 await db.commit()
                 
-                # Mark as read
-                mail.store(email_id, '+FLAGS', '\\Seen')
+                # Mark as read (run in thread)
+                await asyncio.to_thread(mail.store, email_id, '+FLAGS', '\\Seen')
                 
                 # Notify project members and admins
                 from app.models.notification import Notification
@@ -1058,10 +1160,16 @@ async def process_project_emails(db: AsyncSession, project) -> List:
                 print(f"[Project IMAP] Error processing email {email_id}: {e}")
                 continue
         
-        mail.close()
-        mail.logout()
+        # Close connection in thread pool
+        if mail:
+            await asyncio.to_thread(lambda: (mail.close(), mail.logout()))
         
     except Exception as e:
         print(f"[Project IMAP] Error fetching emails for project {project.name}: {e}")
+        if mail:
+            try:
+                await asyncio.to_thread(lambda: (mail.close(), mail.logout()))
+            except:
+                pass
     
     return tasks_created
