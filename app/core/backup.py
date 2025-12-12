@@ -22,7 +22,8 @@ class DatabaseBackup:
         self.backup_dir = Path(backup_dir)
         self.backup_dir.mkdir(exist_ok=True)
         self.uploads_dir = Path("app/uploads")  # Attachments directory
-        self.max_backups = 10  # Keep last 10 backups
+        self.max_backups = 10  # Keep last 10 automatic backups
+        self.max_manual_backups = 20  # Keep last 20 manual backups
         self.backup_interval = 43200  # Backup every 12 hours (43200 seconds)
         self._backup_task: Optional[asyncio.Task] = None
         
@@ -73,9 +74,12 @@ class DatabaseBackup:
                 latest_backup.unlink()
             shutil.copy2(backup_file, latest_backup)
             
-            # Cleanup old automatic backups only
+            # Cleanup old automatic backups
             if not is_manual:
                 self._cleanup_old_backups()
+            else:
+                # Also cleanup old manual backups (keep last 20)
+                self._cleanup_old_manual_backups()
             
             return backup_file
         except Exception as e:
@@ -98,6 +102,57 @@ class DatabaseBackup:
                 logger.info(f"🗑️  Removed old automatic backup: {old_backup.name}")
         except Exception as e:
             logger.error(f"Error cleaning up old backups: {e}")
+    
+    def _cleanup_old_manual_backups(self):
+        """Remove old MANUAL backup files beyond max_manual_backups (default 20)"""
+        try:
+            # Only get manual backups (both .db and .zip)
+            manual_backups = sorted(
+                [f for f in self.backup_dir.glob("backup_MANUAL_*.*") if f.suffix in ['.db', '.zip']],
+                key=lambda x: x.stat().st_mtime,
+                reverse=True
+            )
+            
+            # Remove manual backups beyond max_manual_backups
+            for old_backup in manual_backups[self.max_manual_backups:]:
+                old_backup.unlink()
+                logger.info(f"🗑️  Removed old manual backup: {old_backup.name}")
+        except Exception as e:
+            logger.error(f"Error cleaning up old manual backups: {e}")
+    
+    def delete_backup(self, filename: str) -> bool:
+        """Delete a specific backup file
+        
+        Args:
+            filename: The filename of the backup to delete
+            
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        try:
+            backup_path = self.backup_dir / filename
+            
+            # Security check - ensure it's a valid backup file
+            if not backup_path.exists():
+                logger.error(f"Backup file not found: {filename}")
+                return False
+            
+            # Only allow deleting actual backup files (not corrupted or latest)
+            if 'latest' in filename or 'corrupted' in filename:
+                logger.error(f"Cannot delete special backup file: {filename}")
+                return False
+            
+            if not filename.startswith('backup_') or filename.split('.')[-1] not in ['db', 'zip']:
+                logger.error(f"Invalid backup filename: {filename}")
+                return False
+            
+            backup_path.unlink()
+            logger.info(f"🗑️  Deleted backup: {filename}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error deleting backup {filename}: {e}")
+            return False
     
     def get_latest_backup(self) -> Optional[Path]:
         """Get the most recent backup file (automatic or manual)"""

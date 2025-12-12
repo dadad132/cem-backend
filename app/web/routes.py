@@ -2022,6 +2022,30 @@ async def web_admin_backup_restore(
         return RedirectResponse('/web/admin/backups?error=restore_failed', status_code=303)
 
 
+@router.post('/admin/backups/delete')
+async def web_admin_backup_delete(
+    request: Request,
+    backup_file: str = Form(...),
+    db: AsyncSession = Depends(get_session)
+):
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_active or not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    from app.core.backup import backup_manager
+    
+    success = backup_manager.delete_backup(backup_file)
+    
+    if success:
+        return RedirectResponse('/web/admin/backups?success=backup_deleted', status_code=303)
+    else:
+        return RedirectResponse('/web/admin/backups?error=delete_failed', status_code=303)
+
+
 # --------------------------
 # Admin - System Updates
 # --------------------------
