@@ -15,8 +15,9 @@ _initialized: bool = False
 
 engine: AsyncEngine = create_async_engine(
     _settings.database_url,
-    echo=_settings.debug,
+    echo=False,  # Disable SQL logging for performance
     future=True,
+    pool_pre_ping=True,  # Check connections are alive
 )
 
 async_session_factory = sessionmaker(
