@@ -9,9 +9,10 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select
 
 from app.core.database import engine
-from app.core.email_to_ticket_v2 import process_workspace_emails
+from app.core.email_to_ticket_v2 import process_workspace_emails, process_project_emails
 from app.models.workspace import Workspace
 from app.models.email_settings import EmailSettings
+from app.models.project import Project
 
 
 class EmailScheduler:
@@ -49,6 +50,9 @@ class EmailScheduler:
                 for ws_id in workspace_ids:
                     await self._process_workspace(ws_id)
                 
+                # Process projects with their own IMAP settings
+                await self._process_project_emails()
+                
                 # Wait for next check
                 await asyncio.sleep(self.check_interval)
                 
@@ -68,6 +72,32 @@ class EmailScheduler:
         
         except Exception as e:
             print(f"[Email-to-Ticket] Error processing workspace {workspace_id}: {e}")
+    
+    async def _process_project_emails(self):
+        """Process emails for all projects with their own IMAP settings"""
+        try:
+            async with AsyncSession(engine) as db:
+                # Find all projects with IMAP configured
+                result = await db.execute(
+                    select(Project).where(
+                        Project.imap_host.isnot(None),
+                        Project.imap_username.isnot(None),
+                        Project.is_archived == False
+                    )
+                )
+                projects = result.scalars().all()
+                
+                for project in projects:
+                    try:
+                        tasks = await process_project_emails(db, project)
+                        if tasks:
+                            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            print(f"[{timestamp}] Project '{project.name}': Created {len(tasks)} task(s) from emails")
+                    except Exception as e:
+                        print(f"[Email-to-Ticket] Error processing project '{project.name}': {e}")
+        
+        except Exception as e:
+            print(f"[Email-to-Ticket] Error processing project emails: {e}")
     
     async def start(self):
         """Start the scheduler"""
