@@ -4226,17 +4226,17 @@ async def web_task_update_status(request: Request, task_id: int, status_value: s
     if not task:
         raise HTTPException(status_code=404, detail='Task not found')
     
-    # Check permission: Admin OR assigned to this task
+    # Check permission: Admin OR project member
     if not user.is_admin:
-        from app.models.assignment import Assignment
-        assignment = (await db.execute(
-            select(Assignment).where(
-                Assignment.task_id == task_id,
-                Assignment.assignee_id == user_id
+        from app.models.project_member import ProjectMember
+        member = (await db.execute(
+            select(ProjectMember).where(
+                ProjectMember.project_id == task.project_id,
+                ProjectMember.user_id == user_id
             )
         )).scalar_one_or_none()
-        if not assignment:
-            raise HTTPException(status_code=403, detail='You can only update tasks assigned to you')
+        if not member:
+            raise HTTPException(status_code=403, detail='You must be a project member to update tasks')
     
     if status_value not in [s.value for s in TaskStatus]:
         raise HTTPException(status_code=400, detail='Invalid status')
@@ -4245,10 +4245,9 @@ async def web_task_update_status(request: Request, task_id: int, status_value: s
     old_status = task.status.value
     task.status = TaskStatus(status_value)
     
-    # Auto-archive when status changed to 'done'
-    if status_value == 'done' and not task.is_archived:
-        task.is_archived = True
-        task.archived_at = datetime.utcnow()
+    # Note: Tasks are NOT auto-archived when moved to done
+    # They stay visible on the board in the Done column
+    # Archiving happens separately when needed
     
     # Save history
     history_entry = TaskHistory(
