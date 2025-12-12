@@ -189,26 +189,49 @@
 
 {% block scripts %}
 <script>
-  const statuses = ["todo", "in_progress", "blocked", "done"]; 
-  const lists = statuses.map(s => document.getElementById(`col-${s}`));
-  lists.forEach(list => new Sortable(list, {
-    group: 'kanban', animation: 150, ghostClass: 'opacity-60',
-    onEnd: async (evt) => {
-      const el = evt.item; // dragged element
-      const taskId = el.dataset.taskId;
-      const newCol = evt.to.id.replace('col-', '');
-      const form = new FormData();
-      form.append('status_value', newCol);
-      try {
-        const res = await fetch(`/web/tasks/${taskId}/status`, { method: 'POST', body: form });
-        if (!res.ok) throw new Error('Failed to update status');
-      } catch (e) {
-        // revert on fail
-        evt.from.insertBefore(el, evt.from.children[evt.oldIndex]);
-        alert('Could not update status');
+  // Wait for DOM to be ready
+  document.addEventListener('DOMContentLoaded', function() {
+    const statuses = ["todo", "in_progress", "blocked", "done"]; 
+    
+    statuses.forEach(status => {
+      const list = document.getElementById(`col-${status}`);
+      if (list) {
+        console.log(`Initializing Sortable for col-${status}`);
+        new Sortable(list, {
+          group: 'kanban',
+          animation: 150,
+          ghostClass: 'opacity-60',
+          draggable: '.task-card',
+          onEnd: async (evt) => {
+            const el = evt.item;
+            const taskId = el.dataset.taskId;
+            const newCol = evt.to.id.replace('col-', '');
+            console.log(`Moving task ${taskId} to ${newCol}`);
+            
+            const form = new FormData();
+            form.append('status_value', newCol);
+            
+            try {
+              const res = await fetch(`/web/tasks/${taskId}/status`, { method: 'POST', body: form });
+              if (!res.ok) {
+                const text = await res.text();
+                console.error('Status update failed:', res.status, text);
+                throw new Error('Failed to update status');
+              }
+              console.log('Task status updated successfully');
+            } catch (e) {
+              console.error('Error updating task:', e);
+              // revert on fail
+              evt.from.insertBefore(el, evt.from.children[evt.oldIndex]);
+              alert('Could not update status: ' + e.message);
+            }
+          }
+        });
+      } else {
+        console.warn(`Column col-${status} not found`);
       }
-    }
-  }));
+    });
+  });
 
   // Working days date calculator
   // Note: We use Python weekday convention: Mon=0, Tue=1, ... Sun=6
