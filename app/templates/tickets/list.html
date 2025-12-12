@@ -422,8 +422,20 @@ function calculateTicketDueDate() {
     const year = currentDate.getFullYear();
     const month = String(currentDate.getMonth() + 1).padStart(2, '0');
     const day = String(currentDate.getDate()).padStart(2, '0');
-    // Set to 9:00 AM by default
-    targetInput.value = `${year}-${month}-${day}T09:00`;
+    
+    // Preserve existing time if set, otherwise default to 09:00
+    const existingValue = targetInput.value;
+    let hours = '09';
+    let minutes = '00';
+    if (existingValue && existingValue.includes('T')) {
+        const timePart = existingValue.split('T')[1];
+        if (timePart) {
+            const timeParts = timePart.split(':');
+            hours = timeParts[0] || '09';
+            minutes = timeParts[1] || '00';
+        }
+    }
+    targetInput.value = `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
 // Setup event listeners for ticket form
