@@ -2994,6 +2994,16 @@ async def web_projects_edit(request: Request, project_id: int, db: AsyncSession 
         project.name = form.get('name', project.name)
         project.description = form.get('description') or None
         project.support_email = form.get('support_email') or None
+        # IMAP settings for email-to-task
+        project.imap_host = form.get('imap_host') or None
+        port_str = form.get('imap_port')
+        project.imap_port = int(port_str) if port_str else None
+        project.imap_username = form.get('imap_username') or None
+        # Only update password if provided (don't clear existing)
+        new_password = form.get('imap_password')
+        if new_password:
+            project.imap_password = new_password
+        project.imap_use_ssl = form.get('imap_use_ssl') == '1'
         await db.commit()
     
     return RedirectResponse('/web/projects', status_code=303)

@@ -875,3 +875,193 @@ async def process_workspace_emails(db: AsyncSession, workspace_id: int) -> List[
     # Create service and process emails
     service = EmailToTicketService(settings, workspace_id)
     return await service.process_emails(db)
+
+
+async def process_project_emails(db: AsyncSession, project) -> List:
+    """
+    Process emails for a project using its own IMAP settings
+    Creates tasks (not tickets) from incoming emails
+    
+    Args:
+        db: Database session
+        project: Project with IMAP settings
+        
+    Returns:
+        List of created tasks
+    """
+    from app.models.task import Task
+    
+    if not project.imap_host or not project.imap_username:
+        return []
+    
+    tasks_created = []
+    
+    try:
+        import imaplib
+        import email as email_lib
+        from email.header import decode_header
+        
+        # Connect to IMAP
+        if project.imap_use_ssl:
+            mail = imaplib.IMAP4_SSL(project.imap_host, project.imap_port or 993)
+        else:
+            mail = imaplib.IMAP4(project.imap_host, project.imap_port or 143)
+        
+        mail.login(project.imap_username, project.imap_password)
+        mail.select('INBOX')
+        
+        # Search for unread emails
+        status, messages = mail.search(None, 'UNSEEN')
+        email_ids = messages[0].split()
+        
+        print(f"[Project IMAP] {project.name}: Found {len(email_ids)} unread messages")
+        
+        for email_id in email_ids:
+            try:
+                # Fetch email
+                status, msg_data = mail.fetch(email_id, '(RFC822)')
+                msg = email_lib.message_from_bytes(msg_data[0][1])
+                
+                # Get message ID
+                message_id = msg.get('Message-ID', f'no-id-{email_id.decode()}')
+                
+                # Check if already processed
+                from app.models.processed_mail import ProcessedMail
+                existing = await db.execute(
+                    select(ProcessedMail).where(ProcessedMail.message_id == message_id)
+                )
+                if existing.scalar_one_or_none():
+                    mail.store(email_id, '+FLAGS', '\\Seen')
+                    continue
+                
+                # Extract email info
+                from_header = msg.get('From', '')
+                # Parse sender
+                if '<' in from_header:
+                    sender_name = from_header.split('<')[0].strip().strip('"')
+                    sender_email = from_header.split('<')[1].split('>')[0]
+                else:
+                    sender_name = from_header
+                    sender_email = from_header
+                
+                # Decode subject
+                subject_header = msg.get('Subject', 'No Subject')
+                if isinstance(subject_header, bytes):
+                    subject = subject_header.decode()
+                else:
+                    decoded = decode_header(subject_header)
+                    subject = ''
+                    for part, charset in decoded:
+                        if isinstance(part, bytes):
+                            subject += part.decode(charset or 'utf-8', errors='replace')
+                        else:
+                            subject += part
+                
+                # Extract body
+                body = ''
+                if msg.is_multipart():
+                    for part in msg.walk():
+                        if part.get_content_type() == 'text/plain':
+                            payload = part.get_payload(decode=True)
+                            if payload:
+                                body = payload.decode(errors='replace')
+                                break
+                else:
+                    payload = msg.get_payload(decode=True)
+                    if payload:
+                        body = payload.decode(errors='replace')
+                
+                # Create task using the service's analyze method
+                service = EmailToTicketService.__new__(EmailToTicketService)
+                title, description = service.analyze_email_for_task(subject, body)
+                priority_str = service.determine_priority(subject, body)
+                
+                from app.models.enums import TaskPriority, TaskStatus
+                from datetime import date
+                
+                priority_map = {
+                    'urgent': TaskPriority.critical,
+                    'high': TaskPriority.high,
+                    'medium': TaskPriority.medium,
+                    'low': TaskPriority.low
+                }
+                task_priority = priority_map.get(priority_str, TaskPriority.medium)
+                
+                # Get project creator as task creator
+                creator_id = project.owner_id
+                
+                new_task = Task(
+                    title=title,
+                    description=description,
+                    project_id=project.id,
+                    creator_id=creator_id,
+                    status=TaskStatus.todo,
+                    priority=task_priority,
+                    start_date=date.today(),
+                    due_date=None
+                )
+                
+                db.add(new_task)
+                await db.commit()
+                await db.refresh(new_task)
+                
+                # Mark email as processed
+                processed = ProcessedMail(
+                    message_id=message_id,
+                    sender_email=sender_email,
+                    subject=subject,
+                    ticket_id=new_task.id  # Using ticket_id field to store task id
+                )
+                db.add(processed)
+                await db.commit()
+                
+                # Mark as read
+                mail.store(email_id, '+FLAGS', '\\Seen')
+                
+                # Notify project members and admins
+                from app.models.notification import Notification
+                from app.models.project_member import ProjectMember
+                from app.models.user import User
+                
+                # Get project member user IDs
+                members_query = select(ProjectMember).where(ProjectMember.project_id == project.id)
+                result = await db.execute(members_query)
+                members = result.scalars().all()
+                member_ids = {m.user_id for m in members}
+                
+                # Get admin user IDs
+                admin_query = select(User).where(User.role == 'admin', User.is_active == True)
+                result = await db.execute(admin_query)
+                admins = result.scalars().all()
+                admin_ids = {a.id for a in admins}
+                
+                # Combine unique user IDs
+                notify_ids = member_ids.union(admin_ids)
+                
+                for user_id in notify_ids:
+                    notification = Notification(
+                        user_id=user_id,
+                        title=f"📧 New Task: {title}",
+                        message=f"Email from {sender_name} created new task in '{project.name}': {subject}",
+                        type='info',
+                        related_id=new_task.id,
+                        related_type='task'
+                    )
+                    db.add(notification)
+                
+                await db.commit()
+                
+                tasks_created.append(new_task)
+                print(f"[Project IMAP] Created task '{title}' for project '{project.name}' from {sender_email}")
+                
+            except Exception as e:
+                print(f"[Project IMAP] Error processing email {email_id}: {e}")
+                continue
+        
+        mail.close()
+        mail.logout()
+        
+    except Exception as e:
+        print(f"[Project IMAP] Error fetching emails for project {project.name}: {e}")
+    
+    return tasks_created
