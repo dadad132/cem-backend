@@ -570,6 +570,9 @@ Auto-created from email support request"""
             # Analyze email to extract concise title and description
             title, description = self.analyze_email_for_task(subject, body)
             
+            # Add sender info to description
+            description = f"📧 **From:** {sender_name} ({sender_email})\n\n{description}"
+            
             # Determine priority using existing method
             priority_str = self.determine_priority(subject, body)
             
@@ -609,22 +612,44 @@ Auto-created from email support request"""
             
             logger.info(f"✅ Created task '{title}' from {sender_email} for project '{project.name}'")
             
-            # Notify project members
+            # Notify admins
+            admin_query = sql_select(User).where(
+                User.workspace_id == self.workspace_id,
+                User.is_admin == True,
+                User.is_active == True
+            )
+            result = await db.execute(admin_query)
+            admin_users = result.scalars().all()
+            
+            notified_user_ids = set()
+            for admin in admin_users:
+                notification = Notification(
+                    user_id=admin.id,
+                    type='task',
+                    message=f'📧 New task from email in {project.name}: {title}',
+                    url=f'/web/projects/{project.id}/tasks',
+                    related_id=new_task.id
+                )
+                db.add(notification)
+                notified_user_ids.add(admin.id)
+            
+            # Notify project members (avoid duplicates with admins)
             from app.models.project_member import ProjectMember
             members_query = sql_select(ProjectMember).where(ProjectMember.project_id == project.id)
             result = await db.execute(members_query)
             members = result.scalars().all()
             
             for member in members:
-                notification = Notification(
-                    user_id=member.user_id,
-                    title=f"New Task: {title}",
-                    message=f"Email from {sender_name} created new task in '{project.name}': {subject}",
-                    type='info',
-                    related_id=new_task.id,
-                    related_type='task'
-                )
-                db.add(notification)
+                if member.user_id not in notified_user_ids:
+                    notification = Notification(
+                        user_id=member.user_id,
+                        type='task',
+                        message=f'📧 New task from email in {project.name}: {title}',
+                        url=f'/web/projects/{project.id}/tasks',
+                        related_id=new_task.id
+                    )
+                    db.add(notification)
+                    notified_user_ids.add(member.user_id)
             
             await db.commit()
             
