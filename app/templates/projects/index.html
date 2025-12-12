@@ -137,7 +137,7 @@
               <input class="w-full rounded border border-slate-300 px-3 py-2 text-sm" 
                      type="email" name="support_email" value="{{ p.support_email or '' }}" 
                      placeholder="support@company.com (Optional)" />
-              <p class="text-xs text-slate-500 mt-1">📧 Emails sent to this address will automatically create tickets for this project</p>
+              <p class="text-xs text-slate-500 mt-1">📧 Emails sent to this address will automatically create tasks for this project and notify team members</p>
             </div>
             <div class="flex justify-end gap-2 pt-2">
               <button type="button" onclick="document.getElementById('editProject{{ p.id }}').close()" 
