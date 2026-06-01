@@ -1,3 +1,6 @@
+import re
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -37,16 +40,42 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 @router.post("/signup", response_model=UserRead, status_code=201)
 async def signup(data: UserCreate, db: AsyncSession = Depends(get_db)):
+    if not data.email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
     exists = await db.execute(select(User).where(User.email == data.email))
     if exists.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
+
+    base_username = (data.username or data.email.split("@", 1)[0]).strip().lower()
+    base_username = re.sub(r"[^a-z0-9_.-]+", "_", base_username).strip("._-") or "user"
+
+    username = base_username
+    while True:
+        existing_user = await db.execute(select(User).where(User.username == username))
+        if not existing_user.scalar_one_or_none():
+            break
+        username = f"{base_username}_{uuid.uuid4().hex[:6]}"
 
     ws = Workspace(name=f"{data.full_name or data.email}'s Workspace")
     db.add(ws)
     await db.flush()
 
-    user = User(email=data.email, full_name=data.full_name or "", hashed_password=get_password_hash(data.password), workspace_id=ws.id)
+    user = User(
+        username=username,
+        email=data.email,
+        full_name=data.full_name or "",
+        hashed_password=get_password_hash(data.password),
+        workspace_id=ws.id,
+    )
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    return UserRead(id=user.id, email=user.email, full_name=user.full_name, is_active=user.is_active, is_admin=user.is_admin)
+    return UserRead(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        full_name=user.full_name,
+        is_active=user.is_active,
+        is_admin=user.is_admin,
+    )

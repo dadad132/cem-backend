@@ -64,7 +64,7 @@ class User(UserBase, table=True):
 
 
 class UserCreate(SQLModel):
-    username: str
+    username: Optional[str] = None
     password: str
     full_name: Optional[str] = None
     email: Optional[str] = None
