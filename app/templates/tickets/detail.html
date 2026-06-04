@@ -296,7 +296,7 @@
                                     {% endif %}
                                 </div>
                                 <span class="text-sm text-gray-500">
-                                    {{ comment.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y %I:%M %p') }}
+                                    {{ comment.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', comment_time_fmt if comment_time_fmt else '%b %d, %Y %I:%M %p') }}
                                 </span>
                             </div>
                             <p class="text-gray-700 whitespace-pre-wrap break-words linkify-content" style="word-break: break-word; overflow-wrap: anywhere;">{{ comment.content }}</p>

@@ -143,7 +143,7 @@
                             {% endif %}
                         </span>
                         <span class="text-sm text-slate-500">
-                            {{ item.comment.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %I:%M %p') }}
+                            {{ item.comment.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', comment_time_fmt if comment_time_fmt else '%b %d, %Y %I:%M %p') }}
                         </span>
                     </div>
                     <div class="text-slate-700">{{ item.comment.content }}</div>

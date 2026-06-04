@@ -6206,6 +6206,7 @@ async def web_admin_site_settings_save(
     business_hours_end: str = Form("16:00"),
     business_hours_exclude_weekends: str = Form(None),
     gui_theme: str = Form("crimson"),
+    comment_time_format: str = Form("12hr"),
     db: AsyncSession = Depends(get_session)
 ):
     """Save site branding settings"""
@@ -6233,6 +6234,7 @@ async def web_admin_site_settings_save(
             workspace.business_hours_end = business_hours_end or "16:00"
             workspace.business_hours_exclude_weekends = business_hours_exclude_weekends == "1"
             workspace.gui_theme = gui_theme or "crimson"
+            workspace.comment_time_format = comment_time_format if comment_time_format in ("12hr", "24hr") else "12hr"
 
             await db.commit()
             request.session['success_message'] = 'Site settings saved successfully!'
@@ -7842,7 +7844,15 @@ async def web_task_detail(request: Request, task_id: int, db: AsyncSession = Dep
     task_attachments = (await db.execute(
         select(TaskAttachment).where(TaskAttachment.task_id == task_id).order_by(TaskAttachment.created_at.desc())
     )).scalars().all()
-    
+
+    workspace = (await db.execute(
+        select(Workspace).where(Workspace.id == user.workspace_id)
+    )).scalar_one_or_none()
+
+    comment_time_fmt = '%b %d, %Y %H:%M'
+    if workspace and workspace.comment_time_format != '24hr':
+        comment_time_fmt = '%b %d, %Y %I:%M %p'
+
     return templates.TemplateResponse('tasks/detail.html', {
         'request': request,
         'task': task,
@@ -7865,7 +7875,9 @@ async def web_task_detail(request: Request, task_id: int, db: AsyncSession = Dep
         'is_watching': is_watching,
         'available_tasks': available_tasks,
         'TaskStatus': TaskStatus,
-        'TaskPriority': TaskPriority
+        'TaskPriority': TaskPriority,
+        'workspace': workspace,
+        'comment_time_fmt': comment_time_fmt,
     })
 
 
@@ -14085,11 +14097,21 @@ async def web_tickets_track_detail(
             'comment': comment,
             'user': users_map.get(comment.user_id) if comment.user_id else None
         })
-    
+
+    workspace = (await db.execute(
+        select(Workspace).where(Workspace.id == ticket.workspace_id)
+    )).scalar_one_or_none()
+
+    comment_time_fmt = '%b %d, %Y %H:%M'
+    if workspace and workspace.comment_time_format != '24hr':
+        comment_time_fmt = '%b %d, %Y %I:%M %p'
+
     return templates.TemplateResponse('tickets/track_detail.html', {
         'request': request,
         'ticket': ticket,
-        'comments': comments_with_users
+        'comments': comments_with_users,
+        'workspace': workspace,
+        'comment_time_fmt': comment_time_fmt,
     })
 
 
@@ -14304,7 +14326,7 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
     users = (await db.execute(
         select(User).where(User.workspace_id == user.workspace_id)
     )).scalars().all()
-    
+
     # Get related project if exists
     related_project = None
     if ticket.related_project_id:
@@ -14312,14 +14334,22 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         related_project = (await db.execute(
             select(Project).where(Project.id == ticket.related_project_id)
         )).scalar_one_or_none()
-    
+
     # Get closed_by user if exists
     closed_by_user = None
     if ticket.closed_by_id:
         closed_by_user = (await db.execute(
             select(User).where(User.id == ticket.closed_by_id)
         )).scalar_one_or_none()
-    
+
+    workspace = (await db.execute(
+        select(Workspace).where(Workspace.id == user.workspace_id)
+    )).scalar_one_or_none()
+
+    comment_time_fmt = '%b %d, %Y %H:%M'
+    if workspace and workspace.comment_time_format != '24hr':
+        comment_time_fmt = '%b %d, %Y %I:%M %p'
+
     return templates.TemplateResponse('tickets/detail.html', {
         'request': request,
         'user': user,
@@ -14332,7 +14362,9 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         'history': history,
         'users': users,
         'related_project': related_project,
-        'closed_by_user': closed_by_user
+        'closed_by_user': closed_by_user,
+        'workspace': workspace,
+        'comment_time_fmt': comment_time_fmt,
     })
 
 

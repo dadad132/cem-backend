@@ -192,6 +192,28 @@
             <p class="text-xs text-slate-500 mt-1">All times will be displayed in this timezone</p>
           </div>
 
+          <!-- Comment Time Format -->
+          <div>
+            <label class="block text-sm font-medium text-slate-700 mb-1.5">Comment Time Format</label>
+            <div class="flex gap-3">
+              <label class="flex items-center gap-2 cursor-pointer px-4 py-2.5 border rounded-lg transition
+                {% if not workspace.comment_time_format or workspace.comment_time_format == '12hr' %}border-blue-500 bg-blue-50 text-blue-700{% else %}border-slate-300 text-slate-700 hover:border-slate-400{% endif %}">
+                <input type="radio" name="comment_time_format" value="12hr"
+                       {% if not workspace.comment_time_format or workspace.comment_time_format == '12hr' %}checked{% endif %}
+                       class="accent-blue-600">
+                <span class="text-sm font-medium">12-hour <span class="font-normal text-slate-500">(e.g. 02:30 PM)</span></span>
+              </label>
+              <label class="flex items-center gap-2 cursor-pointer px-4 py-2.5 border rounded-lg transition
+                {% if workspace.comment_time_format == '24hr' %}border-blue-500 bg-blue-50 text-blue-700{% else %}border-slate-300 text-slate-700 hover:border-slate-400{% endif %}">
+                <input type="radio" name="comment_time_format" value="24hr"
+                       {% if workspace.comment_time_format == '24hr' %}checked{% endif %}
+                       class="accent-blue-600">
+                <span class="text-sm font-medium">24-hour <span class="font-normal text-slate-500">(e.g. 14:30)</span></span>
+              </label>
+            </div>
+            <p class="text-xs text-slate-500 mt-1">Controls how timestamps appear on ticket and task comments</p>
+          </div>
+
           <!-- Business Hours -->
           <div class="border-t border-slate-100 pt-5">
             <div class="flex items-center gap-2 mb-1">
