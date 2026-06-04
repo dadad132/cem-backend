@@ -212,6 +212,10 @@ async def lifespan(app):  # FastAPI lifespan
             if ws_cols and "bubbles_ai_provider" not in ws_cols:
                 cursor.execute("ALTER TABLE workspace ADD COLUMN bubbles_ai_provider VARCHAR")
                 conn.commit()
+            if ws_cols and "comment_time_format" not in ws_cols:
+                cursor.execute("ALTER TABLE workspace ADD COLUMN comment_time_format VARCHAR DEFAULT '12hr'")
+                conn.commit()
+                logger.info("✅ Added workspace.comment_time_format")
             conn.close()
     except Exception as e:
         logger.warning(f"⚠️  Could not migrate workspace schema: {e}")
