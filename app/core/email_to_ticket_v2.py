@@ -11,7 +11,7 @@ from email.header import decode_header
 from email.utils import parseaddr
 from pathlib import Path
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import Optional, List, Tuple
 
 # Set default IMAP socket timeout to prevent hanging connections
@@ -42,14 +42,6 @@ MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024
 # Setup logger
 logger = logging.getLogger(__name__)
 
-# Timezone offset (UTC+2 for South Africa)
-LOCAL_TZ_OFFSET = timedelta(hours=2)
-
-
-
-def get_local_time() -> datetime:
-    """Get current time in local timezone (UTC+2)"""
-    return datetime.now(timezone(LOCAL_TZ_OFFSET))
 
 
 def extract_email_attachments(msg) -> List[dict]:
@@ -753,7 +745,7 @@ class EmailToTicketService:
                 ticket_id=ticket_id,
                 workspace_id=self.workspace_id,
                 email_account=account_email,
-                processed_at=get_local_time()
+                processed_at=datetime.utcnow()
             )
             db.add(processed)
             await db.commit()
@@ -827,26 +819,26 @@ class EmailToTicketService:
             guest_company="",
             guest_branch="",
             related_project_id=project.id if project else None,  # Link to project if found
-            created_at=get_local_time(),
-            updated_at=get_local_time()
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
         )
-        
+
         db.add(ticket)
         await db.flush()
-        
+
         # Add history entry
         history_comment = f'Ticket created automatically from email: {sender_email}'
         if project:
             history_comment += f' → Project: {project.name}'
         if to_email:
             history_comment += f' (to: {to_email})'
-            
+
         history = TicketHistory(
             ticket_id=ticket.id,
             user_id=None,  # System action
             action='created',
             new_value=history_comment,
-            created_at=get_local_time()
+            created_at=datetime.utcnow()
         )
         db.add(history)
         
@@ -906,23 +898,23 @@ class EmailToTicketService:
             user_id=None,  # Guest comment from email
             content=f"**Email reply from {sender_name} ({sender_email}):**\n\n{body}",
             is_internal=False,
-            created_at=get_local_time()
+            created_at=datetime.utcnow()
         )
         db.add(comment)
-        
+
         # Update ticket timestamp
-        ticket.updated_at = get_local_time()
-        
+        ticket.updated_at = datetime.utcnow()
+
         # Add history entry
         history = TicketHistory(
             ticket_id=ticket.id,
             user_id=None,
             action='comment_added',
             new_value=f'Email reply received from {sender_email}',
-            created_at=get_local_time()
+            created_at=datetime.utcnow()
         )
         db.add(history)
-        
+
         # Notify all non-admin users in the workspace about email reply
         from app.models.user import User
         from sqlmodel import select
@@ -1464,26 +1456,26 @@ async def add_comment_from_email_for_account(
         user_id=None,  # Guest comment from email
         content=f"**Email reply from {sender_name} ({sender_email}):**\n\n{body}",
         is_internal=False,
-        created_at=get_local_time()
+        created_at=datetime.utcnow()
     )
     db.add(comment)
-    
+
     # Update ticket timestamp
-    ticket.updated_at = get_local_time()
-    
+    ticket.updated_at = datetime.utcnow()
+
     # Add history entry
     history = TicketHistory(
         ticket_id=ticket.id,
         user_id=None,
         action='comment_added',
         new_value=f'Email reply received from {sender_email}',
-        created_at=get_local_time()
+        created_at=datetime.utcnow()
     )
     db.add(history)
-    
+
     # Notify all non-admin users in the workspace about email reply
     from app.models.user import User
-    
+
     # Get all non-admin users in the workspace
     users_query = (
         select(User)
@@ -1824,7 +1816,7 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                             ticket_id=None,
                             workspace_id=workspace_id,
                             email_account=account_email.lower(),
-                            processed_at=get_local_time()
+                            processed_at=datetime.utcnow()
                         )
                         fresh_db.add(processed)
                         await fresh_db.commit()
@@ -1900,7 +1892,7 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                             ticket_id=None,
                             workspace_id=workspace_id,
                             email_account=account_email.lower(),
-                            processed_at=get_local_time()
+                            processed_at=datetime.utcnow()
                         )
                         fresh_db.add(processed)
                         await fresh_db.commit()
@@ -1950,7 +1942,7 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                             ticket_id=existing_ticket_id,
                             workspace_id=workspace_id,
                             email_account=account_email.lower(),
-                            processed_at=get_local_time()
+                            processed_at=datetime.utcnow()
                         )
                         fresh_db.add(processed)
                         await fresh_db.commit()
@@ -1993,7 +1985,7 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                             ticket_id=already_has_ticket.ticket_id,
                             workspace_id=workspace_id,
                             email_account=account_email.lower(),
-                            processed_at=get_local_time()
+                            processed_at=datetime.utcnow()
                         )
                         fresh_db.add(processed)
                         await fresh_db.commit()
@@ -2045,23 +2037,23 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                         guest_phone="",
                         guest_company=account_name,  # Use email account name as company
                         guest_branch="",
-                        created_at=get_local_time(),
-                        updated_at=get_local_time()
+                        created_at=datetime.utcnow(),
+                        updated_at=datetime.utcnow()
                     )
-                    
+
                     fresh_db.add(new_ticket)
                     await fresh_db.flush()
-                    
+
                     # Store ID immediately after flush to avoid lazy loading issues
                     ticket_id = new_ticket.id
-                    
+
                     # Add history entry
                     history = TicketHistory(
                         ticket_id=ticket_id,
                         user_id=None,
                         action='created',
                         new_value=f'Ticket created from email via {account_name}: {sender_email_addr}',
-                        created_at=get_local_time()
+                        created_at=datetime.utcnow()
                     )
                     fresh_db.add(history)
                     
@@ -2081,7 +2073,7 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                         ticket_id=ticket_id,
                         workspace_id=workspace_id,
                         email_account=account_email.lower(),
-                        processed_at=get_local_time()
+                        processed_at=datetime.utcnow()
                     )
                     fresh_db.add(processed)
                     await fresh_db.commit()
