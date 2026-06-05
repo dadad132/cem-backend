@@ -29,6 +29,9 @@ class Workspace(SQLModel, table=True):
     # Comment timestamp display format: "12hr" | "24hr"
     comment_time_format: Optional[str] = Field(default="12hr")
 
+    # Timezone used for comment timestamps; falls back to global `timezone` if None
+    comment_timezone: Optional[str] = Field(default=None)
+
     # AI integration for Bubbles assistant
     # Provider: "anthropic" | "openai" | "gemini" | None (rule-based)
     bubbles_ai_provider: Optional[str] = Field(default=None)

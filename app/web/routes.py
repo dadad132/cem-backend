@@ -6206,6 +6206,7 @@ async def web_admin_site_settings_save(
     business_hours_exclude_weekends: str = Form(None),
     gui_theme: str = Form("crimson"),
     comment_time_format: str = Form("12hr"),
+    comment_timezone: str = Form(None),
     db: AsyncSession = Depends(get_session)
 ):
     """Save site branding settings"""
@@ -6234,6 +6235,7 @@ async def web_admin_site_settings_save(
             workspace.business_hours_exclude_weekends = business_hours_exclude_weekends == "1"
             workspace.gui_theme = gui_theme or "crimson"
             workspace.comment_time_format = comment_time_format if comment_time_format in ("12hr", "24hr") else "12hr"
+            workspace.comment_timezone = comment_timezone if comment_timezone else None
 
             await db.commit()
             request.session['success_message'] = 'Site settings saved successfully!'
@@ -7851,6 +7853,7 @@ async def web_task_detail(request: Request, task_id: int, db: AsyncSession = Dep
     comment_time_fmt = '%b %d, %Y %H:%M'
     if workspace and workspace.comment_time_format != '24hr':
         comment_time_fmt = '%b %d, %Y %I:%M %p'
+    comment_tz = (workspace.comment_timezone or workspace.timezone or 'UTC') if workspace else 'UTC'
 
     return templates.TemplateResponse('tasks/detail.html', {
         'request': request,
@@ -7877,6 +7880,7 @@ async def web_task_detail(request: Request, task_id: int, db: AsyncSession = Dep
         'TaskPriority': TaskPriority,
         'workspace': workspace,
         'comment_time_fmt': comment_time_fmt,
+        'comment_tz': comment_tz,
     })
 
 
@@ -14104,6 +14108,7 @@ async def web_tickets_track_detail(
     comment_time_fmt = '%b %d, %Y %H:%M'
     if workspace and workspace.comment_time_format != '24hr':
         comment_time_fmt = '%b %d, %Y %I:%M %p'
+    comment_tz = (workspace.comment_timezone or workspace.timezone or 'UTC') if workspace else 'UTC'
 
     return templates.TemplateResponse('tickets/track_detail.html', {
         'request': request,
@@ -14111,6 +14116,7 @@ async def web_tickets_track_detail(
         'comments': comments_with_users,
         'workspace': workspace,
         'comment_time_fmt': comment_time_fmt,
+        'comment_tz': comment_tz,
     })
 
 
@@ -14348,6 +14354,7 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
     comment_time_fmt = '%b %d, %Y %H:%M'
     if workspace and workspace.comment_time_format != '24hr':
         comment_time_fmt = '%b %d, %Y %I:%M %p'
+    comment_tz = (workspace.comment_timezone or workspace.timezone or 'UTC') if workspace else 'UTC'
 
     return templates.TemplateResponse('tickets/detail.html', {
         'request': request,
@@ -14364,6 +14371,7 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         'closed_by_user': closed_by_user,
         'workspace': workspace,
         'comment_time_fmt': comment_time_fmt,
+        'comment_tz': comment_tz,
     })
 
 

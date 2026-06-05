@@ -216,6 +216,10 @@ async def lifespan(app):  # FastAPI lifespan
                 cursor.execute("ALTER TABLE workspace ADD COLUMN comment_time_format VARCHAR DEFAULT '12hr'")
                 conn.commit()
                 logger.info("✅ Added workspace.comment_time_format")
+            if ws_cols and "comment_timezone" not in ws_cols:
+                cursor.execute("ALTER TABLE workspace ADD COLUMN comment_timezone VARCHAR")
+                conn.commit()
+                logger.info("✅ Added workspace.comment_timezone")
             conn.close()
     except Exception as e:
         logger.warning(f"⚠️  Could not migrate workspace schema: {e}")

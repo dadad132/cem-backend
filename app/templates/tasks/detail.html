@@ -328,7 +328,7 @@
         <div style="border-left: 3px solid #2563eb; padding: 0.75rem; background: #f9fafb; border-radius: 0.25rem; margin-bottom: 0.75rem;">
           <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
             <strong>{{ author.full_name or author.username }}</strong>
-            <span style="color: #6b7280; font-size: 0.875rem;">{{ comment.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', comment_time_fmt if comment_time_fmt else '%b %d, %Y %I:%M %p') }}</span>
+            <span style="color: #6b7280; font-size: 0.875rem;">{{ comment.created_at | format_datetime_tz(comment_tz if comment_tz else 'UTC', comment_time_fmt if comment_time_fmt else '%b %d, %Y %I:%M %p') }}</span>
           </div>
           <p style="white-space: pre-wrap; margin: 0;">{{ comment.content }}</p>
           
