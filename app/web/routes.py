@@ -33,7 +33,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_session
 from app.core.security import verify_password, get_password_hash
 from app.core.email import send_email
-from app.core.email_to_ticket_v2 import get_local_time
 from app.models.project import Project
 from app.models.task import Task
 from app.models.user import User
@@ -14776,7 +14775,7 @@ async def send_ticket_comment_email(ticket, content: str, user_id: int, db: Asyn
                 email_from=from_email,
                 subject=msg_subject,
                 ticket_id=ticket_id,
-                processed_at=get_local_time()
+                processed_at=datetime.utcnow()
             )
             db.add(processed)
             await db.commit()
