@@ -699,14 +699,16 @@ class EmailToTicketService:
         print(f"[DEBUG] ❌ No ticket number found in subject")
         return None
     
-    async def find_ticket_by_sender(self, db: AsyncSession, sender_email: str) -> Optional[Ticket]:
+    async def find_ticket_by_subject_and_sender(self, db: AsyncSession, subject: str, sender_email: str) -> Optional[Ticket]:
+        """Match an email to an existing open ticket only when BOTH rules are satisfied:
+        Rule 1 — cleaned subject matches an existing open ticket's subject.
+        Rule 2 — sender email matches that ticket's guest_email.
+        If only one rule matches it is treated as a new ticket.
         """
-        Last resort fallback: Find most recent open ticket from this sender
-        Only matches if there's exactly ONE open ticket from this email
-        """
-        print(f"[DEBUG] Trying to find ticket by sender email: '{sender_email}'")
-        
-        # Search for open tickets from this email (not closed)
+        import re
+        clean_subject = re.sub(r'^(Re:|RE:|Fwd:|FWD:|AW:|Aw:|\[.*?\])\s*', '', subject, flags=re.IGNORECASE).strip()
+        print(f"[DEBUG] find_ticket_by_subject_and_sender: subject='{clean_subject}', email='{sender_email}'")
+
         result = await db.execute(
             select(Ticket).where(
                 Ticket.guest_email == sender_email,
@@ -714,17 +716,15 @@ class EmailToTicketService:
                 Ticket.status.in_(['open', 'in_progress', 'waiting'])
             ).order_by(Ticket.created_at.desc())
         )
-        tickets = result.scalars().all()
-        
-        if len(tickets) == 1:
-            # Only auto-match if there's exactly one open ticket
-            print(f"[DEBUG] ✅ Found single open ticket #{tickets[0].ticket_number} from sender")
-            return tickets[0]
-        elif len(tickets) > 1:
-            print(f"[DEBUG] Found {len(tickets)} open tickets from sender - ambiguous, creating new ticket")
-        else:
-            print(f"[DEBUG] No open tickets found from sender")
-        
+        candidates = result.scalars().all()
+
+        for ticket in candidates:
+            ticket_subject_clean = re.sub(r'^(Re:|RE:|Fwd:|FWD:|AW:|Aw:|\[.*?\])\s*', '', ticket.subject or '', flags=re.IGNORECASE).strip()
+            if ticket_subject_clean.lower() == clean_subject.lower():
+                print(f"[DEBUG] ✅ Both rules matched — ticket #{ticket.ticket_number}")
+                return ticket
+
+        print(f"[DEBUG] ❌ No ticket matched both subject and sender email — new ticket will be created")
         return None
     
     async def mark_email_processed(
@@ -1153,15 +1153,14 @@ class EmailToTicketService:
                                 _syslog('WARNING', 'IMAP', f'Failed to mark email as read in {folder}', str(e)[:200])
                             continue
                         
-                        # If not found via headers, try by sender email
-                        # (Skip subject matching - too aggressive, catches invoice numbers etc.)
-                        # NEVER use sender fallback for our own address — the support mailbox
-                        # has many open tickets, so it would match everything to one ticket
+                        # If not matched via reply headers, require BOTH subject AND sender email
+                        # to match an existing open ticket before treating as a comment.
+                        # A match on only one criterion creates a new ticket.
                         if not existing_ticket and not is_from_self:
-                            print(f"[IMAP] Trying sender email fallback...")
-                            existing_ticket = await self.find_ticket_by_sender(fresh_db, sender_email)
+                            print(f"[IMAP] Trying subject+sender match...")
+                            existing_ticket = await self.find_ticket_by_subject_and_sender(fresh_db, subject, sender_email)
                         elif not existing_ticket and is_from_self:
-                            print(f"[IMAP] Skipping sender fallback (email is from our own address)")
+                            print(f"[IMAP] Skipping fallback (email is from our own address)")
                         
                         if existing_ticket:
                             print(f"[IMAP] ✅ MATCH FOUND - Adding to ticket #{existing_ticket.ticket_number}")
@@ -1411,14 +1410,18 @@ async def find_ticket_by_reply_for_account(
     return None
 
 
-async def find_ticket_by_sender_for_account(db: AsyncSession, workspace_id: int, sender_email: str) -> Optional[Ticket]:
+async def find_ticket_by_subject_and_sender_for_account(
+    db: AsyncSession, workspace_id: int, subject: str, sender_email: str
+) -> Optional[Ticket]:
+    """Match an email to an existing open ticket only when BOTH rules are satisfied:
+    Rule 1 — cleaned subject matches an existing open ticket's subject.
+    Rule 2 — sender email matches that ticket's guest_email.
+    If only one rule matches it is treated as a new ticket.
     """
-    Last resort fallback: Find most recent open ticket from this sender
-    Only matches if there's exactly ONE open ticket from this email
-    """
-    print(f"[DEBUG] Trying to find ticket by sender email: '{sender_email}'")
-    
-    # Search for open tickets from this email (not closed)
+    import re
+    clean_subject = re.sub(r'^(Re:|RE:|Fwd:|FWD:|AW:|Aw:|\[.*?\])\s*', '', subject, flags=re.IGNORECASE).strip()
+    print(f"[DEBUG] find_ticket_by_subject_and_sender_for_account: subject='{clean_subject}', email='{sender_email}'")
+
     result = await db.execute(
         select(Ticket).where(
             Ticket.guest_email == sender_email,
@@ -1426,17 +1429,15 @@ async def find_ticket_by_sender_for_account(db: AsyncSession, workspace_id: int,
             Ticket.status.in_(['open', 'in_progress', 'waiting'])
         ).order_by(Ticket.created_at.desc())
     )
-    tickets = result.scalars().all()
-    
-    if len(tickets) == 1:
-        # Only auto-match if there's exactly one open ticket
-        print(f"[DEBUG] ✅ Found single open ticket #{tickets[0].ticket_number} from sender")
-        return tickets[0]
-    elif len(tickets) > 1:
-        print(f"[DEBUG] Found {len(tickets)} open tickets from sender - ambiguous, creating new ticket")
-    else:
-        print(f"[DEBUG] No open tickets found from sender")
-    
+    candidates = result.scalars().all()
+
+    for ticket in candidates:
+        ticket_subject_clean = re.sub(r'^(Re:|RE:|Fwd:|FWD:|AW:|Aw:|\[.*?\])\s*', '', ticket.subject or '', flags=re.IGNORECASE).strip()
+        if ticket_subject_clean.lower() == clean_subject.lower():
+            print(f"[DEBUG] ✅ Both rules matched — ticket #{ticket.ticket_number}")
+            return ticket
+
+    print(f"[DEBUG] ❌ No ticket matched both subject and sender email — new ticket will be created")
     return None
 
 
@@ -1907,17 +1908,16 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                                 _syslog('WARNING', 'Email Account', 'Failed to mark email as read', str(e)[:200], workspace_id)
                         continue
                     
-                    # If not found via headers, try by sender email
-                    # (Skip subject matching - too aggressive, catches invoice numbers etc.)
-                    # NEVER use sender fallback for our own address — it has many open
-                    # tickets, so it would match everything to one ticket
+                    # If not matched via reply headers, require BOTH subject AND sender email
+                    # to match an existing open ticket before treating as a comment.
+                    # A match on only one criterion creates a new ticket.
                     if not existing_ticket and not is_from_self:
-                        print(f"[Email Account] Trying sender email fallback...")
-                        existing_ticket = await find_ticket_by_sender_for_account(
-                            fresh_db, workspace_id, sender_email_addr
+                        print(f"[Email Account] Trying subject+sender match...")
+                        existing_ticket = await find_ticket_by_subject_and_sender_for_account(
+                            fresh_db, workspace_id, subject, sender_email_addr
                         )
                     elif not existing_ticket and is_from_self:
-                        print(f"[Email Account] Skipping sender fallback (email is from our own address)")
+                        print(f"[Email Account] Skipping fallback (email is from our own address)")
                     
                     if existing_ticket:
                         # Refresh the ticket to ensure all attributes are loaded
