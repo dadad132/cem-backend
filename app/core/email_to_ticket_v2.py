@@ -1139,10 +1139,10 @@ class EmailToTicketService:
                         print(f"[IMAP] In-Reply-To: '{in_reply_to}'")
                         print(f"[IMAP] References: '{references}'")
                         
-                        existing_ticket = await self.find_ticket_by_reply(fresh_db, in_reply_to, references)
-                        
+                        header_ticket = await self.find_ticket_by_reply(fresh_db, in_reply_to, references)
+
                         # If reply belongs to a closed/resolved ticket, skip this email entirely
-                        if existing_ticket == 'CLOSED':
+                        if header_ticket == 'CLOSED':
                             print(f"[IMAP] ⏭️ SKIPPING: Email is a reply to a closed/resolved ticket")
                             _syslog('INFO', 'IMAP', 'Skipped reply to closed ticket', f'Subject={subject[:80]} | From={sender_email}')
                             await self.mark_email_processed(fresh_db, message_id, sender_email, subject, None)
@@ -1152,15 +1152,17 @@ class EmailToTicketService:
                                 print(f"[IMAP] Warning: Could not mark email as read in {folder}: {e}")
                                 _syslog('WARNING', 'IMAP', f'Failed to mark email as read in {folder}', str(e)[:200])
                             continue
-                        
-                        # If not matched via reply headers, require BOTH subject AND sender email
-                        # to match an existing open ticket before treating as a comment.
-                        # A match on only one criterion creates a new ticket.
-                        if not existing_ticket and not is_from_self:
-                            print(f"[IMAP] Trying subject+sender match...")
+
+                        # Always enforce both rules (subject + sender email) regardless of
+                        # whether reply headers found a candidate. This handles the case where
+                        # a client has multiple open tickets — headers alone cannot disambiguate.
+                        if not is_from_self:
                             existing_ticket = await self.find_ticket_by_subject_and_sender(fresh_db, subject, sender_email)
-                        elif not existing_ticket and is_from_self:
-                            print(f"[IMAP] Skipping fallback (email is from our own address)")
+                            if existing_ticket is None and header_ticket:
+                                print(f"[IMAP] Reply headers pointed to ticket #{header_ticket.ticket_number} but subject/sender rules did not confirm — creating new ticket")
+                        else:
+                            existing_ticket = None
+                            print(f"[IMAP] Skipping match (email is from our own address)")
                         
                         if existing_ticket:
                             print(f"[IMAP] ✅ MATCH FOUND - Adding to ticket #{existing_ticket.ticket_number}")
@@ -1878,12 +1880,12 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                     email_attachments = extract_email_attachments(msg)
                     
                     # Check if this is a reply to an existing ticket
-                    existing_ticket = await find_ticket_by_reply_for_account(
+                    header_ticket = await find_ticket_by_reply_for_account(
                         fresh_db, workspace_id, in_reply_to, references
                     )
-                    
+
                     # If reply belongs to a closed/resolved ticket, skip this email entirely
-                    if existing_ticket == 'CLOSED':
+                    if header_ticket == 'CLOSED':
                         print(f"[Email Account] ⏭️ SKIPPING: Email is a reply to a closed/resolved ticket")
                         _syslog('INFO', 'Email Account', 'Skipped reply to closed ticket', f'Subject={subject[:80]} | From={sender_email_addr}', workspace_id)
                         processed = ProcessedMail(
@@ -1907,17 +1909,19 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                                 print(f"[Email Account] Warning: Could not mark email as read: {e}")
                                 _syslog('WARNING', 'Email Account', 'Failed to mark email as read', str(e)[:200], workspace_id)
                         continue
-                    
-                    # If not matched via reply headers, require BOTH subject AND sender email
-                    # to match an existing open ticket before treating as a comment.
-                    # A match on only one criterion creates a new ticket.
-                    if not existing_ticket and not is_from_self:
-                        print(f"[Email Account] Trying subject+sender match...")
+
+                    # Always enforce both rules (subject + sender email) regardless of
+                    # whether reply headers found a candidate. This handles the case where
+                    # a client has multiple open tickets — headers alone cannot disambiguate.
+                    if not is_from_self:
                         existing_ticket = await find_ticket_by_subject_and_sender_for_account(
                             fresh_db, workspace_id, subject, sender_email_addr
                         )
-                    elif not existing_ticket and is_from_self:
-                        print(f"[Email Account] Skipping fallback (email is from our own address)")
+                        if existing_ticket is None and header_ticket:
+                            print(f"[Email Account] Reply headers pointed to ticket #{header_ticket.ticket_number} but subject/sender rules did not confirm — creating new ticket")
+                    else:
+                        existing_ticket = None
+                        print(f"[Email Account] Skipping match (email is from our own address)")
                     
                     if existing_ticket:
                         # Refresh the ticket to ensure all attributes are loaded
