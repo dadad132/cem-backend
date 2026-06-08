@@ -15224,6 +15224,195 @@ async def web_tickets_restore(
     return RedirectResponse('/web/tickets/archived', status_code=303)
 
 
+@router.post('/tickets/{ticket_id}/forward')
+async def web_tickets_forward(
+    request: Request,
+    ticket_id: int,
+    to_email: str = Form(...),
+    note: str = Form(None),
+    db: AsyncSession = Depends(get_session)
+):
+    """Forward a ticket by email to a specified address."""
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+
+    from app.models.ticket import Ticket, TicketComment
+    from app.models.email_settings import EmailSettings
+
+    ticket = (await db.execute(
+        select(Ticket).where(Ticket.id == ticket_id, Ticket.workspace_id == user.workspace_id)
+    )).scalar_one_or_none()
+    if not ticket:
+        request.session['error_message'] = 'Ticket not found.'
+        return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+
+    # Fetch public comments only
+    comments = (await db.execute(
+        select(TicketComment)
+        .where(TicketComment.ticket_id == ticket_id, TicketComment.is_internal == False)
+        .order_by(TicketComment.created_at.asc())
+    )).scalars().all()
+
+    # Fetch comment authors
+    author_ids = list(set(c.user_id for c in comments if c.user_id))
+    authors = {}
+    if author_ids:
+        for a in (await db.execute(select(User).where(User.id.in_(author_ids)))).scalars().all():
+            authors[a.id] = a
+
+    # Fetch SMTP settings
+    email_settings = (await db.execute(
+        select(EmailSettings).where(EmailSettings.workspace_id == user.workspace_id)
+    )).scalar_one_or_none()
+
+    if not email_settings or not email_settings.smtp_host or not email_settings.smtp_username:
+        request.session['error_message'] = 'Email (SMTP) is not configured. Please set it up in Email Settings.'
+        return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+
+    # Build HTML email body
+    priority_colors = {'low': '#10b981', 'medium': '#3b82f6', 'high': '#f59e0b', 'urgent': '#ef4444'}
+    status_colors = {'open': '#3b82f6', 'in_progress': '#8b5cf6', 'waiting': '#f59e0b', 'resolved': '#10b981', 'closed': '#6b7280'}
+    p_color = priority_colors.get(ticket.priority, '#6b7280')
+    s_color = status_colors.get(ticket.status, '#6b7280')
+
+    note_block = ''
+    if note and note.strip():
+        note_block = f'''
+        <div style="background:#eff6ff;border-left:4px solid #3b82f6;padding:14px 18px;margin-bottom:24px;border-radius:0 8px 8px 0;">
+            <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#1d4ed8;text-transform:uppercase;letter-spacing:.5px;">Note from {user.full_name or user.username}</p>
+            <p style="margin:0;color:#1e3a5f;font-size:14px;white-space:pre-wrap;">{note.strip()}</p>
+        </div>'''
+
+    comments_html = ''
+    if comments:
+        comment_items = ''
+        for c in comments:
+            author = authors.get(c.user_id)
+            author_name = author.full_name or author.username if author else 'Guest'
+            ts = c.created_at.strftime('%b %d, %Y %H:%M')
+            comment_items += f'''
+            <div style="border-left:3px solid #e2e8f0;padding:12px 16px;margin-bottom:12px;background:#f9fafb;border-radius:0 6px 6px 0;">
+                <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+                    <span style="font-weight:600;font-size:13px;color:#374151;">{author_name}</span>
+                    <span style="font-size:12px;color:#9ca3af;">{ts}</span>
+                </div>
+                <p style="margin:0;font-size:14px;color:#4b5563;white-space:pre-wrap;">{c.content}</p>
+            </div>'''
+        comments_html = f'''
+        <h3 style="font-size:14px;font-weight:600;color:#374151;margin:0 0 12px;padding-bottom:8px;border-bottom:2px solid #e5e7eb;">
+            Comments ({len(comments)})
+        </h3>
+        {comment_items}'''
+
+    description_block = f'<p style="margin:0;font-size:14px;color:#4b5563;white-space:pre-wrap;">{ticket.description}</p>' if ticket.description else '<p style="margin:0;font-size:14px;color:#9ca3af;font-style:italic;">No description provided.</p>'
+
+    submitter_name = ''
+    if ticket.is_guest:
+        parts = [ticket.guest_name or '', ticket.guest_surname or '']
+        submitter_name = ' '.join(p for p in parts if p) or ticket.guest_email or 'Guest'
+    elif ticket.created_by_id:
+        creator = (await db.execute(select(User).where(User.id == ticket.created_by_id))).scalar_one_or_none()
+        submitter_name = (creator.full_name or creator.username) if creator else 'Unknown'
+
+    company_name = email_settings.company_name or email_settings.smtp_from_name or 'Support Team'
+    created_fmt = ticket.created_at.strftime('%B %d, %Y at %H:%M')
+    forwarded_by = user.full_name or user.username
+
+    html_body = f'''<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+<div style="max-width:640px;margin:32px auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08);">
+
+  <!-- Header -->
+  <div style="background:linear-gradient(135deg,#1e293b 0%,#3b82f6 100%);padding:28px 32px;">
+    <p style="margin:0 0 4px;font-size:11px;color:rgba(255,255,255,.6);text-transform:uppercase;letter-spacing:1px;">Forwarded Ticket</p>
+    <h1 style="margin:0;font-size:22px;font-weight:700;color:#ffffff;">{ticket.ticket_number}</h1>
+    <p style="margin:6px 0 0;font-size:15px;color:rgba(255,255,255,.85);">{ticket.subject}</p>
+  </div>
+
+  <div style="padding:28px 32px;">
+
+    {note_block}
+
+    <!-- Ticket Meta -->
+    <table style="width:100%;border-collapse:collapse;margin-bottom:24px;">
+      <tr>
+        <td style="padding:8px 0;font-size:13px;color:#6b7280;width:130px;vertical-align:top;">Status</td>
+        <td style="padding:8px 0;"><span style="background:{s_color}15;color:{s_color};padding:3px 10px;border-radius:20px;font-size:12px;font-weight:600;text-transform:capitalize;">{ticket.status.replace('_',' ')}</span></td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;font-size:13px;color:#6b7280;vertical-align:top;">Priority</td>
+        <td style="padding:8px 0;"><span style="background:{p_color}15;color:{p_color};padding:3px 10px;border-radius:20px;font-size:12px;font-weight:600;text-transform:capitalize;">{ticket.priority}</span></td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;font-size:13px;color:#6b7280;vertical-align:top;">Submitted by</td>
+        <td style="padding:8px 0;font-size:13px;color:#111827;font-weight:500;">{submitter_name}</td>
+      </tr>
+      {'<tr><td style="padding:8px 0;font-size:13px;color:#6b7280;vertical-align:top;">Email</td><td style="padding:8px 0;font-size:13px;color:#111827;">' + (ticket.guest_email or '') + '</td></tr>' if ticket.guest_email else ''}
+      <tr>
+        <td style="padding:8px 0;font-size:13px;color:#6b7280;vertical-align:top;">Created</td>
+        <td style="padding:8px 0;font-size:13px;color:#111827;">{created_fmt}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px 0;font-size:13px;color:#6b7280;vertical-align:top;">Category</td>
+        <td style="padding:8px 0;font-size:13px;color:#111827;text-transform:capitalize;">{ticket.category or '—'}</td>
+      </tr>
+    </table>
+
+    <!-- Description -->
+    <div style="margin-bottom:24px;">
+      <h3 style="font-size:14px;font-weight:600;color:#374151;margin:0 0 10px;padding-bottom:8px;border-bottom:2px solid #e5e7eb;">Description</h3>
+      {description_block}
+    </div>
+
+    <!-- Comments -->
+    {comments_html}
+
+    <!-- Footer -->
+    <div style="margin-top:28px;padding-top:20px;border-top:1px solid #e5e7eb;text-align:center;">
+      <p style="margin:0;font-size:12px;color:#9ca3af;">Forwarded by <strong style="color:#6b7280;">{forwarded_by}</strong> via {company_name}</p>
+    </div>
+  </div>
+</div>
+</body>
+</html>'''
+
+    try:
+        subject = f'[Forwarded] {ticket.ticket_number}: {ticket.subject}'
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = f"{email_settings.smtp_from_name} <{email_settings.smtp_from_email}>"
+        msg['To'] = to_email
+        msg['Reply-To'] = email_settings.smtp_from_email
+        msg.attach(MIMEText(html_body, 'html'))
+
+        if email_settings.smtp_use_tls:
+            server = smtplib.SMTP(email_settings.smtp_host, email_settings.smtp_port)
+            server.starttls()
+        else:
+            server = smtplib.SMTP_SSL(email_settings.smtp_host, email_settings.smtp_port)
+        server.login(email_settings.smtp_username, email_settings.smtp_password)
+        server.sendmail(email_settings.smtp_from_email, [to_email], msg.as_string())
+        server.quit()
+
+        request.session['success_message'] = f'Ticket #{ticket.ticket_number} forwarded to {to_email}.'
+    except Exception as e:
+        request.session['error_message'] = f'Failed to forward ticket: {str(e)}'
+
+    return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+
+
 @router.post('/tickets/{ticket_id}/assign')
 async def web_tickets_assign(
     request: Request,
