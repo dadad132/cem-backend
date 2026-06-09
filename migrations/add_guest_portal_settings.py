@@ -17,6 +17,7 @@ def migrate():
             ('guest_portal_tagline',      'TEXT'),
             ('guest_portal_phone',        'TEXT'),
             ('guest_portal_email',        'TEXT'),
+            ('guest_portal_styles',       'TEXT'),
         ]:
             if col not in columns:
                 cursor.execute(f"ALTER TABLE workspace ADD COLUMN {col} {definition}")
