@@ -154,6 +154,9 @@ templates.env.globals['now'] = datetime.utcnow
 # Add timezone formatting filter
 templates.env.filters['format_datetime_tz'] = format_datetime_tz
 
+import json as _json
+templates.env.filters['fromjson'] = lambda s: _json.loads(s) if s else {}
+
 router = APIRouter(tags=['web'])
 
 
@@ -6299,6 +6302,75 @@ async def web_admin_site_settings_save_ai(
     return RedirectResponse('/web/admin/site-settings', status_code=303)
 
 
+@router.get('/admin/site-settings/guest-portal', response_class=HTMLResponse)
+async def web_admin_guest_portal_settings(request: Request, db: AsyncSession = Depends(get_session)):
+    """Guest portal branding settings page"""
+    import json
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_admin:
+        return RedirectResponse('/web/dashboard', status_code=303)
+    workspace = (await db.execute(
+        select(Workspace).where(Workspace.id == user.workspace_id)
+    )).scalar_one_or_none()
+    try:
+        styles = json.loads(workspace.guest_portal_styles) if workspace and workspace.guest_portal_styles else {}
+    except Exception:
+        styles = {}
+    success_message = request.session.pop('success_message', None)
+    error_message = request.session.pop('error_message', None)
+    return templates.TemplateResponse('admin/guest_portal_settings.html', {
+        'request': request,
+        'workspace': workspace,
+        'styles_json': json.dumps(styles),
+        'success_message': success_message,
+        'error_message': error_message,
+    })
+
+
+@router.post('/admin/site-settings/guest-portal/save')
+async def web_admin_guest_portal_settings_save(
+    request: Request,
+    guest_portal_company_name: str = Form(None),
+    guest_portal_tagline: str = Form(None),
+    guest_portal_phone: str = Form(None),
+    guest_portal_email: str = Form(None),
+    styles_json: str = Form('{}'),
+    db: AsyncSession = Depends(get_session)
+):
+    """Save guest portal branding and style settings"""
+    import json
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_admin:
+        return RedirectResponse('/web/dashboard', status_code=303)
+    try:
+        workspace = (await db.execute(
+            select(Workspace).where(Workspace.id == user.workspace_id)
+        )).scalar_one_or_none()
+        if workspace:
+            workspace.guest_portal_company_name = guest_portal_company_name or None
+            workspace.guest_portal_tagline = guest_portal_tagline or None
+            workspace.guest_portal_phone = guest_portal_phone or None
+            workspace.guest_portal_email = guest_portal_email or None
+            try:
+                parsed = json.loads(styles_json)
+                workspace.guest_portal_styles = json.dumps(parsed)
+            except Exception:
+                pass
+            await db.commit()
+            request.session['success_message'] = 'Guest portal settings saved!'
+        else:
+            request.session['error_message'] = 'Workspace not found'
+    except Exception as e:
+        request.session['error_message'] = f'Failed to save: {str(e)}'
+    return RedirectResponse('/web/admin/site-settings/guest-portal', status_code=303)
+
+
 @router.post('/admin/site-settings/upload-logo')
 async def web_admin_site_settings_upload_logo(
     request: Request,
@@ -11391,12 +11463,15 @@ async def web_tickets_create(
 
 # Guest ticket routes (must be before /tickets/{ticket_id} to avoid route conflict)
 @router.get('/tickets/guest', response_class=HTMLResponse)
-async def web_tickets_guest_form(request: Request):
+async def web_tickets_guest_form(request: Request, db: AsyncSession = Depends(get_session)):
     """Public guest ticket submission form (no login required)"""
+    workspace = getattr(request.state, 'workspace', None)
+    if workspace is None:
+        workspace = (await db.execute(select(Workspace).where(Workspace.id == 1))).scalar_one_or_none()
     return templates.TemplateResponse('tickets/guest.html', {
         'request': request,
         'success': False,
-        'workspace': getattr(request.state, 'workspace', None),
+        'workspace': workspace,
     })
 
 

@@ -6,6 +6,9 @@
   <title>{{ workspace.site_title if workspace and workspace.site_title else 'Submit a Ticket' }} — Support</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:ital,wght@0,400;0,700;0,800;1,400&family=Lato:ital,wght@0,400;0,700;1,400&family=Montserrat:ital,wght@0,400;0,700;0,800;1,400&family=Open+Sans:ital,wght@0,400;0,700;0,800;1,400&family=Oswald:wght@400;700&family=Playfair+Display:ital,wght@0,400;0,700;0,800;1,400&family=Poppins:ital,wght@0,400;0,700;0,800;1,400&family=Raleway:ital,wght@0,400;0,700;0,800;1,400&family=Roboto:ital,wght@0,400;0,700;0,900;1,400&display=swap" rel="stylesheet">
   <style>
     {% if workspace and workspace.gui_theme == 'ocean' %}
     :root { --brand: #0284c7; --brand-dark: #0369a1; --brand-xdark: #075985; --brand-light: #e0f2fe; --brand-ring: #7dd3fc; }
@@ -31,6 +34,68 @@
   </style>
 </head>
 <body class="min-h-screen py-8 px-4">
+
+  {% if workspace and (workspace.logo_url or workspace.guest_portal_company_name or workspace.guest_portal_phone) %}
+  {% set s = workspace.guest_portal_styles | fromjson if workspace.guest_portal_styles else {} %}
+  {% set hs = s.get('header', {}) %}
+  {% set bg_type = hs.get('bgType', 'dots') %}
+  {% set bg_color = hs.get('bgColor', '#ffffff') %}
+  {% set bg_color2 = hs.get('bgColor2', '#f1f5f9') %}
+  {% set bg_dir = hs.get('bgGradientDir', 'to right') %}
+  {% set pad_y = hs.get('paddingY', 12) %}
+  {% set logo_h = s.get('logo', {}).get('size', 64) %}
+  {% set cs = s.get('company', {}) %}
+  {% set ts = s.get('tagline', {}) %}
+  {% set ps = s.get('phone', {}) %}
+  {% if bg_type == 'solid' %}
+    {% set header_bg = 'background: ' ~ bg_color ~ ';' %}
+  {% elif bg_type == 'gradient' %}
+    {% set header_bg = 'background: linear-gradient(' ~ bg_dir ~ ', ' ~ bg_color ~ ', ' ~ bg_color2 ~ ');' %}
+  {% elif bg_type == 'none' %}
+    {% set header_bg = 'background: transparent;' %}
+  {% else %}
+    {% set header_bg = 'background-image: radial-gradient(circle, #e5e7eb 1px, transparent 1px); background-size: 18px 18px; background-color: ' ~ bg_color ~ ';' %}
+  {% endif %}
+  <!-- Guest portal branded header -->
+  <div class="w-full border-b border-gray-100 shadow-sm mb-6" style="{{ header_bg }}">
+    <div class="max-w-6xl mx-auto px-6 grid grid-cols-3 items-center" style="padding-top:{{ pad_y }}px; padding-bottom:{{ pad_y }}px;">
+      <!-- Left: Send email -->
+      <div class="flex items-center gap-2">
+        {% if workspace.guest_portal_email %}
+        <div class="w-9 h-9 rounded-full border-2 flex items-center justify-center flex-shrink-0" style="border-color: var(--brand); color: var(--brand);">
+          <i class="fas fa-envelope text-sm"></i>
+        </div>
+        <a href="mailto:{{ workspace.guest_portal_email }}" class="text-sm font-semibold text-gray-700 tracking-widest uppercase hover:opacity-70 transition-opacity">Send Email</a>
+        {% endif %}
+      </div>
+      <!-- Center: Logo + company name -->
+      <div class="flex justify-center">
+        <div class="flex items-center gap-2">
+          {% if workspace.logo_url %}
+          <img src="{{ workspace.logo_url }}" alt="{{ workspace.guest_portal_company_name or workspace.site_title or 'Logo' }}" style="height:{{ logo_h }}px; object-fit:contain;">
+          {% endif %}
+          {% if workspace.guest_portal_company_name %}
+          <div class="flex flex-col leading-tight">
+            <span style="font-size:{{ cs.get('size', 30) }}px; font-weight:{{ '800' if cs.get('bold', True) else '400' }}; color:{{ cs.get('color', '#111827') }}; font-style:{{ 'italic' if cs.get('italic', False) else 'normal' }}; letter-spacing:{{ cs.get('spacing', 0.05) }}em; font-family:{{ cs.get('font', 'inherit') }}; text-transform:{{ cs.get('transform', 'none') }}; text-decoration:{{ cs.get('decoration', 'none') }};{{ ' background:' ~ cs.get('bg') ~ '; padding:0 4px; border-radius:2px;' if cs.get('bg') else '' }}{{ ' text-shadow:2px 2px 4px rgba(0,0,0,0.3);' if cs.get('shadow') else '' }}">{{ workspace.guest_portal_company_name | safe }}</span>
+            {% if workspace.guest_portal_tagline %}
+            <span style="font-size:{{ ts.get('size', 9) }}px; font-weight:{{ '700' if ts.get('bold', False) else '400' }}; color:{{ ts.get('color', '#6b7280') }}; font-style:{{ 'italic' if ts.get('italic', False) else 'normal' }}; letter-spacing:{{ ts.get('spacing', 0.18) }}em; font-family:{{ ts.get('font', 'inherit') }}; text-transform:{{ ts.get('transform', 'uppercase') }}; text-decoration:{{ ts.get('decoration', 'none') }};{{ ' background:' ~ ts.get('bg') ~ '; padding:0 4px; border-radius:2px;' if ts.get('bg') else '' }}{{ ' text-shadow:2px 2px 4px rgba(0,0,0,0.3);' if ts.get('shadow') else '' }}">{{ workspace.guest_portal_tagline | safe }}</span>
+            {% endif %}
+          </div>
+          {% endif %}
+        </div>
+      </div>
+      <!-- Right: Phone + headset -->
+      <div class="flex items-center justify-end gap-3">
+        {% if workspace.guest_portal_phone %}
+        <span style="font-size:{{ ps.get('size', 16) }}px; font-weight:{{ '700' if ps.get('bold', False) else '400' }}; color:{{ ps.get('color', '#374151') }}; font-style:{{ 'italic' if ps.get('italic', False) else 'normal' }}; letter-spacing:{{ ps.get('spacing', 0) }}em; font-family:{{ ps.get('font', 'inherit') }}; text-transform:{{ ps.get('transform', 'none') }}; text-decoration:{{ ps.get('decoration', 'none') }};{{ ' background:' ~ ps.get('bg') ~ '; padding:0 4px; border-radius:2px;' if ps.get('bg') else '' }}{{ ' text-shadow:2px 2px 4px rgba(0,0,0,0.3);' if ps.get('shadow') else '' }}">{{ workspace.guest_portal_phone }}</span>
+        {% endif %}
+        <div class="w-9 h-9 rounded-full border-2 flex items-center justify-center flex-shrink-0" style="border-color: var(--brand); color: var(--brand);">
+          <i class="fas fa-headset text-sm"></i>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 
   <!-- Top nav -->
   <div class="max-w-3xl mx-auto mb-6 flex items-center justify-between">

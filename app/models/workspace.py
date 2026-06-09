@@ -32,6 +32,13 @@ class Workspace(SQLModel, table=True):
     # Timezone used for comment timestamps; falls back to global `timezone` if None
     comment_timezone: Optional[str] = Field(default=None)
 
+    # Guest portal branding
+    guest_portal_company_name: Optional[str] = Field(default=None)
+    guest_portal_tagline: Optional[str] = Field(default=None)
+    guest_portal_phone: Optional[str] = Field(default=None)
+    guest_portal_email: Optional[str] = Field(default=None)
+    guest_portal_styles: Optional[str] = Field(default=None)  # JSON styling config
+
     # AI integration for Bubbles assistant
     # Provider: "anthropic" | "openai" | "gemini" | None (rule-based)
     bubbles_ai_provider: Optional[str] = Field(default=None)
