@@ -2,7 +2,11 @@
 {% block content %}
 <div class="mb-5">
   <h1 class="text-2xl font-semibold">Storage Management</h1>
-  <p class="text-sm text-slate-600 mt-1">View storage usage breakdown and manage disk space. Delete archived tickets and their attachments to free space.</p>
+  <p class="text-sm text-slate-600 mt-1">
+    Storage used by <strong>{{ workspace.name if workspace else 'your company' }}</strong>.
+    Every figure below counts only this company's records, attachments and backups.
+    Delete archived tickets and their attachments to free space.
+  </p>
 </div>
 
 {% if request.query_params.get('success') == 'tickets_deleted' %}
@@ -18,13 +22,15 @@
   <div class="bg-white rounded-lg border border-slate-200 p-4">
     <div class="text-sm text-slate-600">Total Storage Used</div>
     <div class="text-2xl font-bold mt-1">{{ '%.2f'|format(storage.total_size_mb) }} MB</div>
+    <div class="text-xs text-slate-500 mt-1">Attachments + backups</div>
   </div>
   <div class="bg-white rounded-lg border border-blue-200 p-4">
-    <div class="text-sm text-slate-600">Database</div>
-    <div class="text-2xl font-bold mt-1 text-blue-600">{{ '%.2f'|format(storage.database_size_mb) }} MB</div>
+    <div class="text-sm text-slate-600">Records</div>
+    <div class="text-2xl font-bold mt-1 text-blue-600">{{ storage.table_counts | sum(attribute='count') }}</div>
+    <div class="text-xs text-slate-500 mt-1">Rows owned by this company</div>
   </div>
   <div class="bg-white rounded-lg border border-purple-200 p-4">
-    <div class="text-sm text-slate-600">Uploads (Files)</div>
+    <div class="text-sm text-slate-600">Attachments</div>
     <div class="text-2xl font-bold mt-1 text-purple-600">{{ '%.2f'|format(storage.uploads_size_mb) }} MB</div>
   </div>
   <div class="bg-white rounded-lg border border-amber-200 p-4">
@@ -32,14 +38,14 @@
     <div class="text-2xl font-bold mt-1 text-amber-600">{{ '%.2f'|format(storage.backups_size_mb) }} MB</div>
   </div>
   <div class="bg-white rounded-lg border border-red-200 p-4">
-    <div class="text-sm text-slate-600">System Logs (DB rows)</div>
+    <div class="text-sm text-slate-600">System Log Entries</div>
     <div class="text-2xl font-bold mt-1 text-red-600">{{ storage.system_log_count }}</div>
   </div>
 </div>
 
 <!-- Uploads Breakdown -->
 <div class="bg-white rounded-lg border border-slate-200 p-5 mb-6">
-  <h2 class="text-lg font-semibold mb-4">Uploads Folder Breakdown</h2>
+  <h2 class="text-lg font-semibold mb-4">Attachments by Type</h2>
   {% if storage.upload_folders %}
   <div class="overflow-x-auto">
     <table class="w-full text-sm">
@@ -71,13 +77,13 @@
     </table>
   </div>
   {% else %}
-  <p class="text-slate-500 text-sm">No upload folders found.</p>
+  <p class="text-slate-500 text-sm">This company has no attachment files.</p>
   {% endif %}
 </div>
 
 <!-- Backups Breakdown -->
 <div class="bg-white rounded-lg border border-slate-200 p-5 mb-6">
-  <h2 class="text-lg font-semibold mb-4">Backups Breakdown</h2>
+  <h2 class="text-lg font-semibold mb-4">Backups for This Company</h2>
   {% if storage.backup_categories %}
   <div class="overflow-x-auto">
     <table class="w-full text-sm">
@@ -85,8 +91,6 @@
         <tr class="border-b border-slate-200">
           <th class="text-left py-2 px-3 text-slate-600">Category</th>
           <th class="text-right py-2 px-3 text-slate-600">Count</th>
-          <th class="text-right py-2 px-3 text-slate-600">Size</th>
-          <th class="text-left py-2 px-3 text-slate-600">% of Backups</th>
         </tr>
       </thead>
       <tbody>
@@ -94,15 +98,6 @@
         <tr class="border-b border-slate-100 hover:bg-slate-50">
           <td class="py-2 px-3 font-medium">{{ cat.name }}</td>
           <td class="py-2 px-3 text-right">{{ cat.count }}</td>
-          <td class="py-2 px-3 text-right">{{ '%.2f'|format(cat.size_mb) }} MB</td>
-          <td class="py-2 px-3">
-            <div class="flex items-center gap-2">
-              <div class="flex-1 bg-slate-100 rounded-full h-2 max-w-[150px]">
-                <div class="bg-amber-500 h-2 rounded-full" style="width: {{ cat.percent }}%"></div>
-              </div>
-              <span class="text-xs text-slate-500">{{ '%.1f'|format(cat.percent) }}%</span>
-            </div>
-          </td>
         </tr>
         {% endfor %}
       </tbody>
@@ -217,7 +212,7 @@
 
 <!-- Database Table Sizes -->
 <div class="bg-white rounded-lg border border-slate-200 p-5 mb-6">
-  <h2 class="text-lg font-semibold mb-4">Database Table Sizes (Row Counts)</h2>
+  <h2 class="text-lg font-semibold mb-4">Records by Table (This Company)</h2>
   {% if storage.table_counts %}
   <div class="overflow-x-auto">
     <table class="w-full text-sm">

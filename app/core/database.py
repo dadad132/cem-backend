@@ -404,6 +404,24 @@ async def lifespan(app):  # FastAPI lifespan
         logger.info("✅ Automatic backup system started")
     except Exception as e:
         logger.error(f"⚠️  Failed to start backup system: {e}")
+
+    # Start per-company backups. The server-wide backup above stays as the
+    # operator's disaster-recovery net; this one gives each company its own
+    # restorable archive containing only its data.
+    try:
+        from app.core.tenant_backup import (
+            start_workspace_backup_scheduler, verify_scope_coverage
+        )
+        coverage = verify_scope_coverage("data.db")
+        if coverage["unmapped"]:
+            logger.warning(
+                "⚠️  Tables missing from the tenant scope map (excluded from "
+                f"per-company backups): {', '.join(coverage['unmapped'])}"
+            )
+        asyncio.create_task(start_workspace_backup_scheduler())
+        logger.info("✅ Per-company backup scheduler started")
+    except Exception as e:
+        logger.warning(f"⚠️  Per-company backup scheduler not started: {e}")
     
     # Start email-to-ticket scheduler (V2 - uses database settings)
     try:

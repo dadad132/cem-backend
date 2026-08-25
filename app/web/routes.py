@@ -185,6 +185,30 @@ async def get_current_admin(request: Request, db: AsyncSession = Depends(get_ses
     return user
 
 
+async def resolve_public_workspace_id(request: Request, db: AsyncSession) -> int:
+    """Pick the company a public (guest) page belongs to.
+
+    Signed-in visitors get their own company; anonymous visitors fall back to
+    the first workspace, matching the guest ticket form. Public endpoints must
+    still filter on the result — without it they would serve every company's
+    knowledge base to everyone.
+    """
+    workspace = getattr(request.state, 'workspace', None)
+    if workspace is not None and getattr(workspace, 'id', None):
+        return workspace.id
+
+    user_id = request.session.get('user_id')
+    if user_id:
+        user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        if user and user.workspace_id:
+            return user.workspace_id
+
+    first = (await db.execute(
+        select(Workspace).order_by(Workspace.id).limit(1)
+    )).scalar_one_or_none()
+    return first.id if first else 1
+
+
 # --------------------------
 # App Download Page
 # --------------------------
@@ -4180,63 +4204,74 @@ async def web_admin_change_user_password(
 
 
 # --------------------------
-# Admin - Database Backup Management
+# Admin - Company Backup Management
+#
+# Every route here is scoped to the admin's own workspace: backups live in a
+# per-workspace folder, contain only that company's rows and attachments, and
+# a restore can never reach another company's data.
 # --------------------------
-@router.get('/admin/backups', response_class=HTMLResponse)
-async def web_admin_backups(request: Request, db: AsyncSession = Depends(get_session)):
+async def _require_workspace_admin(request: Request, db: AsyncSession):
+    """Return the signed-in admin, or a redirect/error response to return as-is.
+
+    Also guarantees the admin actually belongs to a workspace — without one
+    there is no tenant to scope to, so backup and storage tools stay closed.
+    """
     user_id = request.session.get('user_id')
     if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-    
+        return None, RedirectResponse('/web/login', status_code=303)
+
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user or not user.is_active:
         request.session.clear()
-        return RedirectResponse('/web/login', status_code=303)
-    
+        return None, RedirectResponse('/web/login', status_code=303)
+
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
-    
-    from app.core.backup import backup_manager
-    stats = backup_manager.get_backup_stats()
-    
-    # Get list of all backups (both .db and .zip)
-    backups = []
-    for backup_file in sorted(
-        [f for f in backup_manager.backup_dir.glob("backup_*.*") 
-         if f.suffix in ['.db', '.zip'] and 'latest' not in f.name and 'corrupted' not in f.name],
-        key=lambda x: x.stat().st_mtime, 
-        reverse=True
-    ):
-        backup_type = "MANUAL" if "_MANUAL_" in backup_file.name else ("AUTO" if "_AUTO_" in backup_file.name else "UPLOADED")
-        includes_attachments = backup_file.suffix == '.zip'
-        
-        backups.append({
-            'filename': backup_file.name,
-            'type': backup_type,
-            'includes_attachments': includes_attachments,
-            'size': backup_file.stat().st_size,
-            'size_mb': round(backup_file.stat().st_size / (1024 * 1024), 2),
-            'created': datetime.fromtimestamp(backup_file.stat().st_mtime).strftime('%d/%m/%Y %H:%M:%S'),
-            'created_timestamp': backup_file.stat().st_mtime
-        })
-    
-    # Get recent system logs for display
+
+    if not user.workspace_id:
+        raise HTTPException(status_code=403, detail="No company assigned to this account")
+
+    return user, None
+
+
+@router.get('/admin/backups', response_class=HTMLResponse)
+async def web_admin_backups(request: Request, db: AsyncSession = Depends(get_session)):
+    user, redirect = await _require_workspace_admin(request, db)
+    if redirect:
+        return redirect
+
+    from app.core.tenant_backup import workspace_backup
+
+    stats = workspace_backup.get_stats(user.workspace_id)
+    backups = workspace_backup.list_backups(user.workspace_id)
+
+    workspace = (await db.execute(
+        select(Workspace).where(Workspace.id == user.workspace_id)
+    )).scalar_one_or_none()
+
+    # Diagnostic logs for this company only
     from app.models.system_log import SystemLog
     from sqlalchemy import func as sa_func
     try:
-        log_count_result = await db.execute(select(sa_func.count()).select_from(SystemLog))
+        log_count_result = await db.execute(
+            select(sa_func.count()).select_from(SystemLog)
+            .where(SystemLog.workspace_id == user.workspace_id)
+        )
         log_count = log_count_result.scalar() or 0
         recent_logs_result = await db.execute(
-            select(SystemLog).order_by(SystemLog.timestamp.desc()).limit(20)
+            select(SystemLog)
+            .where(SystemLog.workspace_id == user.workspace_id)
+            .order_by(SystemLog.timestamp.desc()).limit(20)
         )
         recent_logs = recent_logs_result.scalars().all()
     except Exception:
         log_count = 0
         recent_logs = []
-    
+
     return templates.TemplateResponse('admin/backups.html', {
         'request': request,
         'user': user,
+        'workspace': workspace,
         'stats': stats,
         'backups': backups,
         'log_count': log_count,
@@ -4252,37 +4287,35 @@ async def web_admin_backup_create(
     user_id = request.session.get('user_id')
     if not user_id:
         return JSONResponse({'success': False, 'error': 'Not authenticated'})
-    
+
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user or not user.is_active or not user.is_admin:
+    if not user or not user.is_active or not user.is_admin or not user.workspace_id:
         return JSONResponse({'success': False, 'error': 'Admin access required'})
-    
-    from app.core.backup import backup_manager
+
+    from app.core.tenant_backup import workspace_backup
     import asyncio
-    
-    if backup_manager.backup_status == 'running':
+
+    workspace_id = user.workspace_id
+    if workspace_backup.get_status(workspace_id).get('status') == 'running':
         return JSONResponse({'success': False, 'error': 'A backup is already in progress'})
-    
-    # Fire-and-forget: start backup in background thread
+
+    workspace = (await db.execute(
+        select(Workspace).where(Workspace.id == workspace_id)
+    )).scalar_one_or_none()
+    workspace_name = workspace.name if workspace else ''
+
+    # Fire-and-forget: run the export off the event loop
     async def _run_backup():
         try:
-            backup_manager.backup_status = 'running'
-            backup_manager.backup_progress = 'Starting backup...'
-            backup_manager.backup_result_file = None
-            backup_file = await asyncio.to_thread(
-                backup_manager.create_backup, is_manual=True, include_attachments=True
+            await asyncio.to_thread(
+                workspace_backup.create_backup,
+                workspace_id, workspace_name, True
             )
-            if backup_file:
-                backup_manager.backup_status = 'done'
-                backup_manager.backup_progress = 'Backup created successfully'
-                backup_manager.backup_result_file = backup_file.name
-            else:
-                backup_manager.backup_status = 'error'
-                backup_manager.backup_progress = 'Backup creation failed'
         except Exception as e:
-            backup_manager.backup_status = 'error'
-            backup_manager.backup_progress = f'Error: {str(e)[:200]}'
-    
+            workspace_backup._set_status(
+                workspace_id, 'error', f'Error: {str(e)[:200]}'
+            )
+
     asyncio.create_task(_run_backup())
     return JSONResponse({'success': True, 'message': 'Backup started'})
 
@@ -4292,17 +4325,17 @@ async def web_admin_backup_status(
     request: Request,
     db: AsyncSession = Depends(get_session)
 ):
-    """Poll endpoint for backup progress"""
+    """Poll endpoint for backup progress — reports only this company's backup."""
     user_id = request.session.get('user_id')
     if not user_id:
         return JSONResponse({'success': False, 'error': 'Not authenticated'})
-    
-    from app.core.backup import backup_manager
-    return JSONResponse({
-        'status': backup_manager.backup_status,
-        'progress': backup_manager.backup_progress,
-        'filename': backup_manager.backup_result_file
-    })
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_active or not user.is_admin or not user.workspace_id:
+        return JSONResponse({'success': False, 'error': 'Admin access required'})
+
+    from app.core.tenant_backup import workspace_backup
+    return JSONResponse(workspace_backup.get_status(user.workspace_id))
 
 
 @router.get('/admin/backups/download/{filename}')
@@ -4311,29 +4344,18 @@ async def web_admin_backup_download(
     filename: str,
     db: AsyncSession = Depends(get_session)
 ):
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-    
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user or not user.is_active or not user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    from app.core.backup import backup_manager
+    user, redirect = await _require_workspace_admin(request, db)
+    if redirect:
+        return redirect
+
+    from app.core.tenant_backup import workspace_backup
     from fastapi.responses import FileResponse
-    
-    # Security: prevent path traversal
-    if '..' in filename or '/' in filename or '\\' in filename:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    
-    backup_path = (backup_manager.backup_dir / filename).resolve()
-    # Ensure the resolved path is still inside the backup directory
-    if not str(backup_path).startswith(str(backup_manager.backup_dir.resolve())):
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    
-    if not backup_path.exists():
+
+    # Resolves inside this workspace's folder only; anything else returns None
+    backup_path = workspace_backup.resolve_backup_file(user.workspace_id, filename)
+    if not backup_path:
         raise HTTPException(status_code=404, detail="Backup file not found")
-    
+
     return FileResponse(
         path=str(backup_path),
         filename=filename,
@@ -4347,30 +4369,24 @@ async def web_admin_backup_upload(
     backup_file: UploadFile = File(...),
     db: AsyncSession = Depends(get_session)
 ):
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-    
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user or not user.is_active or not user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    from app.core.backup import backup_manager
-    
-    # Validate file extension
-    if not backup_file.filename.endswith(('.db', '.zip')):
+    user, redirect = await _require_workspace_admin(request, db)
+    if redirect:
+        return redirect
+
+    from app.core.tenant_backup import workspace_backup
+
+    if not backup_file.filename or not backup_file.filename.lower().endswith('.zip'):
         return RedirectResponse('/web/admin/backups?error=invalid_file', status_code=303)
-    
-    # Read file content
+
     content = await backup_file.read()
-    
-    # Save the uploaded backup
-    saved_path = backup_manager.save_uploaded_backup(content, backup_file.filename)
-    
+    saved_path, error = workspace_backup.save_uploaded_backup(
+        user.workspace_id, content, backup_file.filename
+    )
+
     if saved_path:
         return RedirectResponse('/web/admin/backups?success=backup_uploaded', status_code=303)
-    else:
-        return RedirectResponse('/web/admin/backups?error=upload_failed', status_code=303)
+    request.session['error_message'] = error
+    return RedirectResponse('/web/admin/backups?error=upload_failed', status_code=303)
 
 
 @router.post('/admin/backups/restore')
@@ -4379,27 +4395,32 @@ async def web_admin_backup_restore(
     backup_file: str = Form(...),
     db: AsyncSession = Depends(get_session)
 ):
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-    
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user or not user.is_active or not user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    from app.core.backup import backup_manager
-    from pathlib import Path
-    
-    backup_path = backup_manager.backup_dir / backup_file
-    if not backup_path.exists():
-        raise HTTPException(status_code=404, detail="Backup file not found")
-    
-    success = backup_manager.restore_from_backup(backup_path)
-    
+    """Restore this company's data. Other companies are never touched."""
+    user, redirect = await _require_workspace_admin(request, db)
+    if redirect:
+        return redirect
+
+    from app.core.tenant_backup import workspace_backup
+    import asyncio
+
+    workspace_id = user.workspace_id
+    username = user.full_name or user.username
+
+    # Release the ORM's connection before the restore takes its own write lock
+    await db.commit()
+
+    success, message = await asyncio.to_thread(
+        workspace_backup.restore_backup, workspace_id, backup_file
+    )
+
     if success:
-        return RedirectResponse('/web/admin/backups?success=restore_complete', status_code=303)
-    else:
-        return RedirectResponse('/web/admin/backups?error=restore_failed', status_code=303)
+        logger.info(f"Workspace {workspace_id} restored by {username}: {message}")
+        # User rows were replaced, so the current session id is stale.
+        request.session.clear()
+        return RedirectResponse('/web/login?restored=1', status_code=303)
+
+    request.session['error_message'] = message
+    return RedirectResponse('/web/admin/backups?error=restore_failed', status_code=303)
 
 
 @router.post('/admin/backups/delete')
@@ -4408,26 +4429,15 @@ async def web_admin_backup_delete(
     backup_file: str = Form(...),
     db: AsyncSession = Depends(get_session)
 ):
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-    
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user or not user.is_active or not user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    from app.core.backup import backup_manager
-    
-    # Security: prevent path traversal
-    if '..' in backup_file or '/' in backup_file or '\\' in backup_file:
-        return RedirectResponse('/web/admin/backups?error=invalid_filename', status_code=303)
-    
-    success = backup_manager.delete_backup(backup_file)
-    
-    if success:
+    user, redirect = await _require_workspace_admin(request, db)
+    if redirect:
+        return redirect
+
+    from app.core.tenant_backup import workspace_backup
+
+    if workspace_backup.delete_backup(user.workspace_id, backup_file):
         return RedirectResponse('/web/admin/backups?success=backup_deleted', status_code=303)
-    else:
-        return RedirectResponse('/web/admin/backups?error=delete_failed', status_code=303)
+    return RedirectResponse('/web/admin/backups?error=delete_failed', status_code=303)
 
 
 @router.get('/admin/backups/logs/download')
@@ -4435,53 +4445,55 @@ async def web_admin_logs_download(
     request: Request,
     db: AsyncSession = Depends(get_session)
 ):
-    """Download system diagnostic logs as a text file for a given time range."""
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-    
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user or not user.is_active or not user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
+    """Download this company's diagnostic logs as a text file for a time range."""
+    user, redirect = await _require_workspace_admin(request, db)
+    if redirect:
+        return redirect
+
     from app.models.system_log import SystemLog
     from fastapi.responses import Response
-    
+
     # Parse date range from query params
     from_str = request.query_params.get('from', '')
     to_str = request.query_params.get('to', '')
     level_filter = request.query_params.get('level', '')
-    
+
     try:
         from_dt = datetime.fromisoformat(from_str) if from_str else datetime.utcnow() - timedelta(days=1)
         to_dt = datetime.fromisoformat(to_str) if to_str else datetime.utcnow()
     except ValueError:
         from_dt = datetime.utcnow() - timedelta(days=1)
         to_dt = datetime.utcnow()
-    
-    # Build query
+
+    # Build query — scoped to the admin's own company
     query = select(SystemLog).where(
+        SystemLog.workspace_id == user.workspace_id,
         SystemLog.timestamp >= from_dt,
         SystemLog.timestamp <= to_dt
     )
-    
+
     if level_filter == 'ERROR':
         query = query.where(SystemLog.level == 'ERROR')
     elif level_filter == 'INFO':
-        query = query.where(SystemLog.level.in_(['INFO', 'WARN', 'ERROR']))
+        query = query.where(SystemLog.level.in_(['INFO', 'WARN', 'WARNING', 'ERROR']))
     # DEBUG = all levels, empty = all levels
-    
+
     query = query.order_by(SystemLog.timestamp.asc())
-    
+
     result = await db.execute(query)
     logs = result.scalars().all()
-    
+
     if not logs:
         return RedirectResponse('/web/admin/backups?error=no_logs', status_code=303)
-    
+
+    workspace = (await db.execute(
+        select(Workspace).where(Workspace.id == user.workspace_id)
+    )).scalar_one_or_none()
+
     # Build compact text report
     lines = [
         f"=== System Diagnostic Report ===",
+        f"Company: {workspace.name if workspace else user.workspace_id}",
         f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC",
         f"Range: {from_dt.strftime('%Y-%m-%d %H:%M')} to {to_dt.strftime('%Y-%m-%d %H:%M')}",
         f"Filter: {level_filter or 'ALL'}",
@@ -4489,17 +4501,17 @@ async def web_admin_logs_download(
         f"{'='*60}",
         "",
     ]
-    
+
     for log in logs:
         ts = log.timestamp.strftime('%Y-%m-%d %H:%M:%S')
         line = f"[{ts}] [{log.level}] [{log.source}] {log.message}"
         if log.details:
             line += f" | {log.details}"
         lines.append(line)
-    
+
     report_text = "\n".join(lines)
     filename = f"system_log_{from_dt.strftime('%Y%m%d')}_{to_dt.strftime('%Y%m%d')}.txt"
-    
+
     return Response(
         content=report_text,
         media_type="text/plain",
@@ -6910,7 +6922,17 @@ async def web_project_members_remove(
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user or not user.is_admin:
         raise HTTPException(status_code=403, detail='Admin access required')
-    
+
+    # The project must belong to this admin's company
+    project = (await db.execute(
+        select(Project).where(
+            Project.id == project_id,
+            Project.workspace_id == user.workspace_id
+        )
+    )).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail='Project not found')
+
     # Remove the assignment
     from app.models.project_member import ProjectMember
     member = (await db.execute(
@@ -9322,7 +9344,10 @@ async def web_meeting_cancel(
         return RedirectResponse('/web/login', status_code=303)
     
     # Get the meeting
-    meeting = (await db.execute(select(Meeting).where(Meeting.id == meeting_id))).scalar_one_or_none()
+    meeting = (await db.execute(select(Meeting).where(
+        Meeting.id == meeting_id,
+        Meeting.workspace_id == user.workspace_id
+    ))).scalar_one_or_none()
     if not meeting:
         raise HTTPException(status_code=404, detail='Meeting not found')
     
@@ -9360,7 +9385,10 @@ async def web_meeting_details(
         return JSONResponse({'error': 'User not found'}, status_code=401)
     
     # Get the meeting
-    meeting = (await db.execute(select(Meeting).where(Meeting.id == meeting_id))).scalar_one_or_none()
+    meeting = (await db.execute(select(Meeting).where(
+        Meeting.id == meeting_id,
+        Meeting.workspace_id == user.workspace_id
+    ))).scalar_one_or_none()
     if not meeting:
         return JSONResponse({'error': 'Meeting not found'}, status_code=404)
     
@@ -11793,7 +11821,8 @@ async def extract_solution_steps(search_results: list) -> list:
     return steps
 
 
-async def handle_conversational_message(message_lower: str, db: AsyncSession) -> str:
+async def handle_conversational_message(message_lower: str, db: AsyncSession,
+                                        workspace_id: int = 1) -> str:
     """Handle greetings and conversational messages for Bubbles the AI Assistant"""
     
     # Use the comprehensive personality module
@@ -11805,7 +11834,7 @@ async def handle_conversational_message(message_lower: str, db: AsyncSession) ->
         try:
             from app.models.email_settings import EmailSettings
             settings_result = await db.execute(
-                select(EmailSettings).where(EmailSettings.workspace_id == 1)
+                select(EmailSettings).where(EmailSettings.workspace_id == workspace_id)
             )
             email_settings = settings_result.scalar_one_or_none()
             if email_settings and email_settings.smtp_from_email:
@@ -11964,7 +11993,11 @@ async def support_assistant_chat(
         
         if not message:
             return JSONResponse({'error': 'Message is required'}, status_code=400)
-        
+
+        # Everything below is scoped to the company this visitor belongs to:
+        # its knowledge base, its conversations, and its own AI key.
+        bubbles_workspace_id = await resolve_public_workspace_id(request, db)
+
         message_lower = message.lower()
         
         # Initialize response data
@@ -12106,7 +12139,7 @@ async def support_assistant_chat(
                     
                     if not conversation:
                         conversation = SupportConversation(
-                            workspace_id=1,
+                            workspace_id=bubbles_workspace_id,
                             session_id=session_id,
                             initial_problem=message,
                             guest_email=guest_email if guest_email else None,
@@ -12124,7 +12157,9 @@ async def support_assistant_chat(
                     return JSONResponse(response_data)
         
         # ===== CHECK FOR CONVERSATIONAL MESSAGES =====
-        conversational_response = await handle_conversational_message(message_lower, db)
+        conversational_response = await handle_conversational_message(
+            message_lower, db, bubbles_workspace_id
+        )
         if conversational_response:
             response_data['is_conversational'] = True
             prefix = response_data['empathy_prefix'] + "\n\n" if response_data['empathy_prefix'] else ""
@@ -12152,7 +12187,7 @@ async def support_assistant_chat(
         
         if not conversation:
             conversation = SupportConversation(
-                workspace_id=1,
+                workspace_id=bubbles_workspace_id,
                 session_id=session_id,
                 initial_problem=message,
                 guest_email=guest_email if guest_email else None,
@@ -12170,6 +12205,7 @@ async def support_assistant_chat(
                 result = await db.execute(
                     select(SupportArticle).where(
                         and_(
+                            SupportArticle.workspace_id == bubbles_workspace_id,
                             SupportArticle.is_active == True,
                             or_(
                                 SupportArticle.problem_keywords.ilike(f'%{keyword}%'),
@@ -12212,7 +12248,7 @@ async def support_assistant_chat(
             claude_response = await get_claude_bubbles_response(
                 message=message,
                 conversation_history=conversation_history,
-                workspace_id=1,
+                workspace_id=bubbles_workspace_id,
                 db=db
             )
             if claude_response:
@@ -12235,7 +12271,7 @@ async def support_assistant_chat(
             claude_response = await get_claude_bubbles_response(
                 message=message,
                 conversation_history=conversation_history,
-                workspace_id=1,
+                workspace_id=bubbles_workspace_id,
                 db=db,
                 kb_articles=response_data['kb_articles']
             )
@@ -12291,10 +12327,15 @@ async def support_assistant_feedback(
                 tags=[]
             )
         
+        feedback_workspace_id = await resolve_public_workspace_id(request, db)
+
         if article_id:
-            # Feedback for existing KB article
+            # Feedback for an existing KB article in the caller's company
             result = await db.execute(
-                select(SupportArticle).where(SupportArticle.id == article_id)
+                select(SupportArticle).where(
+                    SupportArticle.id == article_id,
+                    SupportArticle.workspace_id == feedback_workspace_id
+                )
             )
             article = result.scalar_one_or_none()
             
@@ -12319,7 +12360,7 @@ async def support_assistant_feedback(
             keywords = ','.join([word for word in problem.lower().split() if len(word) > 3][:10])
             
             new_article = SupportArticle(
-                workspace_id=1,
+                workspace_id=feedback_workspace_id,
                 problem_title=problem[:100] + ('...' if len(problem) > 100 else ''),
                 problem_description=problem,
                 problem_keywords=keywords,
@@ -14033,14 +14074,19 @@ Type your description and I'll find solutions for you! 💫"""
 
 @router.get('/tickets/support/articles', response_class=JSONResponse)
 async def get_support_articles(
+    request: Request,
     category: Optional[str] = None,
     limit: int = Query(10, le=50),
     db: AsyncSession = Depends(get_session)
 ):
-    """Get knowledge base articles"""
+    """Get knowledge base articles for the caller's company only"""
     try:
-        query = select(SupportArticle).where(SupportArticle.is_active == True)
-        
+        workspace_id = await resolve_public_workspace_id(request, db)
+        query = select(SupportArticle).where(
+            SupportArticle.workspace_id == workspace_id,
+            SupportArticle.is_active == True
+        )
+
         if category:
             query = query.where(SupportArticle.category_id == int(category))
         
@@ -14137,16 +14183,30 @@ async def web_tickets_track_detail(
     # Check if user is logged in (staff) or has verified access via email
     user_id = request.session.get('user_id')
     verified_tickets = request.session.get('verified_tickets', [])
-    
-    if not user_id and ticket_number not in verified_tickets:
+
+    # Staff skip email verification, but only for their own company's tickets.
+    staff_workspace_id = None
+    if user_id:
+        staff = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        staff_workspace_id = staff.workspace_id if staff else None
+
+    if staff_workspace_id is None and ticket_number not in verified_tickets:
         request.session['error_message'] = 'Please verify your email to view this ticket.'
         return RedirectResponse('/web/tickets/track', status_code=303)
-    
+
     # Find ticket
     result = await db.execute(
         select(Ticket).where(Ticket.ticket_number == ticket_number)
     )
     ticket = result.scalar_one_or_none()
+
+    # A signed-in user from another company gets no shortcut: they must verify
+    # by email like any other guest.
+    if (ticket and staff_workspace_id is not None
+            and ticket.workspace_id != staff_workspace_id
+            and ticket_number not in verified_tickets):
+        request.session['error_message'] = 'Please verify your email to view this ticket.'
+        return RedirectResponse('/web/tickets/track', status_code=303)
     
     if not ticket:
         request.session['error_message'] = 'Ticket not found.'
@@ -14208,18 +14268,31 @@ async def web_tickets_track_reply(
     # Verify access: must be logged in or have verified via email
     user_id = request.session.get('user_id')
     verified_tickets = request.session.get('verified_tickets', [])
-    if not user_id and ticket_number not in verified_tickets:
+
+    # Staff skip email verification, but only for their own company's tickets.
+    staff_workspace_id = None
+    if user_id:
+        staff = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        staff_workspace_id = staff.workspace_id if staff else None
+
+    if staff_workspace_id is None and ticket_number not in verified_tickets:
         request.session['error_message'] = 'Please verify your email before replying.'
         return RedirectResponse('/web/tickets/track', status_code=303)
-    
+
     # Find ticket
     result = await db.execute(
         select(Ticket).where(Ticket.ticket_number == ticket_number)
     )
     ticket = result.scalar_one_or_none()
-    
+
     if not ticket:
         request.session['error_message'] = 'Ticket not found.'
+        return RedirectResponse('/web/tickets/track', status_code=303)
+
+    if (staff_workspace_id is not None
+            and ticket.workspace_id != staff_workspace_id
+            and ticket_number not in verified_tickets):
+        request.session['error_message'] = 'Please verify your email before replying.'
         return RedirectResponse('/web/tickets/track', status_code=303)
     
     if ticket.status == 'closed':
@@ -14488,11 +14561,19 @@ async def web_tickets_add_comment(
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
-    
+
     from app.models.ticket import Ticket, TicketComment, TicketHistory
-    
-    # Verify ticket exists
-    ticket = (await db.execute(select(Ticket).where(Ticket.id == ticket_id))).scalar_one_or_none()
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+
+    # Verify the ticket exists and belongs to the commenter's company
+    ticket = (await db.execute(select(Ticket).where(
+        Ticket.id == ticket_id,
+        Ticket.workspace_id == user.workspace_id
+    ))).scalar_one_or_none()
     if not ticket:
         write_log("❌ TICKET NOT FOUND")
         return RedirectResponse('/web/tickets', status_code=303)
@@ -15039,7 +15120,10 @@ async def web_tickets_close_with_details(
     from app.models.ticket import Ticket, TicketHistory
     from datetime import datetime
     
-    ticket = (await db.execute(select(Ticket).where(Ticket.id == ticket_id))).scalar_one_or_none()
+    ticket = (await db.execute(select(Ticket).where(
+        Ticket.id == ticket_id,
+        Ticket.workspace_id == user.workspace_id
+    ))).scalar_one_or_none()
     if not ticket:
         return RedirectResponse('/web/tickets', status_code=303)
     
@@ -15222,7 +15306,10 @@ async def web_tickets_archive(
     from app.models.ticket import Ticket, TicketHistory
     from datetime import datetime
     
-    ticket = (await db.execute(select(Ticket).where(Ticket.id == ticket_id))).scalar_one_or_none()
+    ticket = (await db.execute(select(Ticket).where(
+        Ticket.id == ticket_id,
+        Ticket.workspace_id == user.workspace_id
+    ))).scalar_one_or_none()
     if not ticket:
         return RedirectResponse('/web/tickets', status_code=303)
     
@@ -15275,7 +15362,10 @@ async def web_tickets_restore(
     from app.models.ticket import Ticket
     from datetime import datetime
     
-    ticket = (await db.execute(select(Ticket).where(Ticket.id == ticket_id))).scalar_one_or_none()
+    ticket = (await db.execute(select(Ticket).where(
+        Ticket.id == ticket_id,
+        Ticket.workspace_id == user.workspace_id
+    ))).scalar_one_or_none()
     if not ticket:
         return RedirectResponse('/web/tickets/archived', status_code=303)
     
@@ -15507,7 +15597,10 @@ async def web_tickets_assign(
     from app.models.ticket import Ticket, TicketHistory
     from datetime import datetime
     
-    ticket = (await db.execute(select(Ticket).where(Ticket.id == ticket_id))).scalar_one_or_none()
+    ticket = (await db.execute(select(Ticket).where(
+        Ticket.id == ticket_id,
+        Ticket.workspace_id == user.workspace_id
+    ))).scalar_one_or_none()
     if not ticket:
         return RedirectResponse('/web/tickets', status_code=303)
     
@@ -16045,8 +16138,11 @@ async def web_chat_detail(request: Request, chat_id: int, db: AsyncSession = Dep
     if not membership:
         raise HTTPException(status_code=403, detail='Not a member of this chat')
     
-    # Get chat details
-    chat = (await db.execute(select(Chat).where(Chat.id == chat_id))).scalar_one_or_none()
+    # Get chat details — scoped to the member's company as well as membership
+    chat = (await db.execute(select(Chat).where(
+        Chat.id == chat_id,
+        Chat.workspace_id == user.workspace_id
+    ))).scalar_one_or_none()
     if not chat:
         raise HTTPException(status_code=404, detail='Chat not found')
     
@@ -17652,140 +17748,65 @@ async def web_kb_resolved_rate(
 # ─── Storage Management ─────────────────────────────────────────────
 @router.get('/admin/storage', response_class=HTMLResponse)
 async def web_admin_storage(request: Request, db: AsyncSession = Depends(get_session)):
-    """Storage usage breakdown and management for admins"""
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
+    """Storage usage breakdown for the admin's own company.
 
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user or not user.is_active:
-        request.session.clear()
-        return RedirectResponse('/web/login', status_code=303)
+    Every figure here counts only this company's rows, attachments and
+    backups — an admin never sees another company's volumes.
+    """
+    user, redirect = await _require_workspace_admin(request, db)
+    if redirect:
+        return redirect
 
-    if not user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-    import sqlite3
     from app.models.ticket import Ticket, TicketAttachment
     from app.models.system_log import SystemLog
+    from app.core.tenant_backup import workspace_backup
     from sqlalchemy import func as sa_func
 
+    workspace_id = user.workspace_id
     storage = {}
 
-    # --- Database file size ---
-    db_path = Path('data.db')
-    storage['database_size_mb'] = round(db_path.stat().st_size / (1024 * 1024), 2) if db_path.exists() else 0
+    # --- Attachments belonging to this company ---
+    usage = workspace_backup.workspace_file_usage(workspace_id)
+    storage['uploads_size_mb'] = usage['total_mb']
+    storage['upload_folders'] = usage['folders']
+    storage['missing_files'] = usage['missing_files']
 
-    # --- Uploads folder breakdown ---
-    uploads_root = Path('app/uploads')
-    upload_folders = []
-    uploads_total = 0
-    if uploads_root.exists():
-        for child in sorted(uploads_root.iterdir()):
-            if child.is_dir():
-                files = list(child.rglob('*'))
-                file_list = [f for f in files if f.is_file()]
-                folder_size = sum(f.stat().st_size for f in file_list)
-                uploads_total += folder_size
-                upload_folders.append({
-                    'name': child.name,
-                    'file_count': len(file_list),
-                    'size_mb': round(folder_size / (1024 * 1024), 2),
-                    'size_bytes': folder_size,
-                })
-        # Root-level files in uploads
-        root_files = [f for f in uploads_root.iterdir() if f.is_file()]
-        if root_files:
-            root_size = sum(f.stat().st_size for f in root_files)
-            uploads_total += root_size
-            upload_folders.append({
-                'name': '(root files)',
-                'file_count': len(root_files),
-                'size_mb': round(root_size / (1024 * 1024), 2),
-                'size_bytes': root_size,
-            })
-    # Calculate percentages
-    for f in upload_folders:
-        f['percent'] = round(f['size_bytes'] / uploads_total * 100, 1) if uploads_total > 0 else 0
-    upload_folders.sort(key=lambda x: x['size_bytes'], reverse=True)
-    storage['uploads_size_mb'] = round(uploads_total / (1024 * 1024), 2)
-    storage['upload_folders'] = upload_folders
-
-    # --- Backups breakdown ---
-    backup_dir = Path('backups')
+    # --- This company's backups ---
+    backup_stats = workspace_backup.get_stats(workspace_id)
+    storage['backups_size_mb'] = backup_stats['total_size_mb']
+    storage['backup_count'] = backup_stats['count']
+    backups_bytes = backup_stats['total_size']
     backup_categories = []
-    backups_total = 0
-    if backup_dir.exists():
-        categories = {}
-        for item in backup_dir.iterdir():
-            if item.is_file():
-                if '_AUTO_' in item.name:
-                    cat = 'Automatic Backups'
-                elif '_MANUAL_' in item.name:
-                    cat = 'Manual Backups'
-                elif '_UPLOADED_' in item.name:
-                    cat = 'Uploaded Backups'
-                elif 'latest' in item.name:
-                    cat = 'Latest Backup Copy'
-                elif 'corrupted' in item.name:
-                    cat = 'Corrupted DB Saves'
-                else:
-                    cat = 'Other / Orphan Files'
-                size = item.stat().st_size
-                if cat not in categories:
-                    categories[cat] = {'count': 0, 'size': 0}
-                categories[cat]['count'] += 1
-                categories[cat]['size'] += size
-                backups_total += size
-            elif item.is_dir():
-                dir_size = sum(f.stat().st_size for f in item.rglob('*') if f.is_file())
-                cat = 'Corrupted Uploads Dirs'
-                if cat not in categories:
-                    categories[cat] = {'count': 0, 'size': 0}
-                categories[cat]['count'] += 1
-                categories[cat]['size'] += dir_size
-                backups_total += dir_size
-        for name, data in sorted(categories.items(), key=lambda x: x[1]['size'], reverse=True):
-            backup_categories.append({
-                'name': name,
-                'count': data['count'],
-                'size_mb': round(data['size'] / (1024 * 1024), 2),
-                'percent': round(data['size'] / backups_total * 100, 1) if backups_total > 0 else 0,
-            })
-    storage['backups_size_mb'] = round(backups_total / (1024 * 1024), 2)
+    for label, key in (('Automatic Backups', 'auto_count'),
+                       ('Manual Backups', 'manual_count'),
+                       ('Uploaded Backups', 'uploaded_count')):
+        if backup_stats[key]:
+            backup_categories.append({'name': label, 'count': backup_stats[key]})
     storage['backup_categories'] = backup_categories
 
-    # --- Total ---
-    storage['total_size_mb'] = round(storage['database_size_mb'] + storage['uploads_size_mb'] + storage['backups_size_mb'], 2)
+    # --- Total footprint for this company ---
+    storage['total_size_mb'] = round(
+        storage['uploads_size_mb'] + storage['backups_size_mb'], 2
+    )
 
-    # --- System log count ---
+    # --- This company's diagnostic log count ---
     try:
-        log_count_result = await db.execute(select(sa_func.count()).select_from(SystemLog))
+        log_count_result = await db.execute(
+            select(sa_func.count()).select_from(SystemLog)
+            .where(SystemLog.workspace_id == workspace_id)
+        )
         storage['system_log_count'] = log_count_result.scalar() or 0
     except Exception:
         storage['system_log_count'] = 0
 
-    # --- Database table row counts ---
-    table_counts = []
+    # --- Record counts per table, for this company only ---
     try:
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-        tables = [row[0] for row in cursor.fetchall() if not row[0].startswith('_')]
-        for tbl in tables:
-            try:
-                cursor.execute(f'SELECT COUNT(*) FROM "{tbl}"')
-                count = cursor.fetchone()[0]
-                table_counts.append({'name': tbl, 'count': count})
-            except Exception:
-                table_counts.append({'name': tbl, 'count': '?'})
-        conn.close()
-        table_counts.sort(key=lambda x: x['count'] if isinstance(x['count'], int) else 0, reverse=True)
-    except Exception:
-        pass
-    storage['table_counts'] = table_counts
+        storage['table_counts'] = workspace_backup.workspace_row_counts(workspace_id)
+    except Exception as e:
+        logger.error(f"Error counting workspace rows: {e}")
+        storage['table_counts'] = []
 
-    # --- Top 20 tickets by attachment size ---
+    # --- Top 20 tickets by attachment size (this company) ---
     top_tickets = []
     try:
         result = await db.execute(
@@ -17799,6 +17820,7 @@ async def web_admin_storage(request: Request, db: AsyncSession = Depends(get_ses
                 sa_func.coalesce(sa_func.sum(TicketAttachment.file_size), 0).label('total_size')
             )
             .join(TicketAttachment, TicketAttachment.ticket_id == Ticket.id)
+            .where(Ticket.workspace_id == workspace_id)
             .group_by(Ticket.id)
             .order_by(sa_func.sum(TicketAttachment.file_size).desc())
             .limit(20)
@@ -17816,7 +17838,7 @@ async def web_admin_storage(request: Request, db: AsyncSession = Depends(get_ses
     except Exception as e:
         logger.error(f"Error fetching top tickets: {e}")
 
-    # --- Archived tickets with attachment info ---
+    # --- Archived tickets with attachment info (this company) ---
     archived_tickets = []
     try:
         result = await db.execute(
@@ -17829,7 +17851,7 @@ async def web_admin_storage(request: Request, db: AsyncSession = Depends(get_ses
                 sa_func.coalesce(sa_func.sum(TicketAttachment.file_size), 0).label('total_size')
             )
             .outerjoin(TicketAttachment, TicketAttachment.ticket_id == Ticket.id)
-            .where(Ticket.is_archived == True)
+            .where(Ticket.workspace_id == workspace_id, Ticket.is_archived == True)
             .group_by(Ticket.id)
             .order_by(sa_func.coalesce(sa_func.sum(TicketAttachment.file_size), 0).desc())
         )
@@ -17845,9 +17867,14 @@ async def web_admin_storage(request: Request, db: AsyncSession = Depends(get_ses
     except Exception as e:
         logger.error(f"Error fetching archived tickets: {e}")
 
+    workspace = (await db.execute(
+        select(Workspace).where(Workspace.id == workspace_id)
+    )).scalar_one_or_none()
+
     return templates.TemplateResponse('admin/storage.html', {
         'request': request,
         'user': user,
+        'workspace': workspace,
         'storage': storage,
         'top_tickets': top_tickets,
         'archived_tickets': archived_tickets,
@@ -17857,13 +17884,9 @@ async def web_admin_storage(request: Request, db: AsyncSession = Depends(get_ses
 @router.post('/admin/storage/delete-archived')
 async def web_admin_storage_delete_archived(request: Request, db: AsyncSession = Depends(get_session)):
     """Permanently delete selected archived tickets and their attachments"""
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user or not user.is_active or not user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
+    user, redirect = await _require_workspace_admin(request, db)
+    if redirect:
+        return redirect
 
     from app.models.ticket import Ticket, TicketAttachment, TicketComment, TicketHistory
     from sqlalchemy import delete as sa_delete
@@ -17877,9 +17900,14 @@ async def web_admin_storage_delete_archived(request: Request, db: AsyncSession =
     try:
         deleted_count = 0
         for tid in ticket_ids:
-            # Verify ticket exists and is archived
+            # Verify the ticket is archived AND belongs to this admin's company,
+            # so a posted id from another company is silently ignored.
             ticket = (await db.execute(
-                select(Ticket).where(Ticket.id == tid, Ticket.is_archived == True)
+                select(Ticket).where(
+                    Ticket.id == tid,
+                    Ticket.workspace_id == user.workspace_id,
+                    Ticket.is_archived == True
+                )
             )).scalar_one_or_none()
             if not ticket:
                 continue
@@ -17911,6 +17939,8 @@ async def web_admin_storage_delete_archived(request: Request, db: AsyncSession =
         logger.error(f"Error deleting archived tickets: {e}")
         await db.rollback()
         return RedirectResponse('/web/admin/storage?error=delete_failed', status_code=303)
+
+
 
 
 # =============================================================================

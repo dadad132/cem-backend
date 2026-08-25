@@ -137,11 +137,15 @@ class EmailScheduler:
                 if tickets:
                     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     print(f"[{timestamp}] Workspace {workspace_id}: Created {len(tickets)} ticket(s) from emails")
-                    log_fire_and_forget('INFO', 'Scheduler', 'Scheduler', f'Workspace {workspace_id}: Created {len(tickets)} ticket(s)')
+                    log_fire_and_forget('INFO', 'Scheduler', 'Scheduler',
+                                        f'Created {len(tickets)} ticket(s) from email',
+                                        None, workspace_id)
         
         except Exception as e:
             print(f"[Email-to-Ticket] Error processing workspace {workspace_id}: {e}")
-            log_fire_and_forget('ERROR', 'Scheduler', 'Scheduler', f'Error processing workspace {workspace_id}: {str(e)[:200]}')
+            log_fire_and_forget('ERROR', 'Scheduler', 'Scheduler',
+                                f'Error processing incoming mail: {str(e)[:200]}',
+                                None, workspace_id)
     
     async def _process_email_accounts(self):
         """Process emails for all active incoming email accounts (new multi-account)"""
@@ -167,6 +171,7 @@ class EmailScheduler:
             # causing MissingGreenlet errors on subsequent accounts
             for account in accounts:
                 account_name = account.name
+                account_workspace_id = account.workspace_id
                 try:
                     async with AsyncSession(engine) as account_db:
                         # Timeout prevents a hanging IMAP connection from blocking the scheduler forever
@@ -184,16 +189,24 @@ class EmailScheduler:
                         await account_db.commit()
                 except asyncio.TimeoutError:
                     print(f"[Email-to-Ticket] ⚠️ TIMEOUT: Account '{account_name}' exceeded {ACCOUNT_PROCESS_TIMEOUT}s - skipping")
-                    log_fire_and_forget('ERROR', 'Scheduler', f'Timeout processing account: {account_name}', f'Exceeded {ACCOUNT_PROCESS_TIMEOUT}s')
+                    log_fire_and_forget('ERROR', 'Scheduler', 'Email Account',
+                                        f'Timeout processing account: {account_name}',
+                                        f'Exceeded {ACCOUNT_PROCESS_TIMEOUT}s',
+                                        account_workspace_id)
                 except Exception as e:
                     err_str = str(e).lower()
                     if 'database is locked' in err_str or 'locked' in err_str:
                         print(f"[Email-to-Ticket] ⚠️ DATABASE LOCKED for account '{account_name}' - will retry next cycle")
-                        log_fire_and_forget('WARNING', 'Scheduler', f'Database locked for account: {account_name}', 'Will retry next cycle')
+                        log_fire_and_forget('WARNING', 'Scheduler', 'Email Account',
+                                            f'Database locked for account: {account_name}',
+                                            'Will retry next cycle',
+                                            account_workspace_id)
                     else:
                         print(f"[Email-to-Ticket] Error processing email account '{account_name}': {e}")
                         print(f"[Email-to-Ticket] Traceback: {traceback.format_exc()}")
-                        log_fire_and_forget('ERROR', 'Scheduler', f'Error processing account: {account_name}', str(e)[:200])
+                        log_fire_and_forget('ERROR', 'Scheduler', 'Email Account',
+                                            f'Error processing account: {account_name}',
+                                            str(e)[:200], account_workspace_id)
         
         except Exception as e:
             if "no such table" in str(e).lower():
