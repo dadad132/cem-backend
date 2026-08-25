@@ -118,10 +118,14 @@ class DatabaseBackup:
                     self.backup_progress = f'Compressing database (1/{total_files})'
                     zipf.write(self.db_path, arcname='data.db')
                     
-                    # Add all attachments with smart compression
+                    # Add all attachments with smart compression.
+                    # Store under a forward-slash "app/uploads/..." name: that is
+                    # what restore_from_backup extracts, and backslashes from
+                    # Path on Windows are not valid zip separators.
                     for i, file_path in enumerate(files_to_add, start=2):
                         self.backup_progress = f'Compressing file {i}/{total_files}'
-                        arcname = str(file_path.relative_to(self.uploads_dir.parent))
+                        rel = file_path.relative_to(self.uploads_dir).as_posix()
+                        arcname = f'app/uploads/{rel}'
                         # Skip compression for already-compressed file types
                         if file_path.suffix.lower() in _INCOMPRESSIBLE_EXTENSIONS:
                             zipf.write(file_path, arcname=arcname, compress_type=zipfile.ZIP_STORED)
@@ -406,13 +410,36 @@ class DatabaseBackup:
                 with zipfile.ZipFile(backup_file, 'r') as zipf:
                     # Extract database
                     zipf.extract('data.db', path=self.db_path.parent)
-                    
-                    # Extract attachments
+
+                    # Extract attachments. Archives written before the naming
+                    # was fixed store them as "uploads/..." rather than
+                    # "app/uploads/...", so accept both — otherwise a restore
+                    # silently comes back with no attachment files at all.
+                    restored = 0
                     for member in zipf.namelist():
-                        if member.startswith('app/uploads/'):
-                            zipf.extract(member, path='.')
-                
-                logger.info(f"✅ Full backup restored (DB + attachments) from {backup_file}")
+                        normalized = member.replace('\\', '/')
+                        if normalized.endswith('/'):
+                            continue
+                        for prefix in ('app/uploads/', 'uploads/'):
+                            if normalized.startswith(prefix):
+                                rel = normalized[len(prefix):]
+                                break
+                        else:
+                            continue
+                        # Refuse anything trying to escape the uploads folder
+                        if not rel or '..' in rel.split('/'):
+                            logger.warning(f"Skipped unsafe archive entry: {member}")
+                            continue
+                        target = self.uploads_dir / rel
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with zipf.open(member) as src, open(target, 'wb') as dst:
+                            shutil.copyfileobj(src, dst)
+                        restored += 1
+
+                logger.info(
+                    f"✅ Full backup restored from {backup_file} "
+                    f"(database + {restored} attachment files)"
+                )
             else:
                 # Simple database file restore
                 shutil.copy2(backup_file, self.db_path)

@@ -1,0 +1,98 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="min-h-[70vh] flex items-center justify-center px-4">
+  <div class="w-full max-w-md">
+
+    <div class="text-center mb-6">
+      <div class="text-4xl mb-2">🛡️</div>
+      <h1 class="text-2xl font-semibold">Super Admin</h1>
+      <p class="text-sm text-slate-600 mt-1">
+        Server operator access — full-server backup and restore.
+      </p>
+    </div>
+
+    {% if request.query_params.get('restored') %}
+    <div class="mb-4 p-4 bg-green-50 border border-green-200 rounded text-green-800 text-sm">
+      ✅ Server restored. Sign in again with the credentials from that backup.
+    </div>
+    {% endif %}
+
+    {% if error %}
+    <div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800 text-sm">
+      ❌ {{ error }}
+    </div>
+    {% endif %}
+
+    {% if not claimed %}
+      <!-- One-time claim -->
+      <div class="mb-4 p-4 bg-amber-50 border border-amber-200 rounded text-amber-900 text-sm">
+        <p class="font-semibold mb-1">⚠️ This role has not been claimed yet.</p>
+        <p>
+          The account you create here becomes the server's super admin. This
+          happens <strong>once</strong> — after that, this page is only a login.
+          If you are not the person who should own this server, close this page.
+        </p>
+      </div>
+
+      <form method="post" action="/web/login/superadmin/claim"
+            class="bg-white rounded-lg border border-slate-200 p-6 space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-1">Username</label>
+          <input type="text" name="username" required autocomplete="username"
+                 class="w-full border border-slate-300 rounded px-3 py-2 text-sm"
+                 placeholder="e.g. superadmin">
+          <p class="text-xs text-slate-500 mt-1">
+            Must be different from your normal company login.
+          </p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-1">Password</label>
+          <input type="password" name="password" required autocomplete="new-password"
+                 class="w-full border border-slate-300 rounded px-3 py-2 text-sm">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-1">Confirm password</label>
+          <input type="password" name="confirm_password" required autocomplete="new-password"
+                 class="w-full border border-slate-300 rounded px-3 py-2 text-sm">
+        </div>
+        <button type="submit"
+                class="w-full px-4 py-2 bg-slate-900 text-white rounded hover:bg-slate-800 font-medium">
+          Claim Super Admin
+        </button>
+        <p class="text-xs text-slate-500">
+          There is no password reset for this account. Store the password somewhere safe.
+        </p>
+      </form>
+    {% else %}
+      <!-- Already claimed: plain login -->
+      <form method="post" action="/web/login/superadmin"
+            class="bg-white rounded-lg border border-slate-200 p-6 space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-1">Username</label>
+          <input type="text" name="username" required autocomplete="username"
+                 class="w-full border border-slate-300 rounded px-3 py-2 text-sm">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-1">Password</label>
+          <input type="password" name="password" required autocomplete="current-password"
+                 class="w-full border border-slate-300 rounded px-3 py-2 text-sm">
+        </div>
+        <button type="submit"
+                class="w-full px-4 py-2 bg-slate-900 text-white rounded hover:bg-slate-800 font-medium">
+          Sign In
+        </button>
+      </form>
+      <p class="text-xs text-slate-500 text-center mt-4">
+        The super admin has already been claimed on this server.
+      </p>
+    {% endif %}
+
+    <p class="text-center mt-6">
+      <a href="/web/login" class="text-sm text-slate-500 hover:text-slate-700">
+        ← Back to normal sign in
+      </a>
+    </p>
+
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,318 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="mb-5 flex items-start justify-between gap-4">
+  <div>
+    <h1 class="text-2xl font-semibold flex items-center gap-2">
+      <span>🛡️</span> Super Admin — Full Server Backup
+    </h1>
+    <p class="text-sm text-slate-600 mt-1">
+      Signed in as <strong>{{ user.username }}</strong>. A full backup covers the
+      entire database and every company's files in one archive.
+    </p>
+  </div>
+  <form method="post" action="/web/logout">
+    <button type="submit" class="px-3 py-2 text-sm border border-slate-300 rounded hover:bg-slate-50">
+      Sign out
+    </button>
+  </form>
+</div>
+
+{% if request.query_params.get('success') == 'backup_uploaded' %}
+<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded text-green-800">✅ Backup uploaded</div>
+{% elif request.query_params.get('success') == 'backup_deleted' %}
+<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded text-green-800">✅ Backup deleted</div>
+{% elif request.query_params.get('error') == 'not_confirmed' %}
+<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ Restore cancelled — the confirmation phrase did not match.</div>
+{% elif request.query_params.get('error') == 'restore_failed' %}
+<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ Restore failed. Check the server logs.</div>
+{% elif request.query_params.get('error') == 'invalid_file' %}
+<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ Only .db or .zip backups can be uploaded.</div>
+{% elif request.query_params.get('error') == 'upload_failed' %}
+<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ Upload failed.</div>
+{% elif request.query_params.get('error') == 'delete_failed' %}
+<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ Delete failed.</div>
+{% endif %}
+
+<!-- Blast radius -->
+<div class="mb-6 bg-red-50 border border-red-200 rounded-lg p-4">
+  <div class="flex items-start gap-3">
+    <div class="text-red-600 text-xl">⚠️</div>
+    <div class="flex-1">
+      <h3 class="font-semibold text-red-900 mb-1">A restore here affects every company</h3>
+      <p class="text-sm text-red-800 mb-2">
+        Restoring rolls the whole server back to the moment of the backup —
+        all {{ companies|length }} companies at once. Any company that wants to
+        roll back on its own should use its own backup page instead.
+      </p>
+      <div class="flex flex-wrap gap-2 mt-2">
+        {% for c in companies %}
+        <span class="px-2 py-1 bg-white border border-red-200 rounded text-xs text-red-900">
+          {{ c.name }} <span class="text-red-500">({{ c.user_count }} users)</span>
+        </span>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+  <div class="bg-white rounded-lg border border-slate-200 p-4">
+    <div class="text-sm text-slate-600">Total Backups</div>
+    <div class="text-2xl font-bold mt-1">{{ stats.count }}</div>
+  </div>
+  <div class="bg-white rounded-lg border border-green-200 p-4">
+    <div class="text-sm text-slate-600">Manual</div>
+    <div class="text-2xl font-bold mt-1 text-green-600">{{ stats.manual_count }}</div>
+  </div>
+  <div class="bg-white rounded-lg border border-slate-200 p-4">
+    <div class="text-sm text-slate-600">Total Size</div>
+    <div class="text-2xl font-bold mt-1">{{ stats.total_size_mb }} MB</div>
+  </div>
+  <div class="bg-white rounded-lg border border-slate-200 p-4">
+    <div class="text-sm text-slate-600">Latest</div>
+    <div class="text-sm font-medium mt-1">{{ stats.latest_time or 'Never' }}</div>
+  </div>
+</div>
+
+<div class="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+  <div class="bg-white rounded-lg border border-slate-200 p-4">
+    <h3 class="font-semibold mb-3">Create Full Server Backup</h3>
+    <div class="space-y-3">
+      <button type="button" id="createBackupBtn" onclick="startBackup()"
+              class="px-4 py-2 bg-slate-900 text-white rounded hover:bg-slate-800 w-full">
+        💾 Back Up Entire Server
+      </button>
+      <div id="backupProgressContainer" class="hidden">
+        <div class="w-full bg-slate-200 rounded-full h-3 overflow-hidden">
+          <div id="backupProgressBar" class="h-3 bg-slate-900 rounded-full transition-all duration-300" style="width: 0%"></div>
+        </div>
+        <p id="backupProgressText" class="text-xs text-slate-600 mt-1">Starting backup...</p>
+      </div>
+      <div id="backupResult" class="hidden"></div>
+      <p class="text-xs text-slate-500">
+        Database + all attachments for every company, in one compressed archive.
+      </p>
+    </div>
+  </div>
+
+  <div class="bg-white rounded-lg border border-slate-200 p-4">
+    <h3 class="font-semibold mb-3">Upload Backup from Local Machine</h3>
+    <form method="post" action="/web/superadmin/backup/upload" enctype="multipart/form-data" class="space-y-3">
+      <input type="file" name="backup_file" accept=".db,.zip" required
+             class="w-full text-sm text-slate-700 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200">
+      <button type="submit" class="px-4 py-2 bg-slate-700 text-white rounded hover:bg-slate-800 w-full">
+        📤 Upload Backup File
+      </button>
+      <p class="text-xs text-slate-500">For rebuilding this server after a total failure.</p>
+    </form>
+  </div>
+</div>
+
+<div class="bg-white rounded-lg border border-slate-200">
+  <div class="px-4 py-3 border-b border-slate-200">
+    <h2 class="text-lg font-medium">Full Server Backups</h2>
+  </div>
+
+  {% if backups %}
+    <div class="overflow-x-auto">
+      <table class="w-full">
+        <thead class="bg-slate-50">
+          <tr>
+            <th class="px-4 py-3 text-left text-sm font-semibold text-slate-700">Type</th>
+            <th class="px-4 py-3 text-left text-sm font-semibold text-slate-700">Filename</th>
+            <th class="px-4 py-3 text-left text-sm font-semibold text-slate-700">Contents</th>
+            <th class="px-4 py-3 text-left text-sm font-semibold text-slate-700">Created</th>
+            <th class="px-4 py-3 text-left text-sm font-semibold text-slate-700">Size</th>
+            <th class="px-4 py-3 text-right text-sm font-semibold text-slate-700">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-200">
+          {% for backup in backups %}
+            <tr class="hover:bg-slate-50">
+              <td class="px-4 py-3 text-sm">
+                {% if backup.type == 'MANUAL' %}
+                  <span class="px-2 py-1 bg-green-100 text-green-800 text-xs rounded font-medium">MANUAL</span>
+                {% elif backup.type == 'AUTO' %}
+                  <span class="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded font-medium">AUTO</span>
+                {% else %}
+                  <span class="px-2 py-1 bg-purple-100 text-purple-800 text-xs rounded font-medium">UPLOADED</span>
+                {% endif %}
+              </td>
+              <td class="px-4 py-3 font-mono text-xs">{{ backup.filename }}</td>
+              <td class="px-4 py-3 text-sm">
+                {% if backup.includes_attachments %}
+                  <span class="px-2 py-1 bg-green-50 text-green-700 text-xs rounded">📦 DB + Files</span>
+                {% else %}
+                  <span class="px-2 py-1 bg-slate-100 text-slate-700 text-xs rounded">🗄️ DB Only</span>
+                {% endif %}
+              </td>
+              <td class="px-4 py-3 text-sm text-slate-600">{{ backup.created }}</td>
+              <td class="px-4 py-3 text-sm text-slate-600">{{ backup.size_mb }} MB</td>
+              <td class="px-4 py-3 text-sm text-right space-x-2">
+                <a href="/web/superadmin/backup/download/{{ backup.filename }}" download
+                   class="inline-block px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700">
+                  ⬇️ Download
+                </a>
+                <button onclick="confirmRestore('{{ backup.filename }}')"
+                        class="px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700">
+                  🔄 Restore All
+                </button>
+                <button onclick="confirmDelete('{{ backup.filename }}')"
+                        class="px-3 py-1 bg-slate-600 text-white text-xs rounded hover:bg-slate-700">
+                  🗑️ Delete
+                </button>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="p-8 text-center text-slate-500">
+      <p>No full server backups yet.</p>
+    </div>
+  {% endif %}
+</div>
+
+<!-- Restore confirmation modal -->
+<div id="restoreModal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+  <div class="bg-white rounded-lg max-w-lg w-full p-6">
+    <h3 class="text-lg font-semibold text-red-700 mb-2">⚠️ Restore the entire server</h3>
+    <p class="text-sm text-slate-700 mb-3">
+      This replaces the database and all files for
+      <strong>every company</strong> with the contents of
+      <span id="restoreFilename" class="font-mono text-xs"></span>.
+      Anything added since that backup will be lost, for all companies.
+    </p>
+    <p class="text-sm text-slate-700 mb-2">Type <strong>RESTORE EVERYTHING</strong> to continue:</p>
+    <form method="post" action="/web/superadmin/backup/restore">
+      <input type="hidden" name="backup_file" id="restoreBackupFile">
+      <input type="text" name="confirm" autocomplete="off" required
+             class="w-full border border-slate-300 rounded px-3 py-2 text-sm mb-4"
+             placeholder="RESTORE EVERYTHING">
+      <div class="flex justify-end gap-2">
+        <button type="button" onclick="closeRestore()"
+                class="px-4 py-2 text-sm border border-slate-300 rounded hover:bg-slate-50">Cancel</button>
+        <button type="submit"
+                class="px-4 py-2 text-sm bg-red-600 text-white rounded hover:bg-red-700">Restore Everything</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+function confirmRestore(filename) {
+  document.getElementById('restoreFilename').textContent = filename;
+  document.getElementById('restoreBackupFile').value = filename;
+  document.getElementById('restoreModal').classList.remove('hidden');
+}
+function closeRestore() {
+  document.getElementById('restoreModal').classList.add('hidden');
+}
+
+function confirmDelete(filename) {
+  if (confirm('Delete the backup "' + filename + '"?\n\nThis cannot be undone.')) {
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/web/superadmin/backup/delete';
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'backup_file';
+    input.value = filename;
+    form.appendChild(input);
+    document.body.appendChild(form);
+    form.submit();
+  }
+}
+
+let backupPollTimer = null;
+let backupAnimProgress = 0;
+
+async function startBackup() {
+  const btn = document.getElementById('createBackupBtn');
+  const progressContainer = document.getElementById('backupProgressContainer');
+  const progressBar = document.getElementById('backupProgressBar');
+  const progressText = document.getElementById('backupProgressText');
+  const resultDiv = document.getElementById('backupResult');
+
+  btn.disabled = true;
+  btn.classList.add('opacity-50', 'cursor-not-allowed');
+  btn.textContent = '⏳ Backup in progress...';
+  progressContainer.classList.remove('hidden');
+  resultDiv.classList.add('hidden');
+  progressBar.style.width = '5%';
+  progressText.textContent = 'Starting backup...';
+  backupAnimProgress = 5;
+
+  try {
+    const response = await fetch('/web/superadmin/backup/create', {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    });
+    const data = await response.json();
+    if (!data.success) {
+      showBackupError(data.error || 'Failed to start backup');
+      return;
+    }
+    pollBackupStatus();
+  } catch (error) {
+    showBackupError('Network error: ' + error.message);
+  }
+}
+
+function pollBackupStatus() {
+  backupPollTimer = setInterval(async () => {
+    try {
+      const response = await fetch('/web/superadmin/backup/status');
+      const data = await response.json();
+      const progressBar = document.getElementById('backupProgressBar');
+      const progressText = document.getElementById('backupProgressText');
+
+      if (data.status === 'running') {
+        const match = (data.progress || '').match(/(\d+)\/(\d+)/);
+        if (match) {
+          const pct = Math.min(95, Math.round((parseInt(match[1]) / parseInt(match[2])) * 95));
+          progressBar.style.width = pct + '%';
+        } else {
+          backupAnimProgress = Math.min(backupAnimProgress + 2, 50);
+          progressBar.style.width = backupAnimProgress + '%';
+        }
+        progressText.textContent = data.progress;
+      } else if (data.status === 'done') {
+        clearInterval(backupPollTimer);
+        progressBar.style.width = '100%';
+        progressBar.classList.add('bg-green-600');
+        progressText.textContent = 'Backup complete!';
+        const resultDiv = document.getElementById('backupResult');
+        resultDiv.innerHTML = '<div class="p-3 bg-green-50 border border-green-200 rounded text-green-800 text-sm">✅ Full server backup created</div>';
+        resultDiv.classList.remove('hidden');
+        resetBackupButton();
+        setTimeout(() => window.location.reload(), 2000);
+      } else if (data.status === 'error') {
+        clearInterval(backupPollTimer);
+        showBackupError(data.progress);
+      }
+    } catch (e) { /* keep polling */ }
+  }, 1000);
+}
+
+function showBackupError(message) {
+  clearInterval(backupPollTimer);
+  const progressBar = document.getElementById('backupProgressBar');
+  progressBar.style.width = '100%';
+  progressBar.classList.add('bg-red-500');
+  document.getElementById('backupProgressText').textContent = 'Backup failed';
+  const resultDiv = document.getElementById('backupResult');
+  resultDiv.innerHTML = '<div class="p-3 bg-red-50 border border-red-200 rounded text-red-800 text-sm">❌ ' + message + '</div>';
+  resultDiv.classList.remove('hidden');
+  resetBackupButton();
+}
+
+function resetBackupButton() {
+  const btn = document.getElementById('createBackupBtn');
+  btn.disabled = false;
+  btn.classList.remove('opacity-50', 'cursor-not-allowed');
+  btn.textContent = '💾 Back Up Entire Server';
+}
+</script>
+{% endblock %}

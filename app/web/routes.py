@@ -244,6 +244,9 @@ async def web_login_post(
     
     request.session['user_id'] = user.id
     request.session['workspace_id'] = user.workspace_id
+    # The super admin belongs to no company — send it to the server console
+    if user.is_superadmin:
+        return RedirectResponse('/web/superadmin', status_code=303)
     # Redirect to profile completion if not completed
     if not user.profile_completed:
         return RedirectResponse('/web/profile/complete', status_code=303)
@@ -2478,6 +2481,10 @@ async def web_admin_deactivate_user(
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    # The server operator account is not managed from company admin screens
+    if target_user.is_superadmin and not current_user.is_superadmin:
+        raise HTTPException(status_code=404, detail="User not found")
+
     # Must be in same workspace
     if target_user.workspace_id != current_user.workspace_id:
         raise HTTPException(status_code=403, detail="User not in your workspace")
@@ -4005,6 +4012,10 @@ async def web_admin_activate_user(
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    # The server operator account is not managed from company admin screens
+    if target_user.is_superadmin and not current_user.is_superadmin:
+        raise HTTPException(status_code=404, detail="User not found")
+
     # Must be in same workspace
     if target_user.workspace_id != current_user.workspace_id:
         raise HTTPException(status_code=403, detail="User not in your workspace")
@@ -4043,6 +4054,10 @@ async def web_admin_toggle_admin(
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    # The server operator account is not managed from company admin screens
+    if target_user.is_superadmin and not current_user.is_superadmin:
+        raise HTTPException(status_code=404, detail="User not found")
+
     # Must be in same workspace
     if target_user.workspace_id != current_user.workspace_id:
         raise HTTPException(status_code=403, detail="User not in your workspace")
@@ -4078,6 +4093,10 @@ async def web_admin_toggle_ticket_visibility(
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    # The server operator account is not managed from company admin screens
+    if target_user.is_superadmin and not current_user.is_superadmin:
+        raise HTTPException(status_code=404, detail="User not found")
+
     # Must be in same workspace
     if target_user.workspace_id != current_user.workspace_id:
         raise HTTPException(status_code=403, detail="User not in your workspace")
@@ -4113,6 +4132,10 @@ async def web_admin_toggle_bubbles_analytics(
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    # The server operator account is not managed from company admin screens
+    if target_user.is_superadmin and not current_user.is_superadmin:
+        raise HTTPException(status_code=404, detail="User not found")
+
     # Must be in same workspace
     if target_user.workspace_id != current_user.workspace_id:
         raise HTTPException(status_code=403, detail="User not in your workspace")
@@ -4151,6 +4174,10 @@ async def web_admin_delete_user(
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    # The server operator account is not managed from company admin screens
+    if target_user.is_superadmin and not current_user.is_superadmin:
+        raise HTTPException(status_code=404, detail="User not found")
+
     # Must be in same workspace
     if target_user.workspace_id != current_user.workspace_id:
         raise HTTPException(status_code=403, detail="User not in your workspace")
@@ -4186,6 +4213,10 @@ async def web_admin_change_user_password(
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    # The server operator account is not managed from company admin screens
+    if target_user.is_superadmin and not current_user.is_superadmin:
+        raise HTTPException(status_code=404, detail="User not found")
+
     # Must be in same workspace
     if target_user.workspace_id != current_user.workspace_id:
         raise HTTPException(status_code=403, detail="User not in your workspace")
@@ -18156,3 +18187,373 @@ async def web_admin_webhooks_test(request: Request, hook_id: int, db: AsyncSessi
         })
         request.session['success_message'] = f'Test payload sent to "{hook.name}". Check the Last Status column in a moment.'
     return RedirectResponse('/web/admin/webhooks', status_code=303)
+
+
+# =============================================================================
+# SUPER ADMIN — server operator
+#
+# The super admin sits above the per-company admins and is the only role that
+# can back up or restore the whole server (every company at once). Company
+# admins keep their own per-company backups and cannot reach these routes.
+#
+# The account is claimed once: the first person to open /web/login/superadmin
+# sets a username and password and becomes the super admin. After that the
+# same URL is a plain login page and the claim form is gone for good.
+# =============================================================================
+
+async def _superadmin_exists(db: AsyncSession) -> bool:
+    from sqlalchemy import func as sa_func
+    result = await db.execute(
+        select(sa_func.count()).select_from(User).where(User.is_superadmin == True)
+    )
+    return (result.scalar() or 0) > 0
+
+
+async def _require_superadmin(request: Request, db: AsyncSession):
+    """Return the signed-in super admin, or a response to return as-is."""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return None, RedirectResponse('/web/login/superadmin', status_code=303)
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_active:
+        request.session.clear()
+        return None, RedirectResponse('/web/login/superadmin', status_code=303)
+
+    if not user.is_superadmin:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    return user, None
+
+
+@router.get('/login/superadmin', response_class=HTMLResponse)
+async def web_superadmin_login(request: Request, db: AsyncSession = Depends(get_session)):
+    """Claim the super admin role, or sign in once it has been claimed."""
+    claimed = await _superadmin_exists(db)
+    return templates.TemplateResponse('auth/superadmin.html', {
+        'request': request,
+        'claimed': claimed,
+        'error': request.session.pop('superadmin_error', None),
+    })
+
+
+@router.post('/login/superadmin/claim')
+async def web_superadmin_claim(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+    db: AsyncSession = Depends(get_session),
+):
+    """One-time claim. Refused outright once a super admin exists."""
+    from app.core.security import validate_password
+
+    if await _superadmin_exists(db):
+        request.session['superadmin_error'] = (
+            'The super admin has already been claimed on this server.'
+        )
+        return RedirectResponse('/web/login/superadmin', status_code=303)
+
+    username = (username or '').strip()
+    if not username:
+        request.session['superadmin_error'] = 'Username is required.'
+        return RedirectResponse('/web/login/superadmin', status_code=303)
+
+    if password != confirm_password:
+        request.session['superadmin_error'] = 'The two passwords do not match.'
+        return RedirectResponse('/web/login/superadmin', status_code=303)
+
+    is_valid, error_msg = validate_password(password)
+    if not is_valid:
+        request.session['superadmin_error'] = error_msg
+        return RedirectResponse('/web/login/superadmin', status_code=303)
+
+    existing = (await db.execute(
+        select(User).where(User.username == username)
+    )).scalar_one_or_none()
+    if existing:
+        request.session['superadmin_error'] = (
+            'That username is already taken. Choose a different one for the '
+            'super admin account.'
+        )
+        return RedirectResponse('/web/login/superadmin', status_code=303)
+
+    # No workspace: the super admin is a server operator, not a member of any
+    # company, so it can never see company data through the normal screens.
+    user = User(
+        username=username,
+        hashed_password=get_password_hash(password),
+        workspace_id=None,
+        is_admin=True,
+        is_superadmin=True,
+        is_active=True,
+        profile_completed=True,
+        email_verified=True,
+        full_name='Super Admin',
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    client_ip = request.client.host if request.client else 'unknown'
+    logger.warning(
+        f"SUPER ADMIN CLAIMED: username='{username}' from {client_ip}. "
+        "This is a one-time action and cannot be repeated."
+    )
+
+    request.session['user_id'] = user.id
+    request.session['workspace_id'] = None
+    return RedirectResponse('/web/superadmin', status_code=303)
+
+
+@router.post('/login/superadmin')
+async def web_superadmin_login_post(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    db: AsyncSession = Depends(get_session),
+):
+    user = (await db.execute(
+        select(User).where(User.username == username)
+    )).scalar_one_or_none()
+
+    # Same message either way, so this page cannot be used to probe usernames
+    if not user or not verify_password(password, user.hashed_password) \
+            or not user.is_superadmin or not user.is_active:
+        request.session['superadmin_error'] = 'Invalid username or password.'
+        return RedirectResponse('/web/login/superadmin', status_code=303)
+
+    request.session['user_id'] = user.id
+    request.session['workspace_id'] = user.workspace_id
+    return RedirectResponse('/web/superadmin', status_code=303)
+
+
+@router.get('/superadmin', response_class=HTMLResponse)
+async def web_superadmin_console(request: Request, db: AsyncSession = Depends(get_session)):
+    """Full-server backup console. Super admin only."""
+    user, redirect = await _require_superadmin(request, db)
+    if redirect:
+        return redirect
+
+    from app.core.backup import backup_manager
+    from app.models.workspace import Workspace as _Workspace
+    from sqlalchemy import func as sa_func
+
+    stats = backup_manager.get_backup_stats()
+
+    backups = []
+    for backup_file in sorted(
+        [f for f in backup_manager.backup_dir.glob("backup_*.*")
+         if f.suffix in ['.db', '.zip'] and 'latest' not in f.name
+         and 'corrupted' not in f.name],
+        key=lambda x: x.stat().st_mtime,
+        reverse=True
+    ):
+        backup_type = (
+            "MANUAL" if "_MANUAL_" in backup_file.name
+            else ("AUTO" if "_AUTO_" in backup_file.name else "UPLOADED")
+        )
+        backups.append({
+            'filename': backup_file.name,
+            'type': backup_type,
+            'includes_attachments': backup_file.suffix == '.zip',
+            'size_mb': round(backup_file.stat().st_size / (1024 * 1024), 2),
+            'created': datetime.fromtimestamp(
+                backup_file.stat().st_mtime).strftime('%d/%m/%Y %H:%M:%S'),
+        })
+
+    # What a full backup covers, so the operator can see the blast radius
+    companies = []
+    workspaces = (await db.execute(
+        select(_Workspace).order_by(_Workspace.id)
+    )).scalars().all()
+    for ws in workspaces:
+        user_count = (await db.execute(
+            select(sa_func.count()).select_from(User).where(User.workspace_id == ws.id)
+        )).scalar() or 0
+        companies.append({'id': ws.id, 'name': ws.name, 'user_count': user_count})
+
+    return templates.TemplateResponse('admin/superadmin.html', {
+        'request': request,
+        'user': user,
+        'stats': stats,
+        'backups': backups,
+        'companies': companies,
+    })
+
+
+@router.post('/superadmin/backup/create')
+async def web_superadmin_backup_create(
+    request: Request,
+    db: AsyncSession = Depends(get_session)
+):
+    """Create one full-server backup: the database plus every company's files."""
+    user, redirect = await _require_superadmin(request, db)
+    if redirect:
+        return JSONResponse({'success': False, 'error': 'Not authorised'}, status_code=403)
+
+    from app.core.backup import backup_manager
+    import asyncio
+
+    if backup_manager.backup_status == 'running':
+        return JSONResponse({'success': False, 'error': 'A backup is already in progress'})
+
+    async def _run_backup():
+        try:
+            backup_manager.backup_status = 'running'
+            backup_manager.backup_progress = 'Starting full server backup...'
+            backup_manager.backup_result_file = None
+            backup_file = await asyncio.to_thread(
+                backup_manager.create_backup, is_manual=True, include_attachments=True
+            )
+            if backup_file:
+                backup_manager.backup_status = 'done'
+                backup_manager.backup_progress = 'Backup created successfully'
+                backup_manager.backup_result_file = backup_file.name
+            else:
+                backup_manager.backup_status = 'error'
+                backup_manager.backup_progress = 'Backup creation failed'
+        except Exception as e:
+            backup_manager.backup_status = 'error'
+            backup_manager.backup_progress = f'Error: {str(e)[:200]}'
+
+    logger.warning(f"Full server backup started by super admin '{user.username}'")
+    asyncio.create_task(_run_backup())
+    return JSONResponse({'success': True, 'message': 'Backup started'})
+
+
+@router.get('/superadmin/backup/status')
+async def web_superadmin_backup_status(
+    request: Request,
+    db: AsyncSession = Depends(get_session)
+):
+    user, redirect = await _require_superadmin(request, db)
+    if redirect:
+        return JSONResponse({'success': False, 'error': 'Not authorised'}, status_code=403)
+
+    from app.core.backup import backup_manager
+    return JSONResponse({
+        'status': backup_manager.backup_status,
+        'progress': backup_manager.backup_progress,
+        'filename': backup_manager.backup_result_file,
+    })
+
+
+@router.get('/superadmin/backup/download/{filename}')
+async def web_superadmin_backup_download(
+    request: Request,
+    filename: str,
+    db: AsyncSession = Depends(get_session)
+):
+    user, redirect = await _require_superadmin(request, db)
+    if redirect:
+        return redirect
+
+    from app.core.backup import backup_manager
+    from fastapi.responses import FileResponse
+
+    if '..' in filename or '/' in filename or '\\' in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    backup_path = (backup_manager.backup_dir / filename).resolve()
+    if backup_path.parent != backup_manager.backup_dir.resolve():
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not backup_path.is_file():
+        raise HTTPException(status_code=404, detail="Backup file not found")
+
+    return FileResponse(
+        path=str(backup_path),
+        filename=filename,
+        media_type='application/octet-stream'
+    )
+
+
+@router.post('/superadmin/backup/upload')
+async def web_superadmin_backup_upload(
+    request: Request,
+    backup_file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_session)
+):
+    user, redirect = await _require_superadmin(request, db)
+    if redirect:
+        return redirect
+
+    from app.core.backup import backup_manager
+
+    if not backup_file.filename or not backup_file.filename.endswith(('.db', '.zip')):
+        return RedirectResponse('/web/superadmin?error=invalid_file', status_code=303)
+
+    content = await backup_file.read()
+    saved_path = backup_manager.save_uploaded_backup(content, backup_file.filename)
+
+    if saved_path:
+        logger.warning(
+            f"Full server backup uploaded by super admin '{user.username}': "
+            f"{saved_path.name}"
+        )
+        return RedirectResponse('/web/superadmin?success=backup_uploaded', status_code=303)
+    return RedirectResponse('/web/superadmin?error=upload_failed', status_code=303)
+
+
+@router.post('/superadmin/backup/restore')
+async def web_superadmin_backup_restore(
+    request: Request,
+    backup_file: str = Form(...),
+    confirm: str = Form(''),
+    db: AsyncSession = Depends(get_session)
+):
+    """Restore the whole server. Replaces EVERY company's data at once."""
+    user, redirect = await _require_superadmin(request, db)
+    if redirect:
+        return redirect
+
+    from app.core.backup import backup_manager
+    import asyncio
+
+    # Typed confirmation, because this cannot be undone per-company
+    if confirm.strip().upper() != 'RESTORE EVERYTHING':
+        return RedirectResponse('/web/superadmin?error=not_confirmed', status_code=303)
+
+    if '..' in backup_file or '/' in backup_file or '\\' in backup_file:
+        return RedirectResponse('/web/superadmin?error=invalid_filename', status_code=303)
+
+    backup_path = (backup_manager.backup_dir / backup_file).resolve()
+    if backup_path.parent != backup_manager.backup_dir.resolve() or not backup_path.is_file():
+        return RedirectResponse('/web/superadmin?error=restore_failed', status_code=303)
+
+    username = user.username
+    logger.warning(
+        f"FULL SERVER RESTORE started by super admin '{username}' from {backup_file}"
+    )
+
+    # Release the ORM connection before the restore swaps the database file
+    await db.commit()
+    success = await asyncio.to_thread(backup_manager.restore_from_backup, backup_path)
+
+    if success:
+        logger.warning(f"FULL SERVER RESTORE complete ('{username}', {backup_file})")
+        # Every user row was replaced, so this session is stale.
+        request.session.clear()
+        return RedirectResponse('/web/login/superadmin?restored=1', status_code=303)
+
+    return RedirectResponse('/web/superadmin?error=restore_failed', status_code=303)
+
+
+@router.post('/superadmin/backup/delete')
+async def web_superadmin_backup_delete(
+    request: Request,
+    backup_file: str = Form(...),
+    db: AsyncSession = Depends(get_session)
+):
+    user, redirect = await _require_superadmin(request, db)
+    if redirect:
+        return redirect
+
+    from app.core.backup import backup_manager
+
+    if '..' in backup_file or '/' in backup_file or '\\' in backup_file:
+        return RedirectResponse('/web/superadmin?error=invalid_filename', status_code=303)
+
+    if backup_manager.delete_backup(backup_file):
+        return RedirectResponse('/web/superadmin?success=backup_deleted', status_code=303)
+    return RedirectResponse('/web/superadmin?error=delete_failed', status_code=303)

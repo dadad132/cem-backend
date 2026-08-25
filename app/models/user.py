@@ -50,6 +50,11 @@ class User(UserBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     hashed_password: str
     workspace_id: Optional[int] = Field(default=None, foreign_key="workspace.id", index=True)
+    # Server operator, above the per-company admins. The only role allowed to
+    # back up and restore the whole server (every company at once). Deliberately
+    # kept off UserBase so it can never be set through UserCreate/UserUpdate —
+    # it is granted from configuration at startup, not through the web UI.
+    is_superadmin: bool = Field(default=False)
     email_verified: bool = False
     verification_code: Optional[str] = None
     verification_expires_at: Optional[datetime] = None

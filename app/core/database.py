@@ -83,6 +83,25 @@ async def init_models() -> None:
             pass
         await conn.run_sync(SQLModel.metadata.create_all)
 
+        # create_all adds missing tables but never missing columns. Ensure the
+        # ones added after a table already existed, here rather than only in
+        # lifespan, so scripts, workers and tests that never run lifespan still
+        # get a schema matching the models.
+        if engine.url.get_backend_name().startswith("sqlite"):
+            for table, column, ddl in (
+                ("user", "is_superadmin", "BOOLEAN NOT NULL DEFAULT 0"),
+            ):
+                try:
+                    res = await conn.exec_driver_sql(f'PRAGMA table_info("{table}")')
+                    cols = {row[1] for row in res.fetchall()}
+                    if cols and column not in cols:
+                        await conn.exec_driver_sql(
+                            f'ALTER TABLE "{table}" ADD COLUMN {column} {ddl}'
+                        )
+                except Exception:
+                    # Best effort; lifespan reports properly on a real startup
+                    pass
+
 
 async def ensure_initialized() -> None:
     global _initialized
@@ -391,6 +410,39 @@ async def lifespan(app):  # FastAPI lifespan
             conn.close()
     except Exception as e:
         logger.warning(f"⚠️  Could not migrate ticket schema: {e}")
+
+    # ── Super admin (server operator) column ───────────────────────────
+    # The super admin is the only role allowed to back up and restore the
+    # whole server. The account is not seeded here: it is claimed once, by
+    # the first person to visit /web/login/superadmin. See
+    # web_superadmin_login in app/web/routes.py.
+    try:
+        import sqlite3
+        from pathlib import Path
+        db_path = Path("data.db")
+        if db_path.exists():
+            conn = sqlite3.connect(str(db_path), timeout=30)
+            cursor = conn.cursor()
+            cursor.execute('PRAGMA table_info("user")')
+            user_cols = {row[1] for row in cursor.fetchall()}
+            if user_cols and "is_superadmin" not in user_cols:
+                logger.info("🔧 Adding is_superadmin column to user...")
+                cursor.execute(
+                    "ALTER TABLE user ADD COLUMN is_superadmin BOOLEAN NOT NULL DEFAULT 0"
+                )
+                conn.commit()
+                logger.info("✅ Added user.is_superadmin")
+
+            cursor.execute("SELECT COUNT(*) FROM user WHERE is_superadmin = 1")
+            if cursor.fetchone()[0] == 0:
+                logger.warning(
+                    "⚠️  No super admin yet. The first person to open "
+                    "/web/login/superadmin will claim the role — do this now, "
+                    "before the server is reachable by anyone else."
+                )
+            conn.close()
+    except Exception as e:
+        logger.warning(f"⚠️  Could not check super admin column: {e}")
 
     # ─── Background schedulers ──────────────────────────────────────
     # Start these AFTER all schema fixes are done, so they don't read
