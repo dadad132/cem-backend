@@ -1,0 +1,5 @@
+# Shell scripts and systemd units must keep LF endings. A CRLF in the shebang
+# makes Linux report "bad interpreter: /bin/bash^M" and the installer fails
+# before it does anything. These are authored on Windows, so pin them.
+*.sh text eol=lf
+*.service text eol=lf
