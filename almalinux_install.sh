@@ -328,12 +328,15 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# --proxy-headers makes the app read the real client IP from a reverse proxy
+# on localhost. Harmless without one, and setting it here means re-running
+# this installer cannot undo what setup_domain_ssl.sh configured.
 Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$APP_DIR
 Environment=PYTHONUNBUFFERED=1
-ExecStart=$APP_DIR/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+ExecStart=$APP_DIR/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=127.0.0.1
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -414,6 +417,11 @@ echo -e "${BLUE}First step - claim the super admin account:${NC}"
 echo -e "  ${YELLOW}http://${LOCAL_IP:-localhost}:$PORT/web/login/superadmin${NC}"
 echo -e "  The first visitor to that page sets the password and becomes the"
 echo -e "  server operator, so open it now - before anyone else can."
+echo ""
+
+echo -e "${BLUE}Serve it on a domain name over HTTPS:${NC}"
+echo -e "  ${YELLOW}sudo bash $APP_DIR/setup_domain_ssl.sh --domain your.domain.com --email you@your.domain.com${NC}"
+echo -e "  Puts nginx in front on ports 80/443 and gets a free certificate."
 echo ""
 
 echo -e "${BLUE}Useful Commands:${NC}"
