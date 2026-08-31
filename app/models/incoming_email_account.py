@@ -38,6 +38,13 @@ class IncomingEmailAccount(SQLModel, table=True):
     default_priority: str = Field(default="medium")  # Default priority for new tickets
     default_category: str = Field(default="support")  # Default category
     
+    # Highest IMAP UID already seen, per folder, as JSON:
+    #   {"INBOX": {"uidvalidity": 12, "last_uid": 9481}, ...}
+    # Lets a poll ask only for messages newer than that, instead of rescanning
+    # a rolling window every couple of minutes. UIDVALIDITY is stored with it
+    # because a mailbox can renumber, which invalidates the mark.
+    imap_uid_state: Optional[str] = Field(default=None)
+
     # Timestamps
     last_checked_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)

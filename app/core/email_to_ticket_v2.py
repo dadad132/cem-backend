@@ -1570,6 +1570,56 @@ def _fetch_message_ids(mail, email_ids):
         return {}
 
 
+# A message larger than this is not downloaded at all. The ticket code already
+# discards attachments over 10MB, so pulling a 30MB mail only spends the
+# mailbox's daily IMAP download allowance for nothing.
+MAX_MESSAGE_BYTES = 15 * 1024 * 1024
+
+_SIZE_RE = re.compile(rb'RFC822\.SIZE\s+(\d+)')
+_UIDVALIDITY_RE = re.compile(rb'UIDVALIDITY\s+(\d+)')
+
+
+def _fetch_sizes(mail, email_ids):
+    """Map UID -> message size in bytes, in one round trip. {} on failure."""
+    if not email_ids:
+        return {}
+    try:
+        uid_set = b','.join(email_ids).decode('ascii')
+        status, data = mail.uid('fetch', uid_set, '(RFC822.SIZE)')
+        if status != 'OK' or not data:
+            return {}
+        out = {}
+        for item in data:
+            line = item[0] if isinstance(item, tuple) else item
+            if not line:
+                continue
+            uid_match = _UID_RE.search(line)
+            size_match = _SIZE_RE.search(line)
+            if uid_match and size_match:
+                out[uid_match.group(1)] = int(size_match.group(1))
+        return out
+    except Exception:
+        return {}
+
+
+def _read_uidvalidity(mail, folder):
+    """UIDVALIDITY of the selected folder, or None if it cannot be read.
+
+    Stored UIDs mean nothing across a change of this value, so it guards the
+    high-water mark against a mailbox that has renumbered.
+    """
+    try:
+        status, data = mail.status(f'"{folder}"', '(UIDVALIDITY)')
+        if status == 'OK' and data:
+            raw = data[0] if isinstance(data[0], bytes) else str(data[0]).encode()
+            m = _UIDVALIDITY_RE.search(raw)
+            if m:
+                return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
 async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
     """
     Process emails for an IncomingEmailAccount and create tickets or add comments to existing tickets.
@@ -1672,8 +1722,10 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                         print(f"[Email Account] POP3 error fetching message {i}: {e}")
                         _syslog('WARNING', 'Email Account', f'POP3 fetch error for message {i}', str(e)[:200], workspace_id)
                         continue
-                
-                return raw_emails
+
+                # POP3 has no UIDVALIDITY or stable UIDs to track, so it carries
+                # no high-water mark; the shape must still match the IMAP path.
+                return raw_emails, {}
             else:
                 # IMAP connection (default) with timeout
                 print(f"[Email Account] Using IMAP protocol on {imap_host}:{effective_port} (SSL={effective_ssl})")
@@ -1710,32 +1762,74 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                 
                 raw_emails = []
                 skipped_known = 0
+                skipped_large = 0
                 budget = MAX_FULL_FETCH_PER_CYCLE
+                new_uid_state = dict(uid_state_in)
                 for folder in folders_to_check:
                     try:
-                        status, _ = mail.select(folder)
+                        status, select_resp = mail.select(folder)
                         if status != 'OK':
                             continue
 
-                        # Use UID commands for stable email identification across sessions
-                        status, messages = mail.uid('search', None, f'SINCE {date_since}')
-                        email_ids = messages[0].split()
+                        # UIDs are only meaningful within one UIDVALIDITY. If the
+                        # mailbox has renumbered, the stored mark is meaningless
+                        # and we fall back to the date window for one cycle.
+                        uidvalidity = _read_uidvalidity(mail, folder)
+                        prev = uid_state_in.get(folder) or {}
+                        last_uid = 0
+                        if prev.get('uidvalidity') == uidvalidity:
+                            last_uid = int(prev.get('last_uid') or 0)
+
+                        # Ask the server for new UIDs only. Rescanning a rolling
+                        # 7-day window every couple of minutes is what exhausted
+                        # the mailbox's daily IMAP download allowance.
+                        if last_uid:
+                            criteria = f'UID {last_uid + 1}:*'
+                        else:
+                            criteria = f'SINCE {date_since}'
+                        status, messages = mail.uid('search', None, criteria)
+                        email_ids = messages[0].split() if messages and messages[0] else []
+
+                        # 'UID n:*' always returns at least the highest UID even
+                        # when nothing is newer; drop anything at or below the mark.
+                        if last_uid:
+                            email_ids = [e for e in email_ids
+                                         if e.isdigit() and int(e) > last_uid]
 
                         if email_ids:
-                            print(f"[Email Account] {len(email_ids)} messages in the last 7 days in {folder}")
+                            print(f"[Email Account] {len(email_ids)} new message(s) in {folder} ({criteria})")
 
-                        # Ask for Message-IDs in one round trip, then download a
-                        # body only for mail we have not already handled. Without
-                        # this the poller re-downloads every message, attachments
-                        # and all, on every cycle, and eventually cannot finish
-                        # inside the scheduler's timeout.
+                        # Map UID -> Message-ID in one round trip, so mail already
+                        # turned into a ticket is skipped without downloading it.
                         uid_to_msgid = _fetch_message_ids(mail, email_ids)
+                        uid_to_size = _fetch_sizes(mail, email_ids)
 
+                        highest_seen = last_uid
                         for email_id in email_ids:
+                            try:
+                                uid_num = int(email_id)
+                            except (TypeError, ValueError):
+                                uid_num = 0
+
                             known_id = uid_to_msgid.get(email_id)
                             if known_id and known_id in already_processed_ids:
                                 skipped_known += 1
+                                highest_seen = max(highest_seen, uid_num)
                                 continue
+
+                            size = uid_to_size.get(email_id)
+                            if size and size > MAX_MESSAGE_BYTES:
+                                # Attachments over 10MB are discarded by the
+                                # ticket code anyway, so downloading a huge
+                                # message only burns the download allowance.
+                                skipped_large += 1
+                                highest_seen = max(highest_seen, uid_num)
+                                print(f"[Email Account] Skipping {size/1024/1024:.1f} MB message (over {MAX_MESSAGE_BYTES/1024/1024:.0f} MB cap)")
+                                _syslog('WARNING', 'Email Account', 'Skipped oversized email',
+                                        f'UID={email_id.decode(errors="replace")} size={size/1024/1024:.1f}MB',
+                                        workspace_id)
+                                continue
+
                             if budget <= 0:
                                 # Leave the rest for the next cycle rather than
                                 # running past the scheduler's timeout.
@@ -1744,6 +1838,7 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                                 status, msg_data = mail.uid('fetch', email_id, '(RFC822)')
                                 if msg_data and msg_data[0]:
                                     budget -= 1
+                                    highest_seen = max(highest_seen, uid_num)
                                     raw_emails.append({
                                         'email_id': email_id,
                                         'msg_bytes': msg_data[0][1],
@@ -1753,6 +1848,14 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                                 print(f"[Email Account] Error fetching email {email_id} from {folder}: {e}")
                                 _syslog('WARNING', 'Email Account', f'Failed to fetch email {email_id} from {folder}', str(e)[:200], workspace_id)
                                 continue
+
+                        # Only advance the mark for messages we actually dealt
+                        # with, so a cycle cut short by the cap resumes correctly.
+                        if uidvalidity is not None:
+                            new_uid_state[folder] = {
+                                'uidvalidity': uidvalidity,
+                                'last_uid': highest_seen,
+                            }
                     except Exception as e:
                         # Folder doesn't exist or can't be selected
                         _syslog('INFO', 'Email Account', f'Folder not available: {folder}', str(e)[:100], workspace_id)
@@ -1760,12 +1863,26 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
 
                 if skipped_known:
                     print(f"[Email Account] Skipped {skipped_known} already-processed message(s) without downloading them")
+                if skipped_large:
+                    print(f"[Email Account] Skipped {skipped_large} oversized message(s)")
                 if budget <= 0:
                     print(f"[Email Account] Hit the {MAX_FULL_FETCH_PER_CYCLE}-message cap; the rest follow next cycle")
                     _syslog('INFO', 'Email Account', 'Fetch cap reached, continuing next cycle',
                             f'cap={MAX_FULL_FETCH_PER_CYCLE}', workspace_id)
-                return raw_emails
+                return raw_emails, new_uid_state
         
+        # Where this account got to last time, per folder, so the poll can ask
+        # for new UIDs instead of rescanning a rolling window.
+        import json as _json
+        uid_state_in = {}
+        try:
+            if getattr(account, 'imap_uid_state', None):
+                loaded = _json.loads(account.imap_uid_state)
+                if isinstance(loaded, dict):
+                    uid_state_in = loaded
+        except Exception as e:
+            print(f"[Email Account] Ignoring unreadable imap_uid_state: {e}")
+
         # Message-IDs this account has already handled, loaded once so the
         # fetch loop can skip them without downloading anything.
         already_processed_ids = set()
@@ -1784,7 +1901,17 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
             print(f"[Email Account] Could not preload processed message ids: {e}")
 
         # Fetch emails in thread pool (non-blocking)
-        raw_emails = await asyncio.to_thread(connect_and_fetch)
+        raw_emails, uid_state_out = await asyncio.to_thread(connect_and_fetch)
+
+        # Persist how far we got, so the next poll starts from here. Saved even
+        # when nothing new arrived, so the mark keeps moving.
+        try:
+            if uid_state_out and uid_state_out != uid_state_in:
+                account.imap_uid_state = _json.dumps(uid_state_out)
+                db.add(account)
+                await db.commit()
+        except Exception as e:
+            print(f"[Email Account] Could not save imap_uid_state: {e}")
         
         print(f"[Email Account] {account_name}: {len(raw_emails)} new message(s) to process")
         _syslog('INFO', 'Email Account', f'{account_name}: Fetched {len(raw_emails)} emails', workspace_id=workspace_id)
