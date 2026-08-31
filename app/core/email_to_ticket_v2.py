@@ -6,6 +6,7 @@ IMAP-based email processing, uses database settings, keeps emails on server
 import asyncio
 import imaplib
 import email
+import re
 import uuid
 from email.header import decode_header
 from email.utils import parseaddr
@@ -1531,6 +1532,44 @@ def _clean_email_body_standalone(body: str) -> str:
     return EmailToTicketService.clean_email_body(None, body)
 
 
+# Full message bodies are expensive to download; Message-IDs are not. A poll
+# cycle asks for the IDs first so it can skip everything already turned into a
+# ticket instead of re-downloading the whole mailbox every two minutes.
+MAX_FULL_FETCH_PER_CYCLE = 40
+
+_UID_RE = re.compile(rb'UID\s+(\d+)')
+_MSGID_RE = re.compile(rb'Message-ID:\s*(<[^>]+>)', re.IGNORECASE)
+
+
+def _fetch_message_ids(mail, email_ids):
+    """Map UID -> Message-ID for a set of UIDs in one round trip.
+
+    Returns {} if the server does not cooperate, which makes the caller fall
+    back to fetching every body - slower, but never wrong.
+    """
+    if not email_ids:
+        return {}
+    try:
+        uid_set = b','.join(email_ids).decode('ascii')
+        status, data = mail.uid(
+            'fetch', uid_set, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])'
+        )
+        if status != 'OK' or not data:
+            return {}
+        out = {}
+        for item in data:
+            if not isinstance(item, tuple) or len(item) < 2:
+                continue
+            uid_match = _UID_RE.search(item[0] or b'')
+            msgid_match = _MSGID_RE.search(item[1] or b'')
+            if uid_match and msgid_match:
+                out[uid_match.group(1)] = msgid_match.group(1).decode(
+                    'ascii', errors='replace').strip()
+        return out
+    except Exception:
+        return {}
+
+
 async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
     """
     Process emails for an IncomingEmailAccount and create tickets or add comments to existing tickets.
@@ -1670,23 +1709,41 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                 date_since = (datetime.now() - timedelta(days=7)).strftime("%d-%b-%Y")
                 
                 raw_emails = []
+                skipped_known = 0
+                budget = MAX_FULL_FETCH_PER_CYCLE
                 for folder in folders_to_check:
                     try:
                         status, _ = mail.select(folder)
                         if status != 'OK':
                             continue
-                        
+
                         # Use UID commands for stable email identification across sessions
                         status, messages = mail.uid('search', None, f'SINCE {date_since}')
                         email_ids = messages[0].split()
-                        
+
                         if email_ids:
-                            print(f"[Email Account] Found {len(email_ids)} messages from last 7 days in {folder}")
-                        
+                            print(f"[Email Account] {len(email_ids)} messages in the last 7 days in {folder}")
+
+                        # Ask for Message-IDs in one round trip, then download a
+                        # body only for mail we have not already handled. Without
+                        # this the poller re-downloads every message, attachments
+                        # and all, on every cycle, and eventually cannot finish
+                        # inside the scheduler's timeout.
+                        uid_to_msgid = _fetch_message_ids(mail, email_ids)
+
                         for email_id in email_ids:
+                            known_id = uid_to_msgid.get(email_id)
+                            if known_id and known_id in already_processed_ids:
+                                skipped_known += 1
+                                continue
+                            if budget <= 0:
+                                # Leave the rest for the next cycle rather than
+                                # running past the scheduler's timeout.
+                                break
                             try:
                                 status, msg_data = mail.uid('fetch', email_id, '(RFC822)')
                                 if msg_data and msg_data[0]:
+                                    budget -= 1
                                     raw_emails.append({
                                         'email_id': email_id,
                                         'msg_bytes': msg_data[0][1],
@@ -1700,13 +1757,36 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                         # Folder doesn't exist or can't be selected
                         _syslog('INFO', 'Email Account', f'Folder not available: {folder}', str(e)[:100], workspace_id)
                         continue
-                
+
+                if skipped_known:
+                    print(f"[Email Account] Skipped {skipped_known} already-processed message(s) without downloading them")
+                if budget <= 0:
+                    print(f"[Email Account] Hit the {MAX_FULL_FETCH_PER_CYCLE}-message cap; the rest follow next cycle")
+                    _syslog('INFO', 'Email Account', 'Fetch cap reached, continuing next cycle',
+                            f'cap={MAX_FULL_FETCH_PER_CYCLE}', workspace_id)
                 return raw_emails
         
+        # Message-IDs this account has already handled, loaded once so the
+        # fetch loop can skip them without downloading anything.
+        already_processed_ids = set()
+        try:
+            _seen_cutoff = datetime.utcnow() - timedelta(days=60)
+            _seen = await db.execute(
+                select(ProcessedMail.message_id).where(
+                    ProcessedMail.email_account == account_email.lower(),
+                    ProcessedMail.processed_at >= _seen_cutoff,
+                )
+            )
+            already_processed_ids = {row[0] for row in _seen.all() if row[0]}
+            print(f"[Email Account] {len(already_processed_ids)} message(s) already processed by this account")
+        except Exception as e:
+            # Worst case we fetch everything, exactly as before
+            print(f"[Email Account] Could not preload processed message ids: {e}")
+
         # Fetch emails in thread pool (non-blocking)
         raw_emails = await asyncio.to_thread(connect_and_fetch)
         
-        print(f"[Email Account] {account_name}: Found {len(raw_emails)} unread messages to process")
+        print(f"[Email Account] {account_name}: {len(raw_emails)} new message(s) to process")
         _syslog('INFO', 'Email Account', f'{account_name}: Fetched {len(raw_emails)} emails', workspace_id=workspace_id)
         
         for raw_email in raw_emails:
