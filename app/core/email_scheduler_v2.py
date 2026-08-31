@@ -6,6 +6,7 @@ Uses database settings for each workspace - supports multiple email accounts
 import asyncio
 import traceback
 from datetime import datetime
+from typing import Optional
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select
 
@@ -299,12 +300,63 @@ async def check_emails_now():
     await email_scheduler.check_now()
 
 
-async def run_email_check_direct() -> dict:
+# State of the manual "Check Emails" button, kept per company so one admin's
+# check never reports another company's progress. The button starts this in the
+# background and polls, rather than holding the HTTP request open for minutes.
+_manual_checks: dict = {}
+
+
+def get_manual_check_state(workspace_id: int) -> dict:
+    return _manual_checks.get(int(workspace_id), {
+        'status': 'idle', 'message': '', 'tickets_created': 0,
+        'accounts_checked': 0, 'errors': [],
+    })
+
+
+async def run_manual_check(workspace_id: int) -> None:
+    """Run a company's email check in the background, recording progress."""
+    ws = int(workspace_id)
+    _manual_checks[ws] = {
+        'status': 'running', 'message': 'Connecting to mailboxes...',
+        'tickets_created': 0, 'accounts_checked': 0, 'errors': [],
+    }
+    try:
+        result = await run_email_check_direct(workspace_id=ws)
+        tickets = result['tickets_created']
+        checked = result['accounts_checked']
+        errors = result['errors']
+
+        if checked == 0:
+            message = 'No email accounts are configured for this company.'
+        elif tickets > 0:
+            message = f"{tickets} new ticket(s) created from {checked} account(s)."
+        else:
+            message = f"No new emails found across {checked} account(s)."
+        if errors:
+            message += f" {len(errors)} account(s) reported errors."
+
+        _manual_checks[ws] = {
+            'status': 'done', 'message': message, 'tickets_created': tickets,
+            'accounts_checked': checked, 'errors': errors,
+        }
+    except Exception as e:
+        _manual_checks[ws] = {
+            'status': 'error', 'message': f'Email check failed: {str(e)[:200]}',
+            'tickets_created': 0, 'accounts_checked': 0, 'errors': [str(e)[:200]],
+        }
+
+
+async def run_email_check_direct(workspace_id: Optional[int] = None) -> dict:
     """
-    Run an immediate email check across all configured accounts and return results.
+    Run an immediate email check and return results.
 
     Used by the manual 'Check Emails Now' button so it can report real results
     without the race condition of polling the background scheduler's state.
+
+    Args:
+        workspace_id: check only this company's mailboxes. Pass it whenever the
+            check was triggered by a person: without it the button would reach
+            into every company's mailbox on the server.
 
     Can run concurrently with the scheduler — ProcessedMail dedup prevents duplicates.
 
@@ -322,6 +374,8 @@ async def run_email_check_direct() -> dict:
                 select(EmailSettings.workspace_id).where(EmailSettings.incoming_mail_host.isnot(None))
             )
             workspace_ids = [row[0] for row in result.all()]
+            if workspace_id is not None:
+                workspace_ids = [w for w in workspace_ids if w == workspace_id]
 
         print(f"[Email Direct Check] Processing {len(workspace_ids)} legacy workspace(s)")
 
@@ -341,9 +395,14 @@ async def run_email_check_direct() -> dict:
     # --- New multi-account email settings ---
     try:
         async with AsyncSession(engine) as db:
-            result = await db.execute(
-                select(IncomingEmailAccount).where(IncomingEmailAccount.is_active == True)
+            _account_q = select(IncomingEmailAccount).where(
+                IncomingEmailAccount.is_active == True
             )
+            if workspace_id is not None:
+                _account_q = _account_q.where(
+                    IncomingEmailAccount.workspace_id == workspace_id
+                )
+            result = await db.execute(_account_q)
             accounts = result.scalars().all()
 
         print(f"[Email Direct Check] Processing {len(accounts)} active account(s)")

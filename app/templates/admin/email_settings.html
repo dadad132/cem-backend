@@ -469,29 +469,52 @@ function checkEmails() {
     btn.disabled = true;
     btn.textContent = 'Checking...';
 
+    const finish = (text) => {
+        btn.disabled = false;
+        btn.textContent = 'Check Emails Now';
+        if (text) alert(text);
+    };
+
+    // The request only starts the check; poll for the outcome rather than
+    // holding the connection open while mailboxes are downloaded.
     fetch('/web/admin/email-settings/check-emails', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'}
     })
     .then(response => response.json())
     .then(data => {
-        btn.disabled = false;
-        btn.textContent = 'Check Emails Now';
-        if (data.success) {
-            let msg = '✓ ' + data.message;
-            if (data.errors && data.errors.length > 0) {
-                msg += '\n\nConnection errors:\n• ' + data.errors.join('\n• ');
-            }
-            alert(msg);
-        } else {
-            alert('✗ Failed to check emails: ' + (data.error || 'Unknown error'));
+        if (!data.success) {
+            finish('Failed to check emails: ' + (data.error || 'Unknown error'));
+            return;
         }
+        let polls = 0;
+        const timer = setInterval(() => {
+            polls++;
+            fetch('/web/admin/email-settings/check-emails/status')
+                .then(r => r.json())
+                .then(status => {
+                    if (status.status === 'done') {
+                        clearInterval(timer);
+                        let msg = status.message;
+                        if (status.errors && status.errors.length > 0) {
+                            msg += '\n\nConnection errors:\n- ' + status.errors.join('\n- ');
+                        }
+                        finish(msg);
+                    } else if (status.status === 'error') {
+                        clearInterval(timer);
+                        finish(status.message);
+                    } else if (polls >= 180) {
+                        clearInterval(timer);
+                        finish('Still running in the background. Check the tickets list shortly.');
+                    }
+                })
+                .catch(() => {
+                    clearInterval(timer);
+                    finish('Could not read progress. Check the tickets list shortly.');
+                });
+        }, 1000);
     })
-    .catch(err => {
-        btn.disabled = false;
-        btn.textContent = 'Check Emails Now';
-        alert('✗ Error: ' + err.message);
-    });
+    .catch(err => finish('Error: ' + err.message));
 }
 
 function previewInbox() {

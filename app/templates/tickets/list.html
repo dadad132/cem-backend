@@ -866,31 +866,41 @@ async function checkEmailsAsync() {
         });
         
         const data = await response.json();
-        
+
         if (data.success) {
-            text.textContent = 'Processing emails...';
-            // Poll until the scheduler finishes the check it just triggered
-            const startedAt = new Date().toISOString();
+            text.textContent = 'Checking...';
+            // The POST above only starts the check, so poll this company's
+            // own job state until it reports done. Comparing timestamps
+            // across browser and server used to make this never finish.
             let polls = 0;
-            const maxPolls = 60; // Max 60 seconds
+            const maxPolls = 180; // give a large mailbox time to drain
             const pollInterval = setInterval(async () => {
                 polls++;
                 try {
                     const statusResp = await fetch('/web/admin/email-settings/check-emails/status');
                     const status = await statusResp.json();
-                    // Done when scheduler is no longer checking AND completed after we triggered
-                    if (!status.checking && status.completed_at && status.completed_at >= startedAt) {
+
+                    if (status.status === 'done') {
                         clearInterval(pollInterval);
-                        showToast('✓ Email check complete — reloading...', 'success');
-                        setTimeout(() => window.location.reload(), 500);
+                        if (status.tickets_created > 0) {
+                            showToast('✓ ' + status.message + ' Reloading...', 'success');
+                            setTimeout(() => window.location.reload(), 800);
+                        } else {
+                            showToast('✓ ' + status.message, 'success');
+                            resetCheckEmailsBtn();
+                        }
+                    } else if (status.status === 'error') {
+                        clearInterval(pollInterval);
+                        showToast('✗ ' + status.message, 'error');
+                        resetCheckEmailsBtn();
                     } else if (polls >= maxPolls) {
                         clearInterval(pollInterval);
-                        showToast('⚠ Email check is still running — reload the page manually', 'warning');
+                        showToast('⚠ Still running in the background — reload shortly to see new tickets', 'warning');
                         resetCheckEmailsBtn();
                     }
                 } catch (e) {
                     clearInterval(pollInterval);
-                    showToast('⚠ Could not check status — reload the page manually', 'warning');
+                    showToast('⚠ Could not read progress — reload the page manually', 'warning');
                     resetCheckEmailsBtn();
                 }
             }, 1000);

@@ -5114,74 +5114,69 @@ async def web_admin_email_settings_test(request: Request, db: AsyncSession = Dep
 
 @router.post('/admin/email-settings/check-emails')
 async def web_admin_check_emails(request: Request, db: AsyncSession = Depends(get_session)):
-    """Run an immediate email check and return real results (tickets created, errors)."""
+    """Start an email check for this company and return straight away.
+
+    The work used to run inside this request, so the browser sat waiting for up
+    to two minutes and the button appeared to hang. It now starts in the
+    background and the page polls the status endpoint below.
+    """
     user_id = request.session.get('user_id')
     if not user_id:
         return JSONResponse({'success': False, 'error': 'Not authenticated'})
 
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user:
-        return JSONResponse({'success': False, 'error': 'User not found'})
+    if not user or not user.is_active:
+        return JSONResponse({'success': False, 'error': 'Not authenticated'})
+    if not user.workspace_id:
+        return JSONResponse({'success': False, 'error': 'No company assigned to this account'})
 
-    try:
-        import asyncio as _asyncio
-        from app.core.email_scheduler_v2 import run_email_check_direct
+    import asyncio as _asyncio
+    from app.core.email_scheduler_v2 import get_manual_check_state, run_manual_check
 
-        result = await _asyncio.wait_for(run_email_check_direct(), timeout=120)
-
-        tickets = result['tickets_created']
-        checked = result['accounts_checked']
-        errors = result['errors']
-
-        if checked == 0:
-            message = 'No email accounts are configured.'
-        elif tickets > 0:
-            message = f"Found {tickets} new email(s) — {tickets} ticket(s) created across {checked} account(s)."
-        else:
-            message = f"No new emails found across {checked} account(s)."
-
-        if errors:
-            message += f" {len(errors)} account(s) had connection errors."
-
+    workspace_id = user.workspace_id
+    if get_manual_check_state(workspace_id).get('status') == 'running':
         return JSONResponse({
             'success': True,
-            'tickets_created': tickets,
-            'accounts_checked': checked,
-            'errors': errors,
-            'message': message,
+            'started': False,
+            'message': 'An email check is already running for this company.',
         })
 
-    except _asyncio.TimeoutError:
-        return JSONResponse({
-            'success': True,
-            'tickets_created': 0,
-            'accounts_checked': 0,
-            'errors': [],
-            'message': 'Email check is taking longer than 2 minutes. Tickets will be created by the background scheduler.',
-        })
-    except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        logger.error(f"Email check error: {error_details}")
-        return JSONResponse({'success': False, 'error': str(e), 'details': error_details})
+    # Only this company's mailboxes; the button must not reach into another's.
+    _asyncio.create_task(run_manual_check(workspace_id))
+
+    return JSONResponse({
+        'success': True,
+        'started': True,
+        'message': 'Checking for new emails...',
+    })
 
 
 @router.get('/admin/email-settings/check-emails/status')
-async def web_admin_check_emails_status(request: Request):
-    """Poll endpoint: returns whether the email scheduler is currently checking or has completed."""
+async def web_admin_check_emails_status(request: Request, db: AsyncSession = Depends(get_session)):
+    """Poll endpoint: progress of THIS company's manual email check.
+
+    It previously reported the background scheduler's state, which the manual
+    check never touches, so the page could poll forever without ever seeing a
+    completion.
+    """
     user_id = request.session.get('user_id')
     if not user_id:
         return JSONResponse({'error': 'Not authenticated'}, status_code=401)
-    
-    from app.core.email_scheduler_v2 import email_scheduler
-    
-    completed_at = None
-    if email_scheduler._last_check_completed_at:
-        completed_at = email_scheduler._last_check_completed_at.isoformat()
-    
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.workspace_id:
+        return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+
+    from app.core.email_scheduler_v2 import get_manual_check_state
+
+    state = get_manual_check_state(user.workspace_id)
     return JSONResponse({
-        'checking': email_scheduler._checking,
-        'completed_at': completed_at,
+        'status': state['status'],           # idle | running | done | error
+        'checking': state['status'] == 'running',
+        'message': state['message'],
+        'tickets_created': state['tickets_created'],
+        'accounts_checked': state['accounts_checked'],
+        'errors': state['errors'],
     })
 
 
