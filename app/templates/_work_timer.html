@@ -1,21 +1,26 @@
-{# Time Worked bar on the ticket page. POST /web/tickets/{id}/timer/{action}
-   returns this on its own so the page can swap it in place (see detail.html). #}
+{# Time Worked bar for a ticket or task page. Expects:
+     timer         state from app/core/work_timer.timer_state (+ user_names)
+     timer_url     e.g. /web/tasks/5/timer; POST {timer_url}/start|pause
+                   returns this bar on its own so the page swaps it in place
+     timer_locked  true once the ticket is closed / task is done (no buttons)
+     timer_noun    "ticket" or "task"
+   Styles and script: _work_timer_assets.html #}
 {% set tz = workspace.timezone if workspace and workspace.timezone else 'UTC' %}
-{% if ticket.status != 'closed' or timer.entries %}
-<div id="ticketTimer" class="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 px-4 sm:px-6 py-4"
+{% if not timer_locked or timer.entries %}
+<div id="workTimer" class="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 px-4 sm:px-6 py-4"
      data-seconds="{{ timer.total_seconds }}" data-running="{{ 1 if timer.running else 0 }}">
     <div class="flex flex-wrap items-center gap-4">
-        <div class="tt-icon {% if timer.running %}tt-running{% elif timer.entries and ticket.status != 'closed' %}tt-paused{% endif %}">
+        <div class="tt-icon {% if timer.running %}tt-running{% elif timer.entries and not timer_locked %}tt-paused{% endif %}">
             <i class="fas fa-stopwatch"></i>
         </div>
         <div class="min-w-0">
             <p class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Time Worked</p>
             <div class="tt-readout">
-                <span class="tt-clock js-ticket-timer">{{ timer.total_seconds|format_clock }}</span>
+                <span class="tt-clock js-work-timer">{{ timer.total_seconds|format_clock }}</span>
                 {% if timer.running %}
                 <span class="tt-badge tt-badge-running"><span class="tt-dot"></span>Running since {{ timer.running_since | format_datetime_tz(tz, '%b %d, %I:%M %p') }}</span>
-                {% elif ticket.status == 'closed' %}
-                <span class="tt-badge">Stopped &mdash; ticket closed</span>
+                {% elif timer_locked %}
+                <span class="tt-badge">Stopped &mdash; {{ timer_noun }} {{ 'closed' if timer_noun == 'ticket' else 'completed' }}</span>
                 {% elif timer.entries %}
                 <span class="tt-badge tt-badge-paused"><i class="fas fa-pause"></i>Paused</span>
                 {% else %}
@@ -24,13 +29,13 @@
             </div>
             {% if timer.running %}
             <p class="text-xs text-gray-500 mt-1">Pause when you step away, like lunch or waiting for a reply, so only working time counts.</p>
-            {% elif ticket.status != 'closed' and not timer.entries %}
-            <p class="text-xs text-gray-500 mt-1">Start the timer when you begin working on this ticket.</p>
+            {% elif not timer_locked and not timer.entries %}
+            <p class="text-xs text-gray-500 mt-1">Start the timer when you begin working on this {{ timer_noun }}.</p>
             {% endif %}
         </div>
 
-        {% if ticket.status != 'closed' %}
-        <form method="post" action="/web/tickets/{{ ticket.id }}/timer/{{ 'pause' if timer.running else 'start' }}"
+        {% if not timer_locked %}
+        <form method="post" action="{{ timer_url }}/{{ 'pause' if timer.running else 'start' }}"
               class="js-timer-form w-full sm:w-auto sm:ml-auto">
             {% if timer.running %}
             <button type="submit" class="tt-button w-full sm:w-auto px-5 py-2 bg-amber-600 text-white rounded-md hover:bg-amber-700 disabled:opacity-50">

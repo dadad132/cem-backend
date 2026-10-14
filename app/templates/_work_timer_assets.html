@@ -1,0 +1,80 @@
+{# Styles and script for the Time Worked bar (_work_timer.html). Include once per page. #}
+<style>
+  #workTimer .tt-icon {
+    width:2.75rem; height:2.75rem; border-radius:.75rem; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center; font-size:1.15rem;
+    background:#f1f5f9; color:#94a3b8;
+  }
+  #workTimer .tt-icon.tt-running { background:#dcfce7; color:#16a34a; }
+  #workTimer .tt-icon.tt-paused { background:#fef3c7; color:#d97706; }
+  #workTimer .tt-readout { display:flex; flex-wrap:wrap; align-items:center; column-gap:.75rem; row-gap:.25rem; }
+  #workTimer .tt-clock {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size:1.75rem; font-weight:700; line-height:1.15; color:#111827;
+    font-variant-numeric: tabular-nums; letter-spacing:.02em;
+  }
+  #workTimer .tt-badge {
+    display:inline-flex; align-items:center; gap:.375rem; white-space:nowrap;
+    font-size:.72rem; font-weight:600; padding:.15rem .6rem; border-radius:9999px;
+    background:#f1f5f9; color:#475569;
+  }
+  #workTimer .tt-badge-running { background:#dcfce7; color:#166534; }
+  #workTimer .tt-badge-paused { background:#fef3c7; color:#92400e; }
+  #workTimer .tt-badge-paused i { font-size:.6rem; }
+  #workTimer .tt-dot {
+    width:.5rem; height:.5rem; border-radius:9999px; background:#16a34a;
+    animation: tt-pulse 1.6s ease-in-out infinite;
+  }
+  #workTimer .tt-button { min-width:8rem; }
+  @keyframes tt-pulse { 0%, 100% { opacity:1; } 50% { opacity:.3; } }
+</style>
+<script>
+// Work timer: tick the clock while it runs, and Start/Pause without reloading
+// the page (so a half-written comment is not lost)
+(function () {
+    var baseSeconds = 0, running = false, renderedAt = 0;
+
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    function formatClock(total) {
+        total = Math.max(0, Math.floor(total));
+        return pad(Math.floor(total / 3600)) + ':' + pad(Math.floor(total % 3600 / 60)) + ':' + pad(total % 60);
+    }
+    function render() {
+        var elapsed = running ? (Date.now() - renderedAt) / 1000 : 0;
+        var text = formatClock(baseSeconds + elapsed);
+        document.querySelectorAll('.js-work-timer').forEach(function (el) { el.textContent = text; });
+    }
+    function bind() {
+        var card = document.getElementById('workTimer');
+        if (!card) { running = false; return; }
+        baseSeconds = parseInt(card.dataset.seconds, 10) || 0;
+        running = card.dataset.running === '1';
+        renderedAt = Date.now();
+        render();
+
+        var form = card.querySelector('.js-timer-form');
+        if (!form) return;
+        form.addEventListener('submit', function (e) {
+            e.preventDefault();
+            var btn = form.querySelector('button');
+            btn.disabled = true;
+            fetch(form.action, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                .then(function (res) {
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    return res.text();
+                })
+                .then(function (html) {
+                    card.outerHTML = html;
+                    bind();
+                })
+                .catch(function () {
+                    btn.disabled = false;
+                    alert('Could not update the timer. Please try again.');
+                });
+        });
+    }
+
+    bind();
+    setInterval(function () { if (running) render(); }, 1000);
+})();
+</script>

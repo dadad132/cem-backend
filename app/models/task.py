@@ -57,6 +57,8 @@ class Task(TaskBase, table=True):
     creator_id: int = Field(foreign_key="user.id", index=True)
     # Subtask support - parent task relationship
     parent_task_id: Optional[int] = Field(default=None, foreign_key="task.id", index=True)
+    # How the task was completed: sla (covered by the client's SLA, nothing to bill) or billable
+    close_type: Optional[str] = None
 
 
 class TaskCreate(SQLModel):

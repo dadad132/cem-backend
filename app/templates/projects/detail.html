@@ -398,6 +398,22 @@ function taskSuggestions() {
   }
   .jcb-input:focus { border-bottom-color:var(--ac); }
   .jcb-input::placeholder { color:#94a3b8; }
+  .jc-option {
+    width:100%; display:flex; align-items:flex-start; gap:.875rem; text-align:left;
+    padding:1rem; border:1.5px solid #e2e8f0; border-radius:.875rem; background:#fff;
+    cursor:pointer; transition:border-color .15s, box-shadow .15s;
+  }
+  .jc-option:hover { border-color: var(--ac); box-shadow: 0 4px 14px var(--ac-12); }
+  .jc-option:focus-visible { outline: 2px solid var(--ac); outline-offset: 2px; }
+  .jc-option:disabled { opacity:.6; cursor:wait; }
+  .jc-option-icon {
+    width:2.5rem; height:2.5rem; border-radius:.75rem; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center;
+    background: var(--ac-12); color: var(--ac);
+  }
+  .jc-option-title { display:block; font-weight:700; font-size:.95rem; color:#1e293b; }
+  .jc-option-desc { display:block; margin-top:.15rem; font-size:.78rem; line-height:1.4; color:#64748b; }
+  .jc-option-arrow { align-self:center; margin-left:auto; color:#cbd5e1; }
 </style>
 <div id="completeTaskModal" class="hidden fixed inset-0 z-50 flex justify-end">
   <div class="jc-panel w-full max-w-md h-full flex flex-col bg-white shadow-2xl border-l border-slate-200">
@@ -407,10 +423,11 @@ function taskSuggestions() {
       <div class="flex items-start justify-between">
         <div>
           <div class="flex items-center gap-2 mb-1">
-            <i class="fas fa-file-invoice-dollar text-xs" style="color:rgba(255,255,255,0.6)"></i>
-            <span class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(255,255,255,0.6)">Job Card</span>
+            <i class="fas fa-check text-xs" style="color:rgba(255,255,255,0.6)"></i>
+            <span class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(255,255,255,0.6)">Complete Task</span>
           </div>
-          <h2 class="text-white text-lg font-bold leading-tight">Complete Task</h2>
+          <h2 class="text-white text-lg font-bold leading-tight" data-close-step="choose">SLA or Billable?</h2>
+          <h2 class="text-white text-lg font-bold leading-tight hidden" data-close-step="billable">Billable Job Card</h2>
           <p id="completeTaskModalTitle" class="text-xs mt-0.5" style="color:rgba(255,255,255,0.6)"></p>
         </div>
         <button onclick="closeCompleteTaskModal()" class="hover:text-white transition mt-0.5" style="color:rgba(255,255,255,0.6)">
@@ -419,8 +436,35 @@ function taskSuggestions() {
       </div>
     </div>
 
-    <form id="completeTaskForm" class="flex flex-col flex-1 overflow-hidden">
+    <!-- Step 1: SLA or Billable -->
+    <div class="flex-1 px-6 py-5 space-y-3" data-close-step="choose">
+      <p class="text-sm text-slate-500">Is this work covered by the client's SLA, or is it billable?</p>
+
+      <button type="button" class="jc-option" onclick="submitTaskCompletion('sla', this)">
+        <span class="jc-option-icon"><i class="fas fa-file-contract"></i></span>
+        <span class="min-w-0">
+          <span class="jc-option-title">SLA</span>
+          <span class="jc-option-desc">Covered by the SLA, so there is nothing to bill. The task is completed straight away.</span>
+        </span>
+      </button>
+
+      <button type="button" class="jc-option" onclick="showCompleteStep('billable')">
+        <span class="jc-option-icon"><i class="fas fa-file-invoice-dollar"></i></span>
+        <span class="min-w-0">
+          <span class="jc-option-title">Billable</span>
+          <span class="jc-option-desc">Fill in the job card: labour, travel and sundries. The PDF job card is emailed to billing.</span>
+        </span>
+        <i class="fas fa-chevron-right jc-option-arrow"></i>
+      </button>
+    </div>
+
+    <!-- Step 2: Billable job card -->
+    <form id="completeTaskForm" class="flex flex-col flex-1 overflow-hidden hidden" data-close-step="billable">
       <div class="flex-1 px-6 py-5 space-y-6 overflow-y-auto">
+
+        <button type="button" onclick="showCompleteStep('choose')" class="text-xs font-medium text-slate-500 hover:text-slate-700 transition">
+          <i class="fas fa-arrow-left mr-1"></i>Back
+        </button>
 
         <!-- Client Details -->
         <div>
@@ -512,7 +556,7 @@ function taskSuggestions() {
                 class="flex-1 py-2.5 text-sm text-slate-600 bg-slate-100 rounded-xl hover:bg-slate-200 transition font-medium">
           Cancel
         </button>
-        <button type="button" onclick="submitTaskCompletion()"
+        <button type="button" onclick="submitTaskCompletion('billable', this)"
                 class="flex-1 py-2.5 text-sm text-white rounded-xl font-semibold flex items-center justify-center gap-2 transition"
                 style="background:linear-gradient(135deg, var(--ac-d), var(--ac))">
           <i class="fas fa-check"></i>
@@ -562,6 +606,7 @@ document.addEventListener('DOMContentLoaded', function() {
             oldIndex: evt.oldIndex
           };
           document.getElementById('completeTaskModalTitle').textContent = taskTitle;
+          showCompleteStep('choose');
           document.getElementById('completeTaskModal').classList.remove('hidden');
           return; // Don't submit yet, wait for modal
         }
@@ -605,11 +650,20 @@ function closeCompleteTaskModal() {
   }
 }
 
-async function submitTaskCompletion() {
+// Completing is two steps: choose SLA or Billable, then (billable only) the job card
+function showCompleteStep(step) {
+  document.querySelectorAll('#completeTaskModal [data-close-step]').forEach(function (el) {
+    el.classList.toggle('hidden', el.dataset.closeStep !== step);
+  });
+}
+
+async function submitTaskCompletion(closeType, btn) {
   if (!pendingTaskCompletion) return;
   
   const form = document.getElementById('completeTaskForm');
   const formData = new FormData(form);
+  formData.set('close_type', closeType);
+  if (btn) btn.disabled = true;
   
   try {
     const res = await fetch(`/web/tasks/${pendingTaskCompletion.taskId}/complete-with-details`, {
@@ -628,6 +682,8 @@ async function submitTaskCompletion() {
     
     // Close modal
     document.getElementById('completeTaskModal').classList.add('hidden');
+    form.reset();
+    if (btn) btn.disabled = false;
     
     // Remove task from kanban (it's now archived)
     pendingTaskCompletion.element.remove();
@@ -639,6 +695,7 @@ async function submitTaskCompletion() {
   } catch (e) {
     console.error('Error completing task:', e);
     // Revert on fail
+    if (btn) btn.disabled = false;
     closeCompleteTaskModal();
     alert('Could not complete task');
   }

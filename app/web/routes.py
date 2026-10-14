@@ -42,6 +42,7 @@ from app.models.assignment import Assignment
 from app.models.comment import Comment
 from app.models.comment_attachment import CommentAttachment
 from app.models.task_history import TaskHistory
+from app.models.task_extensions import TaskTimeEntry
 from app.models.notification import Notification
 from app.models.chat import Chat, ChatMember, Message
 from app.models.meeting import Meeting, MeetingAttendee
@@ -155,7 +156,7 @@ templates.env.globals['now'] = datetime.utcnow
 templates.env.filters['format_datetime_tz'] = format_datetime_tz
 
 # Ticket timer durations: "3h 05m" and stopwatch "03:05:09"
-from app.core.ticket_timer import format_clock as _format_clock, format_duration as _format_duration
+from app.core.work_timer import format_clock as _format_clock, format_duration as _format_duration
 templates.env.filters['format_duration'] = _format_duration
 templates.env.filters['format_clock'] = _format_clock
 
@@ -8006,7 +8007,102 @@ async def web_task_detail(request: Request, task_id: int, db: AsyncSession = Dep
         'workspace': workspace,
         'comment_time_fmt': comment_time_fmt,
         'comment_tz': comment_tz,
+        'timer': await _work_timer_context(db, TaskTimeEntry.task_id, task_id),
     })
+
+
+async def _stop_task_timer(db: AsyncSession, task, now: Optional[datetime] = None) -> int:
+    """Stop the task's timer and copy its total into time_spent_hours.
+
+    Returns the seconds worked. time_spent_hours is what task lists and
+    reports show, so it follows the timer once the timer has been used.
+    """
+    from app.core.work_timer import get_time_entries, stop_timer, worked_seconds
+
+    now = now or datetime.utcnow()
+    await stop_timer(db, TaskTimeEntry.task_id, task.id, now)
+    await db.flush()
+    entries = await get_time_entries(db, TaskTimeEntry.task_id, task.id)
+    seconds = worked_seconds(entries, now)
+    if entries:
+        task.time_spent_hours = round(seconds / 3600, 2)
+    return seconds
+
+
+@router.post('/tasks/{task_id}/timer/{action}')
+async def web_task_timer(
+    request: Request,
+    task_id: int,
+    action: str,
+    db: AsyncSession = Depends(get_session)
+):
+    """Start/resume or pause the work timer on a task.
+
+    AJAX requests get the re-rendered Time Worked bar back; plain form posts
+    are redirected to the task.
+    """
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+    user_id = request.session.get('user_id')
+    if not user_id:
+        if is_ajax:
+            return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+        return RedirectResponse('/web/login', status_code=303)
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        if is_ajax:
+            return JSONResponse({'error': 'User not found'}, status_code=401)
+        return RedirectResponse('/web/login', status_code=303)
+
+    if action not in ('start', 'pause'):
+        if is_ajax:
+            return JSONResponse({'error': 'Action must be start or pause'}, status_code=400)
+        return RedirectResponse(f'/web/tasks/{task_id}', status_code=303)
+
+    task = (await db.execute(select(Task).join(Project, Task.project_id == Project.id).where(
+        Task.id == task_id,
+        Project.workspace_id == user.workspace_id
+    ))).scalar_one_or_none()
+    if not task:
+        if is_ajax:
+            return JSONResponse({'error': 'Task not found'}, status_code=404)
+        return RedirectResponse('/web/projects', status_code=303)
+
+    # Same rule as changing a task's status: admin or project member
+    if not user.is_admin:
+        from app.models.project_member import ProjectMember
+        member = (await db.execute(select(ProjectMember).where(
+            ProjectMember.project_id == task.project_id,
+            ProjectMember.user_id == user_id
+        ))).scalar_one_or_none()
+        if not member:
+            if is_ajax:
+                return JSONResponse({'error': 'You must be a project member to time this task'}, status_code=403)
+            return RedirectResponse(f'/web/tasks/{task_id}', status_code=303)
+
+    from app.core.work_timer import start_timer
+
+    # A completed task's timer stays stopped; the bar re-renders without buttons
+    is_done = task.status == TaskStatus.done
+    if action == 'start' and not is_done:
+        await start_timer(db, TaskTimeEntry.task_id, task_id, user_id)
+    elif action == 'pause':
+        await _stop_task_timer(db, task)
+    await db.commit()
+
+    if is_ajax:
+        workspace = (await db.execute(
+            select(Workspace).where(Workspace.id == user.workspace_id)
+        )).scalar_one_or_none()
+        return templates.TemplateResponse('_work_timer.html', {
+            'request': request,
+            'workspace': workspace,
+            'timer': await _work_timer_context(db, TaskTimeEntry.task_id, task_id),
+            'timer_url': f'/web/tasks/{task_id}/timer',
+            'timer_locked': is_done,
+            'timer_noun': 'task',
+        })
+    return RedirectResponse(f'/web/tasks/{task_id}', status_code=303)
 
 
 @router.post('/tasks/{task_id}/update')
@@ -8078,6 +8174,7 @@ async def web_task_update(
             task.is_archived = True
             task.archived_at = datetime.utcnow()
             task_just_completed = True  # Flag to send completion notification
+            await _stop_task_timer(db, task)  # no more work is timed on a done task
         elif old_status_value == 'done' and new_status.value != 'done':
             # Unarchive if moved out of done
             task.is_archived = False
@@ -8151,6 +8248,8 @@ async def web_task_update(
 async def web_task_complete_with_details(
     request: Request,
     task_id: int,
+    # 'sla' or 'billable'
+    close_type: Optional[str] = Form(None),
     # Client details
     customer_name: Optional[str] = Form(None),
     customer_surname: Optional[str] = Form(None),
@@ -8164,7 +8263,7 @@ async def web_task_complete_with_details(
     completion_notes: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_session)
 ):
-    """Complete task with optional billing/work details"""
+    """Complete a task as SLA (nothing to bill) or Billable (with job card details)"""
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
@@ -8186,26 +8285,44 @@ async def web_task_complete_with_details(
     # Record old status for history
     old_status = task.status.value
     
+    # SLA work is covered by the client's agreement, so there is no job card.
+    # Anything else is billable, which is also what forms without the choice sent.
+    is_sla = (close_type or '').strip().lower() == 'sla'
+    now = datetime.utcnow()
+
     # Update task to done
     task.status = TaskStatus.done
-    task.updated_at = datetime.utcnow()
+    task.close_type = 'sla' if is_sla else 'billable'
+    task.updated_at = now
     task.is_archived = True
-    task.archived_at = datetime.utcnow()
+    task.archived_at = now
+
+    # No more work is timed on a done task
+    from app.core.work_timer import format_duration
+    worked = await _stop_task_timer(db, task, now)
+    time_worked = format_duration(worked) if worked else None
     
     def _c(v):
         return v.strip() if v and v.strip() else None
 
-    # Save client details
-    task.customer_name = _c(customer_name)
-    task.customer_surname = _c(customer_surname)
-    task.customer_phone = _c(customer_phone)
-    task.customer_office_number = _c(customer_office_number)
-    # Save billable details
-    task.billable_traveling = _c(billable_traveling)
-    task.billable_labour_onsite = _c(billable_labour_onsite)
-    task.billable_remote_labour = _c(billable_remote_labour)
-    task.billable_equipment_used = _c(billable_equipment_used)
-    task.completion_notes = _c(completion_notes)
+    if is_sla:
+        # Nothing is billable, even if an earlier completion of this task was
+        task.billable_traveling = None
+        task.billable_labour_onsite = None
+        task.billable_remote_labour = None
+        task.billable_equipment_used = None
+    else:
+        # Save client details
+        task.customer_name = _c(customer_name)
+        task.customer_surname = _c(customer_surname)
+        task.customer_phone = _c(customer_phone)
+        task.customer_office_number = _c(customer_office_number)
+        # Save billable details
+        task.billable_traveling = _c(billable_traveling)
+        task.billable_labour_onsite = _c(billable_labour_onsite)
+        task.billable_remote_labour = _c(billable_remote_labour)
+        task.billable_equipment_used = _c(billable_equipment_used)
+        task.completion_notes = _c(completion_notes)
     
     # Add history
     history_entry = TaskHistory(
@@ -8216,6 +8333,13 @@ async def web_task_complete_with_details(
         new_value='done'
     )
     db.add(history_entry)
+    db.add(TaskHistory(
+        task_id=task_id,
+        editor_id=user_id,
+        field='close_type',
+        old_value=None,
+        new_value='SLA' if is_sla else 'Billable'
+    ))
     
     await db.commit()
 
@@ -8224,55 +8348,61 @@ async def web_task_complete_with_details(
     additional_details_parts = []
     if project:
         additional_details_parts.append(f"Project: {project.name}")
-    client_parts = [task.customer_name, task.customer_surname, task.customer_phone, task.customer_office_number]
-    if any(client_parts):
-        additional_details_parts.append("CLIENT: " + ", ".join(p for p in client_parts if p))
-    for label, val in [
-        ("Traveling", task.billable_traveling),
-        ("Labour Onsite", task.billable_labour_onsite),
-        ("Remote Labour", task.billable_remote_labour),
-        ("Sundries", task.billable_equipment_used),
-    ]:
-        if val:
-            additional_details_parts.append(f"  {label}: {val}")
-    if task.completion_notes:
-        additional_details_parts.append(f"Notes: {task.completion_notes}")
+    additional_details_parts.append("Close Type: SLA (not billable)" if is_sla else "Close Type: Billable")
+    if time_worked:
+        additional_details_parts.append(f"Time Worked: {time_worked}")
+    if not is_sla:
+        client_parts = [task.customer_name, task.customer_surname, task.customer_phone, task.customer_office_number]
+        if any(client_parts):
+            additional_details_parts.append("CLIENT: " + ", ".join(p for p in client_parts if p))
+        for label, val in [
+            ("Traveling", task.billable_traveling),
+            ("Labour Onsite", task.billable_labour_onsite),
+            ("Remote Labour", task.billable_remote_labour),
+            ("Sundries", task.billable_equipment_used),
+        ]:
+            if val:
+                additional_details_parts.append(f"  {label}: {val}")
+        if task.completion_notes:
+            additional_details_parts.append(f"Notes: {task.completion_notes}")
     additional_details = "\n".join(additional_details_parts)
 
-    # Generate PDF job card
+    # Generate PDF job card (billable only)
     task_pdf_bytes = None
-    try:
-        from app.core.job_card_pdf import generate_job_card_pdf
-        from app.models.workspace import Workspace as WS
-        ws = (await db.execute(select(WS).where(WS.id == user.workspace_id))).scalar_one_or_none()
-        logo_path = None
-        company_name = "Support Team"
-        if ws:
-            company_name = ws.name or company_name
-            if ws.logo_url:
-                import os as _os
-                logo_path = _os.path.join(_os.getcwd(), "app", ws.logo_url.lstrip("/"))
-        task_pdf_bytes = generate_job_card_pdf(
-            ticket_number=str(task_id),
-            subject=task.title,
-            priority=task.priority.value.title() if task.priority else "Normal",
-            created_at=task.created_at,
-            closed_at=task.archived_at or datetime.utcnow(),
-            technician_name=user.full_name or user.username,
-            client_name=task.customer_name,
-            client_surname=task.customer_surname,
-            client_phone=task.customer_phone,
-            client_office_number=task.customer_office_number,
-            billable_traveling=task.billable_traveling,
-            billable_labour_onsite=task.billable_labour_onsite,
-            billable_remote_labour=task.billable_remote_labour,
-            billable_sundries=task.billable_equipment_used,
-            additional_notes=task.completion_notes,
-            company_name=company_name,
-            logo_path=logo_path,
-        )
-    except Exception as e:
-        logger.error(f"Failed to generate job card PDF for task {task_id}: {e}")
+    if not is_sla:
+        try:
+            from app.core.job_card_pdf import generate_job_card_pdf
+            from app.models.workspace import Workspace as WS
+            ws = (await db.execute(select(WS).where(WS.id == user.workspace_id))).scalar_one_or_none()
+            logo_path = None
+            company_name = "Support Team"
+            if ws:
+                company_name = ws.name or company_name
+                if ws.logo_url:
+                    import os as _os
+                    logo_path = _os.path.join(_os.getcwd(), "app", ws.logo_url.lstrip("/"))
+            task_pdf_bytes = generate_job_card_pdf(
+                ticket_number=str(task_id),
+                subject=task.title,
+                priority=task.priority.value.title() if task.priority else "Normal",
+                created_at=task.created_at,
+                closed_at=task.archived_at or datetime.utcnow(),
+                technician_name=user.full_name or user.username,
+                client_name=task.customer_name,
+                client_surname=task.customer_surname,
+                client_phone=task.customer_phone,
+                client_office_number=task.customer_office_number,
+                billable_traveling=task.billable_traveling,
+                billable_labour_onsite=task.billable_labour_onsite,
+                billable_remote_labour=task.billable_remote_labour,
+                billable_sundries=task.billable_equipment_used,
+                additional_notes=task.completion_notes,
+                time_worked=time_worked,
+                company_name=company_name,
+                logo_path=logo_path,
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate job card PDF for task {task_id}: {e}")
 
     # Send completion notification email with PDF attachment
     try:
@@ -8301,10 +8431,14 @@ async def web_task_complete_with_details(
             'success': True, 
             'task_id': task_id,
             'title': task.title,
-            'status': 'done'
+            'status': 'done',
+            'close_type': task.close_type,
         })
     
-    request.session['success_message'] = f'Task "{task.title}" has been completed.'
+    if is_sla:
+        request.session['success_message'] = f'Task "{task.title}" has been completed under SLA.'
+    else:
+        request.session['success_message'] = f'Task "{task.title}" has been completed.'
     return RedirectResponse(f'/web/tasks/{task_id}', status_code=303)
 
 
@@ -8968,6 +9102,7 @@ async def web_task_update_status(request: Request, task_id: int, status_value: s
     if status_value == 'done':
         task.is_archived = True
         task.archived_at = datetime.utcnow()
+        await _stop_task_timer(db, task)  # no more work is timed on a done task
     elif old_status == 'done' and status_value != 'done':
         # Unarchive if moved out of done
         task.is_archived = False
@@ -9156,6 +9291,8 @@ async def web_task_delete(request: Request, task_id: int, db: AsyncSession = Dep
             except Exception:
                 pass
     
+    from sqlalchemy import delete as sa_delete
+    await db.execute(sa_delete(TaskTimeEntry).where(TaskTimeEntry.task_id == task_id))
     # Delete the task (cascade will handle assignments, comments, etc.)
     await db.delete(task)
     await db.commit()
@@ -14445,11 +14582,14 @@ async def web_tickets_archived(request: Request, db: AsyncSession = Depends(get_
     })
 
 
-async def _ticket_timer_context(db: AsyncSession, ticket_id: int) -> dict:
-    """Timer state for the Time Worked card, with the names of who worked."""
-    from app.core.ticket_timer import timer_state
+async def _work_timer_context(db: AsyncSession, owner_col, owner_id: int) -> dict:
+    """Timer state for the Time Worked bar, with the names of who worked.
 
-    timer = await timer_state(db, ticket_id)
+    owner_col is TicketTimeEntry.ticket_id or TaskTimeEntry.task_id.
+    """
+    from app.core.work_timer import timer_state
+
+    timer = await timer_state(db, owner_col, owner_id)
     user_ids = {e.user_id for e in timer['entries'] if e.user_id}
     timer['user_names'] = {}
     if user_ids:
@@ -14548,7 +14688,8 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         comment_time_fmt = '%b %d, %Y %I:%M %p'
     comment_tz = (workspace.comment_timezone or workspace.timezone or 'UTC') if workspace else 'UTC'
 
-    timer = await _ticket_timer_context(db, ticket_id)
+    from app.models.ticket import TicketTimeEntry
+    timer = await _work_timer_context(db, TicketTimeEntry.ticket_id, ticket_id)
 
     return templates.TemplateResponse('tickets/detail.html', {
         'request': request,
@@ -14600,8 +14741,8 @@ async def web_tickets_timer(
             return JSONResponse({'error': 'Action must be start or pause'}, status_code=400)
         return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
-    from app.models.ticket import Ticket
-    from app.core.ticket_timer import start_timer, stop_timer
+    from app.models.ticket import Ticket, TicketTimeEntry
+    from app.core.work_timer import start_timer, stop_timer
 
     ticket = (await db.execute(select(Ticket).where(
         Ticket.id == ticket_id,
@@ -14614,20 +14755,22 @@ async def web_tickets_timer(
 
     # A closed ticket's timer stays stopped; the card re-renders without buttons
     if action == 'start' and ticket.status != 'closed':
-        await start_timer(db, ticket_id, user_id)
+        await start_timer(db, TicketTimeEntry.ticket_id, ticket_id, user_id)
     elif action == 'pause':
-        await stop_timer(db, ticket_id)
+        await stop_timer(db, TicketTimeEntry.ticket_id, ticket_id)
     await db.commit()
 
     if is_ajax:
         workspace = (await db.execute(
             select(Workspace).where(Workspace.id == user.workspace_id)
         )).scalar_one_or_none()
-        return templates.TemplateResponse('tickets/_timer.html', {
+        return templates.TemplateResponse('_work_timer.html', {
             'request': request,
-            'ticket': ticket,
             'workspace': workspace,
-            'timer': await _ticket_timer_context(db, ticket_id),
+            'timer': await _work_timer_context(db, TicketTimeEntry.ticket_id, ticket_id),
+            'timer_url': f'/web/tickets/{ticket_id}/timer',
+            'timer_locked': ticket.status == 'closed',
+            'timer_noun': 'ticket',
         })
     return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
@@ -15116,8 +15259,9 @@ async def web_tickets_update_status(
         ticket.is_archived = True
         ticket.archived_at = datetime.utcnow()
         # No more work is timed on a closed ticket
-        from app.core.ticket_timer import stop_timer
-        await stop_timer(db, ticket_id)
+        from app.models.ticket import TicketTimeEntry
+        from app.core.work_timer import stop_timer
+        await stop_timer(db, TicketTimeEntry.ticket_id, ticket_id)
 
     # Log ticket status change for diagnostics
     try:
@@ -15231,8 +15375,8 @@ async def web_tickets_close_with_details(
     if not user:
         return RedirectResponse('/web/login', status_code=303)
 
-    from app.models.ticket import Ticket, TicketHistory
-    from app.core.ticket_timer import stop_timer, get_time_entries, worked_seconds, format_duration
+    from app.models.ticket import Ticket, TicketHistory, TicketTimeEntry
+    from app.core.work_timer import stop_timer, get_time_entries, worked_seconds, format_duration
     from datetime import datetime
 
     ticket = (await db.execute(select(Ticket).where(
@@ -15258,7 +15402,7 @@ async def web_tickets_close_with_details(
     ticket.archived_at = now
 
     # No more work is timed on a closed ticket
-    await stop_timer(db, ticket_id, now)
+    await stop_timer(db, TicketTimeEntry.ticket_id, ticket_id, now)
 
     # Log close-with-details for diagnostics
     try:
@@ -15323,7 +15467,7 @@ async def web_tickets_close_with_details(
     
     await db.commit()
 
-    worked = worked_seconds(await get_time_entries(db, ticket_id), now)
+    worked = worked_seconds(await get_time_entries(db, TicketTimeEntry.ticket_id, ticket_id), now)
     time_worked = format_duration(worked) if worked else None
 
     # Build additional details string for email body

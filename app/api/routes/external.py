@@ -18,9 +18,9 @@ from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
-from app.core.ticket_timer import stop_timer
+from app.core.work_timer import stop_timer
 from app.models.api_key import APIKey
-from app.models.ticket import Ticket, TicketComment
+from app.models.ticket import Ticket, TicketComment, TicketTimeEntry
 from app.models.workspace import Workspace
 
 router = APIRouter(prefix="/v1", tags=["External API"])
@@ -253,7 +253,7 @@ async def update_ticket(
         if payload.status == "closed" and not ticket.closed_at:
             ticket.closed_at = datetime.utcnow()
         if payload.status == "closed":
-            await stop_timer(db, ticket.id)
+            await stop_timer(db, TicketTimeEntry.ticket_id, ticket.id)
     if payload.priority:
         ticket.priority = payload.priority
     if payload.category:

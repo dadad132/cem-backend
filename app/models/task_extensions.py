@@ -153,6 +153,18 @@ class TimeLog(SQLModel, table=True):
     logged_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class TaskTimeEntry(SQLModel, table=True):
+    """One stretch of work on a task, from Start/Resume until Pause.
+
+    The entry that is still running has no ended_at. See app/core/work_timer.py.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    task_id: int = Field(foreign_key="task.id", ondelete="CASCADE", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)  # Who started it
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    ended_at: Optional[datetime] = None
+
+
 class ActivityLog(SQLModel, table=True):
     """Centralized activity feed for entire workspace"""
     id: Optional[int] = Field(default=None, primary_key=True)

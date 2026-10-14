@@ -1,4 +1,4 @@
-"""Ticket work timer: only time between Start/Resume and Pause is counted."""
+"""Work timer for tickets and tasks: only time between Start/Resume and Pause counts."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core.ticket_timer import (
+from app.core.work_timer import (
     format_clock,
     format_duration,
     start_timer,
@@ -15,6 +15,9 @@ from app.core.ticket_timer import (
     timer_state,
     worked_seconds,
 )
+from app.models.project import Project
+from app.models.task import Task
+from app.models.task_extensions import TaskTimeEntry
 from app.models.ticket import Ticket, TicketTimeEntry
 from app.models.user import User
 from app.models.workspace import Workspace
@@ -86,40 +89,64 @@ async def _seed(path):
     db.add(tech)
     await db.flush()
     ticket = Ticket(ticket_number='TKT-TEST-00001', subject='Printer offline', workspace_id=ws.id)
-    db.add(ticket)
+    project = Project(name='Office move', workspace_id=ws.id, owner_id=tech.id)
+    db.add_all([ticket, project])
+    await db.flush()
+    task = Task(title='Patch new switch', project_id=project.id, creator_id=tech.id)
+    db.add(task)
     await db.commit()
-    return engine, db, ticket, tech
+    return engine, db, ticket, task, tech
 
 
 @pytest.mark.asyncio
 async def test_start_pause_resume(tmp_path):
-    engine, db, ticket, tech = await _seed(tmp_path / 'timer.db')
+    engine, db, ticket, _task, tech = await _seed(tmp_path / 'timer.db')
+    col = TicketTimeEntry.ticket_id
     try:
-        state = await timer_state(db, ticket.id)
+        state = await timer_state(db, col, ticket.id)
         assert not state['running'] and state['total_seconds'] == 0
 
         # Each step is its own request, so commit in between
-        assert await start_timer(db, ticket.id, tech.id, now=_at(0))
+        assert await start_timer(db, col, ticket.id, tech.id, now=_at(0))
         await db.commit()
-        assert not await start_timer(db, ticket.id, tech.id, now=_at(5)), 'already running'
+        assert not await start_timer(db, col, ticket.id, tech.id, now=_at(5)), 'already running'
         await db.commit()
-        assert await stop_timer(db, ticket.id, now=_at(120))  # off to lunch
+        assert await stop_timer(db, col, ticket.id, now=_at(120))  # off to lunch
         await db.commit()
-        assert not await stop_timer(db, ticket.id, now=_at(150)), 'already paused'
+        assert not await stop_timer(db, col, ticket.id, now=_at(150)), 'already paused'
         await db.commit()
 
-        state = await timer_state(db, ticket.id, now=_at(170))
+        state = await timer_state(db, col, ticket.id, now=_at(170))
         assert not state['running']
         assert state['total_seconds'] == 120 * 60, 'lunch is not counted'
 
-        assert await start_timer(db, ticket.id, tech.id, now=_at(180))  # resume
+        assert await start_timer(db, col, ticket.id, tech.id, now=_at(180))  # resume
         await db.commit()
-        state = await timer_state(db, ticket.id, now=_at(210))
+        state = await timer_state(db, col, ticket.id, now=_at(210))
         assert state['running']
         assert state['running_since'] == _at(180)
         assert state['total_seconds'] == (120 + 30) * 60
         assert [row['seconds'] for row in state['rows']] == [120 * 60, 30 * 60]
         assert all(e.user_id == tech.id for e in state['entries'])
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_task_timer_is_separate_from_ticket_timer(tmp_path):
+    engine, db, ticket, task, tech = await _seed(tmp_path / 'timer.db')
+    try:
+        await start_timer(db, TaskTimeEntry.task_id, task.id, tech.id, now=_at(0))
+        await db.commit()
+        await stop_timer(db, TaskTimeEntry.task_id, task.id, now=_at(40))
+        await db.commit()
+        await start_timer(db, TaskTimeEntry.task_id, task.id, tech.id, now=_at(60))
+        await db.commit()
+
+        state = await timer_state(db, TaskTimeEntry.task_id, task.id, now=_at(80))
+        assert state['running'] and state['total_seconds'] == 60 * 60
+        assert (await timer_state(db, TicketTimeEntry.ticket_id, ticket.id))['entries'] == []
     finally:
         await db.close()
         await engine.dispose()

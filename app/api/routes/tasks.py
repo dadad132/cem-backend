@@ -209,6 +209,9 @@ async def delete_task(task_id: int, user_id: int = Depends(get_current_user_id),
             except Exception:
                 pass
     
+    from sqlalchemy import delete as sa_delete
+    from app.models.task_extensions import TaskTimeEntry
+    await db.execute(sa_delete(TaskTimeEntry).where(TaskTimeEntry.task_id == task_id))
     await db.delete(task)
     await db.commit()
     return None

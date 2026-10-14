@@ -112,6 +112,7 @@ TENANT_SCOPE: Dict[str, Tuple] = {
     'taskattachment': ('via', 'task', 'task_id'),
     'taskdependency': ('via', 'task', 'task_id'),
     'taskhistory': ('via', 'task', 'task_id'),
+    'tasktimeentry': ('via', 'task', 'task_id'),
     'taskwatcher': ('via', 'task', 'task_id'),
     'ticketattachment': ('via', 'ticket', 'ticket_id'),
     'ticketcomment': ('via', 'ticket', 'ticket_id'),

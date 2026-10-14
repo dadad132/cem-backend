@@ -4,6 +4,10 @@
   <a href="/web/projects/{{ project.id }}" style="color: #2563eb;" class="text-sm sm:text-base">← Back to {{ project.name }}</a>
 </div>
 
+<!-- Work timer (Start / Pause / Resume) -->
+{% with timer_url='/web/tasks/%d/timer' % task.id, timer_locked=(task.status.value == 'done'), timer_noun='task' %}{% include '_work_timer.html' %}{% endwith %}
+{% include '_work_timer_assets.html' %}
+
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
   <div class="lg:col-span-2">
     <div class="bg-white border border-slate-200 rounded p-3 sm:p-4">
@@ -92,6 +96,15 @@
       <div style="background: #f9fafb; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem;">
         <p><strong>Status:</strong> {{ task.status.value.replace('_', ' ').title() }}</p>
         <p><strong>Priority:</strong> {{ task.priority.value.title() }}</p>
+        {% if task.status.value == 'done' and task.close_type %}
+        <p><strong>Completed As:</strong>
+          {% if task.close_type == 'sla' %}
+          <span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-sky-100 text-sky-800"><i class="fas fa-file-contract mr-1"></i>SLA</span>
+          {% else %}
+          <span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800"><i class="fas fa-file-invoice-dollar mr-1"></i>Billable</span>
+          {% endif %}
+        </p>
+        {% endif %}
         {% if task.start_date %}<p><strong>Start:</strong> {{ task.start_date.strftime('%d/%m/%Y') }}{% if task.start_time %} {{ task.start_time.strftime('%H:%M') }}{% endif %}</p>{% endif %}
         {% if task.due_date %}<p><strong>Due:</strong> {{ task.due_date.strftime('%d/%m/%Y') }}{% if task.due_time %} {{ task.due_time.strftime('%H:%M') }}{% endif %}</p>{% endif %}
         {% if assignments %}
@@ -802,7 +815,15 @@ function handleTaskStatusChange(selectElement) {
 }
 
 function openCompleteTaskModal() {
+  showCompleteStep('choose');
   document.getElementById('completeTaskModal').classList.remove('hidden');
+}
+
+// Completing is two steps: choose SLA or Billable, then (billable only) the job card
+function showCompleteStep(step) {
+  document.querySelectorAll('#completeTaskModal [data-close-step]').forEach(function (el) {
+    el.classList.toggle('hidden', el.dataset.closeStep !== step);
+  });
 }
 
 function closeCompleteTaskModal() {
@@ -825,6 +846,22 @@ function closeCompleteTaskModal() {
   }
   .jct-input:focus { border-bottom-color: var(--ac); }
   .jct-input::placeholder { color:#94a3b8; }
+  .jc-option {
+    width:100%; display:flex; align-items:flex-start; gap:.875rem; text-align:left;
+    padding:1rem; border:1.5px solid #e2e8f0; border-radius:.875rem; background:#fff;
+    cursor:pointer; transition:border-color .15s, box-shadow .15s;
+  }
+  .jc-option:hover { border-color: var(--ac); box-shadow: 0 4px 14px var(--ac-12); }
+  .jc-option:focus-visible { outline: 2px solid var(--ac); outline-offset: 2px; }
+  .jc-option:disabled { opacity:.6; cursor:wait; }
+  .jc-option-icon {
+    width:2.5rem; height:2.5rem; border-radius:.75rem; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center;
+    background: var(--ac-12); color: var(--ac);
+  }
+  .jc-option-title { display:block; font-weight:700; font-size:.95rem; color:#1e293b; }
+  .jc-option-desc { display:block; margin-top:.15rem; font-size:.78rem; line-height:1.4; color:#64748b; }
+  .jc-option-arrow { align-self:center; margin-left:auto; color:#cbd5e1; }
 </style>
 <div id="completeTaskModal" class="hidden fixed inset-0 z-50 flex justify-end">
   <div class="jc-panel w-full max-w-md h-full flex flex-col bg-white shadow-2xl border-l border-slate-200">
@@ -834,10 +871,11 @@ function closeCompleteTaskModal() {
       <div class="flex items-start justify-between">
         <div>
           <div class="flex items-center gap-2 mb-1">
-            <i class="fas fa-file-invoice-dollar text-xs" style="color:rgba(255,255,255,0.6)"></i>
-            <span class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(255,255,255,0.6)">Job Card</span>
+            <i class="fas fa-check text-xs" style="color:rgba(255,255,255,0.6)"></i>
+            <span class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(255,255,255,0.6)">Complete Task</span>
           </div>
-          <h2 class="text-white text-lg font-bold leading-tight">Complete Task</h2>
+          <h2 class="text-white text-lg font-bold leading-tight" data-close-step="choose">SLA or Billable?</h2>
+          <h2 class="text-white text-lg font-bold leading-tight hidden" data-close-step="billable">Billable Job Card</h2>
           <p class="text-xs mt-0.5" style="color:rgba(255,255,255,0.55)">{{ task.title | truncate(45) }}</p>
         </div>
         <button onclick="closeCompleteTaskModal()" class="hover:text-white transition mt-0.5" style="color:rgba(255,255,255,0.6)">
@@ -846,8 +884,41 @@ function closeCompleteTaskModal() {
       </div>
     </div>
 
-    <form method="post" action="/web/tasks/{{ task.id }}/complete-with-details" class="flex flex-col flex-1 overflow-hidden">
+    <!-- Step 1: SLA or Billable -->
+    <div class="flex-1 px-6 py-5 space-y-3" data-close-step="choose">
+      <p class="text-sm text-slate-500">Is this work covered by the client's SLA, or is it billable?</p>
+
+      <form method="post" action="/web/tasks/{{ task.id }}/complete-with-details"
+            onsubmit="this.querySelector('button').disabled = true">
+        <input type="hidden" name="close_type" value="sla">
+        <button type="submit" class="jc-option">
+          <span class="jc-option-icon"><i class="fas fa-file-contract"></i></span>
+          <span class="min-w-0">
+            <span class="jc-option-title">SLA</span>
+            <span class="jc-option-desc">Covered by the SLA, so there is nothing to bill. The task is completed straight away.</span>
+          </span>
+        </button>
+      </form>
+
+      <button type="button" class="jc-option" onclick="showCompleteStep('billable')">
+        <span class="jc-option-icon"><i class="fas fa-file-invoice-dollar"></i></span>
+        <span class="min-w-0">
+          <span class="jc-option-title">Billable</span>
+          <span class="jc-option-desc">Fill in the job card: labour, travel and sundries. The PDF job card is emailed to billing.</span>
+        </span>
+        <i class="fas fa-chevron-right jc-option-arrow"></i>
+      </button>
+    </div>
+
+    <!-- Step 2: Billable job card -->
+    <form method="post" action="/web/tasks/{{ task.id }}/complete-with-details" class="flex flex-col flex-1 overflow-hidden hidden" data-close-step="billable"
+          onsubmit="this.querySelector('[type=submit]').disabled = true">
+      <input type="hidden" name="close_type" value="billable">
       <div class="flex-1 px-6 py-5 space-y-6 overflow-y-auto">
+
+        <button type="button" onclick="showCompleteStep('choose')" class="text-xs font-medium text-slate-500 hover:text-slate-700 transition">
+          <i class="fas fa-arrow-left mr-1"></i>Back
+        </button>
 
         <!-- Client Details -->
         <div>
@@ -887,6 +958,12 @@ function closeCompleteTaskModal() {
             </span>
             <span class="text-xs font-bold text-slate-500 uppercase tracking-widest">Billable Work</span>
           </div>
+          {% if timer.total_seconds %}
+          <div class="flex items-center gap-2 text-xs text-slate-500 bg-slate-50 rounded-lg px-3 py-2 border border-slate-100 mb-4">
+            <i class="fas fa-stopwatch" style="color:var(--ac)"></i>
+            <span>Timer: <span class="js-work-timer font-semibold text-slate-700">{{ timer.total_seconds|format_clock }}</span> worked on this task</span>
+          </div>
+          {% endif %}
           <div class="space-y-4">
             <div class="grid grid-cols-2 gap-x-5">
               <div>
