@@ -91,6 +91,7 @@ async def init_models() -> None:
             for table, column, ddl in (
                 ("user", "is_superadmin", "BOOLEAN NOT NULL DEFAULT 0"),
                 ("incoming_email_account", "imap_uid_state", "VARCHAR"),
+                ("ticket", "close_type", "VARCHAR"),
             ):
                 try:
                     res = await conn.exec_driver_sql(f'PRAGMA table_info("{table}")')

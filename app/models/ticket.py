@@ -40,7 +40,8 @@ class TicketBase(SQLModel):
     resolved_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
     closed_by_id: Optional[int] = Field(default=None, foreign_key="user.id")  # Track who closed the ticket
-    
+    close_type: Optional[str] = None  # sla (covered by the client's SLA, nothing to bill) or billable (job card filled in)
+
     # Scheduled date/time for calendar integration
     scheduled_date: Optional[datetime] = None
     # Working days (comma-separated: "0,1,2,3,4" for Mon-Fri, where Mon=0, Sun=6)
@@ -115,3 +116,17 @@ class TicketHistory(SQLModel, table=True):
     old_value: Optional[str] = None
     new_value: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TicketTimeEntry(SQLModel, table=True):
+    """One stretch of work on a ticket, from Start/Resume until Pause.
+
+    The entry that is still running has no ended_at. Time worked on a ticket is
+    the time its entries cover, so while the timer is paused (lunch, waiting
+    for a reply) nothing is counted.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    ticket_id: int = Field(foreign_key="ticket.id", ondelete="CASCADE", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)  # Who started it
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    ended_at: Optional[datetime] = None

@@ -79,6 +79,9 @@
         </div>
     </div>
 
+    <!-- Work timer (Start / Pause / Resume) -->
+    {% include 'tickets/_timer.html' %}
+
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <!-- Main Content -->
         <div class="lg:col-span-2 space-y-6 min-w-0">
@@ -488,6 +491,22 @@
                         </dd>
                     </div>
                     {% endif %}
+                    {% if ticket.status == 'closed' and ticket.close_type %}
+                    <div>
+                        <dt class="text-gray-500">Closed As</dt>
+                        <dd class="mt-1">
+                            {% if ticket.close_type == 'sla' %}
+                            <span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-sky-100 text-sky-800">
+                                <i class="fas fa-file-contract mr-1"></i>SLA
+                            </span>
+                            {% else %}
+                            <span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800">
+                                <i class="fas fa-file-invoice-dollar mr-1"></i>Billable
+                            </span>
+                            {% endif %}
+                        </dd>
+                    </div>
+                    {% endif %}
                 </dl>
             </div>
 
@@ -679,15 +698,104 @@ function handleStatusChange(selectElement) {
 }
 
 function openCloseTicketModal() {
+    showCloseStep('choose');
     document.getElementById('closeTicketModal').classList.remove('hidden');
 }
 
 function closeCloseTicketModal() {
     document.getElementById('closeTicketModal').classList.add('hidden');
 }
+
+// Closing is two steps: choose SLA or Billable, then (billable only) the job card
+function showCloseStep(step) {
+    document.querySelectorAll('#closeTicketModal [data-close-step]').forEach(function (el) {
+        el.classList.toggle('hidden', el.dataset.closeStep !== step);
+    });
+}
+
+// Work timer: tick the clock while it runs, and Start/Pause without reloading
+// the page (so a half-written comment is not lost)
+(function () {
+    var baseSeconds = 0, running = false, renderedAt = 0;
+
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    function formatClock(total) {
+        total = Math.max(0, Math.floor(total));
+        return pad(Math.floor(total / 3600)) + ':' + pad(Math.floor(total % 3600 / 60)) + ':' + pad(total % 60);
+    }
+    function render() {
+        var elapsed = running ? (Date.now() - renderedAt) / 1000 : 0;
+        var text = formatClock(baseSeconds + elapsed);
+        document.querySelectorAll('.js-ticket-timer').forEach(function (el) { el.textContent = text; });
+    }
+    function bind() {
+        var card = document.getElementById('ticketTimer');
+        if (!card) { running = false; return; }
+        baseSeconds = parseInt(card.dataset.seconds, 10) || 0;
+        running = card.dataset.running === '1';
+        renderedAt = Date.now();
+        render();
+
+        var form = card.querySelector('.js-timer-form');
+        if (!form) return;
+        form.addEventListener('submit', function (e) {
+            e.preventDefault();
+            var btn = form.querySelector('button');
+            btn.disabled = true;
+            fetch(form.action, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                .then(function (res) {
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    return res.text();
+                })
+                .then(function (html) {
+                    card.outerHTML = html;
+                    bind();
+                })
+                .catch(function () {
+                    btn.disabled = false;
+                    alert('Could not update the timer. Please try again.');
+                });
+        });
+    }
+
+    bind();
+    setInterval(function () { if (running) render(); }, 1000);
+})();
 </script>
 
-<!-- Job Card Drawer (slides in from right, no backdrop blackout) -->
+<!-- Work timer bar -->
+<style>
+  #ticketTimer .tt-icon {
+    width:2.75rem; height:2.75rem; border-radius:.75rem; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center; font-size:1.15rem;
+    background:#f1f5f9; color:#94a3b8;
+  }
+  #ticketTimer .tt-icon.tt-running { background:#dcfce7; color:#16a34a; }
+  #ticketTimer .tt-icon.tt-paused { background:#fef3c7; color:#d97706; }
+  #ticketTimer .tt-readout { display:flex; flex-wrap:wrap; align-items:center; column-gap:.75rem; row-gap:.25rem; }
+  #ticketTimer .tt-clock {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size:1.75rem; font-weight:700; line-height:1.15; color:#111827;
+    font-variant-numeric: tabular-nums; letter-spacing:.02em;
+  }
+  #ticketTimer .tt-badge {
+    display:inline-flex; align-items:center; gap:.375rem; white-space:nowrap;
+    font-size:.72rem; font-weight:600; padding:.15rem .6rem; border-radius:9999px;
+    background:#f1f5f9; color:#475569;
+  }
+  #ticketTimer .tt-badge-running { background:#dcfce7; color:#166534; }
+  #ticketTimer .tt-badge-paused { background:#fef3c7; color:#92400e; }
+  #ticketTimer .tt-badge-paused i { font-size:.6rem; }
+  #ticketTimer .tt-dot {
+    width:.5rem; height:.5rem; border-radius:9999px; background:#16a34a;
+    animation: tt-pulse 1.6s ease-in-out infinite;
+  }
+  #ticketTimer .tt-button { min-width:8rem; }
+  @keyframes tt-pulse { 0%, 100% { opacity:1; } 50% { opacity:.3; } }
+</style>
+
+<!-- Close Ticket Drawer (slides in from right, no backdrop blackout).
+     Step 1 chooses SLA or Billable; step 2 is the billable job card. -->
 <style>
   #closeTicketModal { transition: opacity .22s ease; }
   #closeTicketModal .jc-panel { transition: transform .25s cubic-bezier(.4,0,.2,1); }
@@ -702,6 +810,22 @@ function closeCloseTicketModal() {
   }
   .jc-input:focus { border-bottom-color: var(--ac); }
   .jc-input::placeholder { color:#94a3b8; }
+  .jc-option {
+    width:100%; display:flex; align-items:flex-start; gap:.875rem; text-align:left;
+    padding:1rem; border:1.5px solid #e2e8f0; border-radius:.875rem; background:#fff;
+    cursor:pointer; transition:border-color .15s, box-shadow .15s;
+  }
+  .jc-option:hover { border-color: var(--ac); box-shadow: 0 4px 14px var(--ac-12); }
+  .jc-option:focus-visible { outline: 2px solid var(--ac); outline-offset: 2px; }
+  .jc-option:disabled { opacity:.6; cursor:wait; }
+  .jc-option-icon {
+    width:2.5rem; height:2.5rem; border-radius:.75rem; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center;
+    background: var(--ac-12); color: var(--ac);
+  }
+  .jc-option-title { display:block; font-weight:700; font-size:.95rem; color:#1e293b; }
+  .jc-option-desc { display:block; margin-top:.15rem; font-size:.78rem; line-height:1.4; color:#64748b; }
+  .jc-option-arrow { align-self:center; margin-left:auto; color:#cbd5e1; }
 </style>
 <div id="closeTicketModal" class="hidden fixed inset-0 z-50 flex justify-end">
   <div class="jc-panel w-full max-w-md h-full flex flex-col bg-white shadow-2xl border-l border-slate-200 overflow-y-auto">
@@ -711,10 +835,11 @@ function closeCloseTicketModal() {
       <div class="flex items-start justify-between">
         <div>
           <div class="flex items-center gap-2 mb-1">
-            <i class="fas fa-file-invoice-dollar text-xs" style="color:rgba(255,255,255,0.6)"></i>
-            <span class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(255,255,255,0.6)">Job Card</span>
+            <i class="fas fa-lock text-xs" style="color:rgba(255,255,255,0.6)"></i>
+            <span class="text-xs font-semibold uppercase tracking-widest" style="color:rgba(255,255,255,0.6)">Close Ticket</span>
           </div>
-          <h2 class="text-white text-lg font-bold leading-tight">Close Ticket</h2>
+          <h2 class="text-white text-lg font-bold leading-tight" data-close-step="choose">SLA or Billable?</h2>
+          <h2 class="text-white text-lg font-bold leading-tight hidden" data-close-step="billable">Billable Job Card</h2>
           <p class="text-xs mt-0.5" style="color:rgba(255,255,255,0.55)">#{{ ticket.ticket_number }} &nbsp;·&nbsp; {{ ticket.subject | truncate(40) }}</p>
         </div>
         <button onclick="closeCloseTicketModal()" class="hover:text-white transition mt-0.5" style="color:rgba(255,255,255,0.6)">
@@ -723,8 +848,41 @@ function closeCloseTicketModal() {
       </div>
     </div>
 
-    <form method="post" action="/web/tickets/{{ ticket.id }}/close-with-details" class="flex flex-col flex-1">
+    <!-- Step 1: SLA or Billable -->
+    <div class="flex-1 px-6 py-5 space-y-3" data-close-step="choose">
+      <p class="text-sm text-slate-500">Is this work covered by the client's SLA, or is it billable?</p>
+
+      <form method="post" action="/web/tickets/{{ ticket.id }}/close-with-details"
+            onsubmit="this.querySelector('button').disabled = true">
+        <input type="hidden" name="close_type" value="sla">
+        <button type="submit" class="jc-option">
+          <span class="jc-option-icon"><i class="fas fa-file-contract"></i></span>
+          <span class="min-w-0">
+            <span class="jc-option-title">SLA</span>
+            <span class="jc-option-desc">Covered by the SLA, so there is nothing to bill. The ticket is closed straight away.</span>
+          </span>
+        </button>
+      </form>
+
+      <button type="button" class="jc-option" onclick="showCloseStep('billable')">
+        <span class="jc-option-icon"><i class="fas fa-file-invoice-dollar"></i></span>
+        <span class="min-w-0">
+          <span class="jc-option-title">Billable</span>
+          <span class="jc-option-desc">Fill in the job card: labour, travel and sundries. The PDF job card is emailed to billing.</span>
+        </span>
+        <i class="fas fa-chevron-right jc-option-arrow"></i>
+      </button>
+    </div>
+
+    <!-- Step 2: Billable job card -->
+    <form method="post" action="/web/tickets/{{ ticket.id }}/close-with-details" class="flex flex-col flex-1 hidden" data-close-step="billable"
+          onsubmit="this.querySelector('[type=submit]').disabled = true">
+      <input type="hidden" name="close_type" value="billable">
       <div class="flex-1 px-6 py-5 space-y-6 overflow-y-auto">
+
+        <button type="button" onclick="showCloseStep('choose')" class="text-xs font-medium text-slate-500 hover:text-slate-700 transition">
+          <i class="fas fa-arrow-left mr-1"></i>Back
+        </button>
 
         <!-- Client Details -->
         <div>
@@ -764,6 +922,12 @@ function closeCloseTicketModal() {
             </span>
             <span class="text-xs font-bold text-slate-500 uppercase tracking-widest">Billable Work</span>
           </div>
+          {% if timer.total_seconds %}
+          <div class="flex items-center gap-2 text-xs text-slate-500 bg-slate-50 rounded-lg px-3 py-2 border border-slate-100 mb-4">
+            <i class="fas fa-stopwatch" style="color:var(--ac)"></i>
+            <span>Timer: <span class="js-ticket-timer font-semibold text-slate-700">{{ timer.total_seconds|format_clock }}</span> worked on this ticket</span>
+          </div>
+          {% endif %}
           <div class="space-y-4">
             <div class="grid grid-cols-2 gap-x-5">
               <div>

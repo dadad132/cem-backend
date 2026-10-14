@@ -58,6 +58,8 @@ def generate_job_card_pdf(
     billable_sundries: Optional[str] = None,
     # Notes
     additional_notes: Optional[str] = None,
+    # Time on the ticket timer, e.g. "3h 05m" (row left out when None)
+    time_worked: Optional[str] = None,
     # Branding
     company_name: str = "Support Team",
     logo_path: Optional[str] = None,
@@ -174,6 +176,8 @@ def generate_job_card_pdf(
     story.append(info_row("Opened", created_at.strftime("%d %b %Y  %H:%M"), True))
     story.append(info_row("Closed", closed_at.strftime("%d %b %Y  %H:%M"), False))
     story.append(info_row("Technician", technician_name, True))
+    if time_worked:
+        story.append(info_row("Time Worked", time_worked, False))
     story.append(Spacer(1, 4 * mm))
 
     # ── Client details ───────────────────────────────────────────────

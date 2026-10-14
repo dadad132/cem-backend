@@ -154,6 +154,11 @@ templates.env.globals['now'] = datetime.utcnow
 # Add timezone formatting filter
 templates.env.filters['format_datetime_tz'] = format_datetime_tz
 
+# Ticket timer durations: "3h 05m" and stopwatch "03:05:09"
+from app.core.ticket_timer import format_clock as _format_clock, format_duration as _format_duration
+templates.env.filters['format_duration'] = _format_duration
+templates.env.filters['format_clock'] = _format_clock
+
 import json as _json
 templates.env.filters['fromjson'] = lambda s: _json.loads(s) if s else {}
 
@@ -14440,6 +14445,19 @@ async def web_tickets_archived(request: Request, db: AsyncSession = Depends(get_
     })
 
 
+async def _ticket_timer_context(db: AsyncSession, ticket_id: int) -> dict:
+    """Timer state for the Time Worked card, with the names of who worked."""
+    from app.core.ticket_timer import timer_state
+
+    timer = await timer_state(db, ticket_id)
+    user_ids = {e.user_id for e in timer['entries'] if e.user_id}
+    timer['user_names'] = {}
+    if user_ids:
+        for u in (await db.execute(select(User).where(User.id.in_(user_ids)))).scalars().all():
+            timer['user_names'][u.id] = u.full_name or u.username
+    return timer
+
+
 @router.get('/tickets/{ticket_id}', response_class=HTMLResponse)
 async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession = Depends(get_session)):
     """View ticket details with comments and history"""
@@ -14530,6 +14548,8 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         comment_time_fmt = '%b %d, %Y %I:%M %p'
     comment_tz = (workspace.comment_timezone or workspace.timezone or 'UTC') if workspace else 'UTC'
 
+    timer = await _ticket_timer_context(db, ticket_id)
+
     return templates.TemplateResponse('tickets/detail.html', {
         'request': request,
         'user': user,
@@ -14546,7 +14566,70 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         'workspace': workspace,
         'comment_time_fmt': comment_time_fmt,
         'comment_tz': comment_tz,
+        'timer': timer,
     })
+
+
+@router.post('/tickets/{ticket_id}/timer/{action}')
+async def web_tickets_timer(
+    request: Request,
+    ticket_id: int,
+    action: str,
+    db: AsyncSession = Depends(get_session)
+):
+    """Start/resume or pause the work timer on a ticket.
+
+    AJAX requests get the re-rendered Time Worked card back; plain form posts
+    are redirected to the ticket.
+    """
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+    user_id = request.session.get('user_id')
+    if not user_id:
+        if is_ajax:
+            return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+        return RedirectResponse('/web/login', status_code=303)
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        if is_ajax:
+            return JSONResponse({'error': 'User not found'}, status_code=401)
+        return RedirectResponse('/web/login', status_code=303)
+
+    if action not in ('start', 'pause'):
+        if is_ajax:
+            return JSONResponse({'error': 'Action must be start or pause'}, status_code=400)
+        return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+
+    from app.models.ticket import Ticket
+    from app.core.ticket_timer import start_timer, stop_timer
+
+    ticket = (await db.execute(select(Ticket).where(
+        Ticket.id == ticket_id,
+        Ticket.workspace_id == user.workspace_id
+    ))).scalar_one_or_none()
+    if not ticket:
+        if is_ajax:
+            return JSONResponse({'error': 'Ticket not found'}, status_code=404)
+        return RedirectResponse('/web/tickets', status_code=303)
+
+    # A closed ticket's timer stays stopped; the card re-renders without buttons
+    if action == 'start' and ticket.status != 'closed':
+        await start_timer(db, ticket_id, user_id)
+    elif action == 'pause':
+        await stop_timer(db, ticket_id)
+    await db.commit()
+
+    if is_ajax:
+        workspace = (await db.execute(
+            select(Workspace).where(Workspace.id == user.workspace_id)
+        )).scalar_one_or_none()
+        return templates.TemplateResponse('tickets/_timer.html', {
+            'request': request,
+            'ticket': ticket,
+            'workspace': workspace,
+            'timer': await _ticket_timer_context(db, ticket_id),
+        })
+    return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
 
 @router.post('/tickets/{ticket_id}/comment')
@@ -15032,7 +15115,10 @@ async def web_tickets_update_status(
         # Auto-archive when closed
         ticket.is_archived = True
         ticket.archived_at = datetime.utcnow()
-    
+        # No more work is timed on a closed ticket
+        from app.core.ticket_timer import stop_timer
+        await stop_timer(db, ticket_id)
+
     # Log ticket status change for diagnostics
     try:
         from app.core.system_logger import log_fire_and_forget
@@ -15121,6 +15207,8 @@ async def web_tickets_update_status(
 async def web_tickets_close_with_details(
     request: Request,
     ticket_id: int,
+    # 'sla' or 'billable'
+    close_type: Optional[str] = Form(None),
     # Job card client details
     job_client_name: Optional[str] = Form(None),
     job_client_surname: Optional[str] = Form(None),
@@ -15134,60 +15222,76 @@ async def web_tickets_close_with_details(
     closing_notes: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_session)
 ):
-    """Close ticket with optional billing/work details"""
+    """Close a ticket as SLA (nothing to bill) or Billable (with job card details)"""
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
-    
+
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user:
         return RedirectResponse('/web/login', status_code=303)
-    
+
     from app.models.ticket import Ticket, TicketHistory
+    from app.core.ticket_timer import stop_timer, get_time_entries, worked_seconds, format_duration
     from datetime import datetime
-    
+
     ticket = (await db.execute(select(Ticket).where(
         Ticket.id == ticket_id,
         Ticket.workspace_id == user.workspace_id
     ))).scalar_one_or_none()
     if not ticket:
         return RedirectResponse('/web/tickets', status_code=303)
-    
+
     old_status = ticket.status
-    
+    # SLA work is covered by the client's agreement, so there is no job card.
+    # Anything else is billable, which is also what forms without the choice sent.
+    is_sla = (close_type or '').strip().lower() == 'sla'
+    now = datetime.utcnow()
+
     # Update status to closed
     ticket.status = 'closed'
-    ticket.updated_at = datetime.utcnow()
-    ticket.closed_at = datetime.utcnow()
+    ticket.close_type = 'sla' if is_sla else 'billable'
+    ticket.updated_at = now
+    ticket.closed_at = now
     ticket.closed_by_id = user_id
     ticket.is_archived = True
-    ticket.archived_at = datetime.utcnow()
-    
+    ticket.archived_at = now
+
+    # No more work is timed on a closed ticket
+    await stop_timer(db, ticket_id, now)
+
     # Log close-with-details for diagnostics
     try:
         from app.core.system_logger import log_fire_and_forget
         log_fire_and_forget('INFO', 'ticket', 'User Action',
-            f'Closed with details: ticket #{ticket.ticket_number} ({old_status} -> closed)',
+            f'Closed as {ticket.close_type}: ticket #{ticket.ticket_number} ({old_status} -> closed)',
             f'User={user.full_name or user.username} | TicketID={ticket_id} | Subject={ticket.subject[:80]} | Guest={ticket.guest_email or "N/A"}',
             user.workspace_id)
     except Exception:
         pass
-    
+
     def _clean(v):
         return v.strip() if v and v.strip() else None
 
-    # Save job card client details
-    ticket.job_client_name = _clean(job_client_name)
-    ticket.job_client_surname = _clean(job_client_surname)
-    ticket.job_client_phone = _clean(job_client_phone)
-    ticket.job_client_office_number = _clean(job_client_office_number)
-    # Save billable details
-    ticket.billable_traveling = _clean(billable_traveling)
-    ticket.billable_labour_onsite = _clean(billable_labour_onsite)
-    ticket.billable_remote_labour = _clean(billable_remote_labour)
-    ticket.billable_equipment_used = _clean(billable_equipment_used)
-    ticket.closing_notes = _clean(closing_notes)
-    
+    if is_sla:
+        # Nothing is billable, even if an earlier close of this ticket was
+        ticket.billable_traveling = None
+        ticket.billable_labour_onsite = None
+        ticket.billable_remote_labour = None
+        ticket.billable_equipment_used = None
+    else:
+        # Save job card client details
+        ticket.job_client_name = _clean(job_client_name)
+        ticket.job_client_surname = _clean(job_client_surname)
+        ticket.job_client_phone = _clean(job_client_phone)
+        ticket.job_client_office_number = _clean(job_client_office_number)
+        # Save billable details
+        ticket.billable_traveling = _clean(billable_traveling)
+        ticket.billable_labour_onsite = _clean(billable_labour_onsite)
+        ticket.billable_remote_labour = _clean(billable_remote_labour)
+        ticket.billable_equipment_used = _clean(billable_equipment_used)
+        ticket.closing_notes = _clean(closing_notes)
+
     # Add history
     history = TicketHistory(
         ticket_id=ticket_id,
@@ -15197,7 +15301,13 @@ async def web_tickets_close_with_details(
         new_value='closed'
     )
     db.add(history)
-    
+    db.add(TicketHistory(
+        ticket_id=ticket_id,
+        user_id=user_id,
+        action='close_type',
+        new_value='SLA' if is_sla else 'Billable'
+    ))
+
     # Notify assigned user
     if ticket.assigned_to_id and ticket.assigned_to_id != user_id:
         assigned_user = (await db.execute(select(User).where(User.id == ticket.assigned_to_id))).scalar_one_or_none()
@@ -15213,63 +15323,72 @@ async def web_tickets_close_with_details(
     
     await db.commit()
 
+    worked = worked_seconds(await get_time_entries(db, ticket_id), now)
+    time_worked = format_duration(worked) if worked else None
+
     # Build additional details string for email body
     additional_details_parts = []
     if ticket.category:
         additional_details_parts.append(f"Category: {ticket.category}")
-    client_parts = [ticket.job_client_name, ticket.job_client_surname, ticket.job_client_phone, ticket.job_client_office_number]
-    if any(client_parts):
-        additional_details_parts.append(
-            "CLIENT: " + ", ".join(p for p in client_parts if p)
-        )
-    for label, val in [
-        ("Traveling", ticket.billable_traveling),
-        ("Labour Onsite", ticket.billable_labour_onsite),
-        ("Remote Labour", ticket.billable_remote_labour),
-        ("Sundries", ticket.billable_equipment_used),
-    ]:
-        if val:
-            additional_details_parts.append(f"  {label}: {val}")
-    if ticket.closing_notes:
-        additional_details_parts.append(f"Notes: {ticket.closing_notes}")
+    additional_details_parts.append("Close Type: SLA (not billable)" if is_sla else "Close Type: Billable")
+    if time_worked:
+        additional_details_parts.append(f"Time Worked: {time_worked}")
+    if not is_sla:
+        client_parts = [ticket.job_client_name, ticket.job_client_surname, ticket.job_client_phone, ticket.job_client_office_number]
+        if any(client_parts):
+            additional_details_parts.append(
+                "CLIENT: " + ", ".join(p for p in client_parts if p)
+            )
+        for label, val in [
+            ("Traveling", ticket.billable_traveling),
+            ("Labour Onsite", ticket.billable_labour_onsite),
+            ("Remote Labour", ticket.billable_remote_labour),
+            ("Sundries", ticket.billable_equipment_used),
+        ]:
+            if val:
+                additional_details_parts.append(f"  {label}: {val}")
+        if ticket.closing_notes:
+            additional_details_parts.append(f"Notes: {ticket.closing_notes}")
     additional_details = "\n".join(additional_details_parts)
 
-    # Generate PDF job card
+    # Generate PDF job card (billable only)
     pdf_bytes = None
-    try:
-        from app.core.job_card_pdf import generate_job_card_pdf
-        from app.models.workspace import Workspace as WS
-        ws = (await db.execute(select(WS).where(WS.id == ticket.workspace_id))).scalar_one_or_none()
-        logo_path = None
-        company_name = "Support Team"
-        if ws:
-            company_name = ws.name or company_name
-            if ws.logo_url:
-                import os
-                logo_path = os.path.join(os.getcwd(), "app", ws.logo_url.lstrip("/"))
-        pdf_bytes = generate_job_card_pdf(
-            ticket_number=ticket.ticket_number,
-            subject=ticket.subject,
-            priority=ticket.priority.title() if ticket.priority else "Normal",
-            created_at=ticket.created_at,
-            closed_at=ticket.closed_at,
-            technician_name=user.full_name or user.username,
-            client_name=ticket.job_client_name,
-            client_surname=ticket.job_client_surname,
-            client_phone=ticket.job_client_phone,
-            client_office_number=ticket.job_client_office_number,
-            billable_traveling=ticket.billable_traveling,
-            billable_labour_onsite=ticket.billable_labour_onsite,
-            billable_remote_labour=ticket.billable_remote_labour,
-            billable_sundries=ticket.billable_equipment_used,
-            additional_notes=ticket.closing_notes,
-            company_name=company_name,
-            logo_path=logo_path,
-        )
-    except Exception as e:
-        logger.error(f"Failed to generate job card PDF for ticket {ticket.ticket_number}: {e}")
+    if not is_sla:
+        try:
+            from app.core.job_card_pdf import generate_job_card_pdf
+            from app.models.workspace import Workspace as WS
+            ws = (await db.execute(select(WS).where(WS.id == ticket.workspace_id))).scalar_one_or_none()
+            logo_path = None
+            company_name = "Support Team"
+            if ws:
+                company_name = ws.name or company_name
+                if ws.logo_url:
+                    import os
+                    logo_path = os.path.join(os.getcwd(), "app", ws.logo_url.lstrip("/"))
+            pdf_bytes = generate_job_card_pdf(
+                ticket_number=ticket.ticket_number,
+                subject=ticket.subject,
+                priority=ticket.priority.title() if ticket.priority else "Normal",
+                created_at=ticket.created_at,
+                closed_at=ticket.closed_at,
+                technician_name=user.full_name or user.username,
+                client_name=ticket.job_client_name,
+                client_surname=ticket.job_client_surname,
+                client_phone=ticket.job_client_phone,
+                client_office_number=ticket.job_client_office_number,
+                billable_traveling=ticket.billable_traveling,
+                billable_labour_onsite=ticket.billable_labour_onsite,
+                billable_remote_labour=ticket.billable_remote_labour,
+                billable_sundries=ticket.billable_equipment_used,
+                additional_notes=ticket.closing_notes,
+                time_worked=time_worked,
+                company_name=company_name,
+                logo_path=logo_path,
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate job card PDF for ticket {ticket.ticket_number}: {e}")
 
-    # Send completion notification email with PDF attachment
+    # Send completion notification email (with the PDF job card when billable)
     try:
         await send_completion_notification_email(
             db=db,
@@ -15289,7 +15408,10 @@ async def web_tickets_close_with_details(
     except Exception as e:
         logger.error(f"Failed to send ticket completion notification: {e}")
 
-    request.session['success_message'] = f'Ticket #{ticket.ticket_number} has been closed.'
+    if is_sla:
+        request.session['success_message'] = f'Ticket #{ticket.ticket_number} has been closed under SLA.'
+    else:
+        request.session['success_message'] = f'Ticket #{ticket.ticket_number} has been closed.'
 
     # Fire webhook for external integrations
     try:
@@ -15300,6 +15422,7 @@ async def web_tickets_close_with_details(
             "priority": ticket.priority,
             "category": ticket.category,
             "status": "closed",
+            "close_type": ticket.close_type,
             "guest_name": ticket.guest_name,
             "guest_email": ticket.guest_email,
             "guest_company": ticket.guest_company,
@@ -17914,7 +18037,7 @@ async def web_admin_storage_delete_archived(request: Request, db: AsyncSession =
     if redirect:
         return redirect
 
-    from app.models.ticket import Ticket, TicketAttachment, TicketComment, TicketHistory
+    from app.models.ticket import Ticket, TicketAttachment, TicketComment, TicketHistory, TicketTimeEntry
     from sqlalchemy import delete as sa_delete
 
     form = await request.form()
@@ -17951,10 +18074,11 @@ async def web_admin_storage_delete_archived(request: Request, db: AsyncSession =
                 except Exception as e:
                     logger.warning(f"Could not delete attachment file {att.file_path}: {e}")
 
-            # Delete DB records: attachments, comments, history, then ticket
+            # Delete DB records: attachments, comments, history, time entries, then ticket
             await db.execute(sa_delete(TicketAttachment).where(TicketAttachment.ticket_id == tid))
             await db.execute(sa_delete(TicketComment).where(TicketComment.ticket_id == tid))
             await db.execute(sa_delete(TicketHistory).where(TicketHistory.ticket_id == tid))
+            await db.execute(sa_delete(TicketTimeEntry).where(TicketTimeEntry.ticket_id == tid))
             await db.execute(sa_delete(Ticket).where(Ticket.id == tid))
             deleted_count += 1
 
