@@ -7,9 +7,9 @@
       <h1 class="text-2xl font-bold text-slate-900">Team Workload</h1>
       <p class="text-slate-500 mt-1">See how work is distributed across your team</p>
     </div>
-    <div class="flex items-center gap-3">
+    <div class="flex flex-wrap items-center gap-3 min-w-0">
       <select id="project-filter" onchange="filterByProject(this.value)" 
-              class="px-3 py-2 border border-slate-300 rounded-lg text-sm">
+              class="px-3 py-2 border border-slate-300 rounded-lg text-sm min-w-0" style="max-width: 16rem">
         <option value="">All Projects</option>
         {% for p in projects %}
         <option value="{{ p.id }}" {{ 'selected' if selected_project_id == p.id else '' }}>{{ p.name }}</option>
@@ -77,9 +77,10 @@
     <h2 class="text-lg font-semibold text-slate-900 mb-4">Team Capacity</h2>
     <div class="space-y-4">
       {% for member in team_workload %}
-      <div class="flex items-center gap-4">
+      <!-- On narrow screens the bar drops below the name instead of being squeezed to nothing -->
+      <div class="flex flex-wrap items-center gap-4">
         <!-- Avatar and Name -->
-        <div class="w-40 flex items-center gap-3">
+        <div class="w-40 flex items-center gap-3 flex-shrink-0">
           <div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white font-bold text-sm">
             {{ (member.full_name or member.username)[0]|upper }}
           </div>
@@ -90,7 +91,7 @@
         </div>
         
         <!-- Workload Bar -->
-        <div class="flex-1">
+        <div class="flex-1" style="min-width: 10rem">
           <div class="flex items-center gap-2">
             <div class="flex-1 h-8 bg-slate-100 rounded-full overflow-hidden relative">
               <!-- Capacity indicator (e.g., 10 tasks = 100%) -->
@@ -110,7 +111,7 @@
               </div>
               {% endif %}
             </div>
-            <span class="text-sm font-medium w-16 text-right
+            <span class="text-sm font-medium w-20 flex-shrink-0 text-right
                         {% if capacity_pct > 100 %}text-red-600{% elif capacity_pct > 75 %}text-amber-600{% else %}text-emerald-600{% endif %}">
               {% if capacity_pct > 100 %}Overloaded{% elif capacity_pct > 75 %}Heavy{% elif capacity_pct > 50 %}Balanced{% else %}Light{% endif %}
             </span>

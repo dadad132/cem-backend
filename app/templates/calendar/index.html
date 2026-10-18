@@ -27,6 +27,12 @@
       margin-bottom: 0.5rem;
     }
     
+    /* Days are full-width rows here, so show every event rather than a
+       short scrolling box that cuts the last one in half */
+    .calendar-day-cell .day-events {
+      max-height: none !important;
+      overflow: visible !important;
+    }
     .calendar-day-cell .day-name {
       display: inline !important;
       font-weight: 600;
@@ -485,17 +491,17 @@
             </span>
             {% endif %}
           </div>
-          <div class="flex-1 space-y-1 overflow-y-auto max-h-24 sm:max-h-32">
+          <div class="day-events flex-1 space-y-1 overflow-y-auto max-h-24 sm:max-h-32">
             {% for m in meetings_by_day.get(day, []) %}
               {% if m.is_cancelled %}
               <div onclick="openMeetingModal({{ m.id }})" class="calendar-item block text-[10px] sm:text-xs rounded px-1.5 sm:px-2 py-1 border border-gray-300 bg-gray-100 text-gray-600 opacity-60 cursor-pointer hover:opacity-80" title="{{ m.title }} - CANCELLED">
-                <div class="font-semibold line-through truncate">❌ <span class="hidden sm:inline">{{ m.start_time.strftime('%H:%M') }}</span></div>
-                <div class="truncate line-through hidden sm:block">{{ m.title }}</div>
+                <div class="font-semibold line-through truncate">❌ <span>{{ m.start_time.strftime('%H:%M') }}</span></div>
+                <div class="truncate line-through">{{ m.title }}</div>
               </div>
               {% else %}
               <div onclick="openMeetingModal({{ m.id }})" class="calendar-item block text-[10px] sm:text-xs rounded px-1.5 sm:px-2 py-1 border border-purple-300 bg-purple-100 text-purple-800 cursor-pointer hover:bg-purple-200" title="{{ m.title }} - {{ m.start_time.strftime('%I:%M %p') }}">
-                <div class="font-semibold truncate">🎥 <span class="hidden sm:inline">{{ m.start_time.strftime('%H:%M') }}</span></div>
-                <div class="truncate hidden sm:block">{{ m.title }}</div>
+                <div class="font-semibold truncate">🎥 <span>{{ m.start_time.strftime('%H:%M') }}</span></div>
+                <div class="truncate">{{ m.title }}</div>
               </div>
               {% endif %}
             {% endfor %}

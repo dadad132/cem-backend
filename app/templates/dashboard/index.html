@@ -132,7 +132,7 @@
         <h1 class="text-2xl font-bold">Welcome back, {{ user.full_name or user.username }}! 👋</h1>
         <p class="text-slate-300 mt-1">Here's what's happening in your workspace today.</p>
       </div>
-      <div class="flex items-center gap-3">
+      <div class="flex flex-wrap items-center gap-3">
         {% if user.is_admin %}
         <!-- Dashboard View Switcher -->
         <div class="flex items-center bg-slate-700/50 rounded-lg p-1">

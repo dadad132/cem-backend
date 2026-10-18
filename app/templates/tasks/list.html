@@ -118,6 +118,7 @@
 
 <!-- Desktop Table view -->
 <div class="hidden md:block bg-white rounded-lg border border-slate-200 overflow-hidden">
+  <div class="overflow-x-auto">
   <table class="w-full">
     <thead class="bg-slate-50 border-b border-slate-200">
       <tr>
@@ -233,6 +234,7 @@
       {% endif %}
     </tbody>
   </table>
+  </div>
 </div>
 
 <!-- Mobile Card view -->
@@ -245,7 +247,7 @@
         
         <!-- Task title and archived badge -->
         <div class="flex items-start gap-2 mb-2">
-          <div class="font-medium text-base flex-1">{{ task.title }}</div>
+          <div class="font-medium text-base flex-1 min-w-0">{{ task.title }}</div>
           {% if task.is_archived %}
           <span class="px-2 py-0.5 bg-amber-100 text-amber-800 text-xs rounded font-semibold whitespace-nowrap">
             🗄️ ARCHIVED

@@ -4,7 +4,7 @@
 {% block content %}
 <div class="max-w-7xl mx-auto">
     <!-- Header -->
-    <div class="mb-6 flex items-center justify-between print:hidden">
+    <div class="mb-6 flex flex-wrap items-center justify-between gap-4 print:hidden">
         <div>
             <div class="flex items-center gap-2 text-sm text-gray-500 mb-2">
                 <a href="/web/admin/users" class="hover:text-blue-600">Admin</a>
@@ -24,7 +24,7 @@
                 User Activity Report
             </h1>
         </div>
-        <div class="flex gap-3">
+        <div class="flex flex-wrap gap-3">
             <a href="/web/admin/reports/user-activity" 
                class="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 flex items-center gap-2">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -170,6 +170,7 @@
                 <h3 class="text-lg font-semibold text-gray-900">Activity Summary</h3>
             </div>
             <div class="p-6">
+                <div class="overflow-x-auto">
                 <table class="w-full">
                     <tbody class="divide-y divide-gray-200">
                         <tr>
@@ -210,6 +211,7 @@
                         </tr>
                     </tbody>
                 </table>
+                </div>
             </div>
         </div>
 

@@ -83,8 +83,8 @@
         {% for case in cases %}
         <div class="bg-white rounded-lg shadow-sm border border-gray-200 hover:border-green-300 transition-colors">
             <div class="p-5">
-                <div class="flex items-start justify-between">
-                    <div class="flex-1">
+                <div class="flex items-start justify-between gap-3">
+                    <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-2 mb-2 flex-wrap">
                             <span class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">{{ case.category }}</span>
                             {% if case.device_type %}
@@ -104,7 +104,7 @@
                         <p class="text-sm text-gray-600 mb-2">{{ case.problem_description[:200] }}{% if case.problem_description|length > 200 %}...{% endif %}</p>
                         
                         {% if case.error_message %}
-                        <div class="bg-red-50 border border-red-200 rounded px-3 py-1.5 mb-2 inline-block">
+                        <div class="bg-red-50 border border-red-200 rounded px-3 py-1.5 mb-2 inline-block" style="max-width: 100%">
                             <span class="text-xs text-red-700 font-mono">{{ case.error_message[:100] }}</span>
                         </div>
                         {% endif %}

@@ -1,11 +1,11 @@
 {% extends 'base.html' %}
 {% block content %}
-<div class="flex items-center justify-between mb-4">
+<div class="flex flex-wrap items-center justify-between gap-3 mb-4">
   <h1 class="text-2xl font-semibold">My tasks</h1>
-  <form method="get" class="flex items-center gap-2 text-sm">
+  <form method="get" class="flex flex-wrap items-center gap-2 text-sm">
     {% if is_admin %}
       <label>Assignee
-        <select name="assignee_id" class="ml-1 rounded border border-slate-300 px-2 py-1">
+        <select name="assignee_id" class="ml-1 rounded border border-slate-300 px-2 py-1" style="max-width: 14rem">
           <option value="">All</option>
           {% for u in (users or []) %}
             <option value="{{ u.id }}" {% if selected and selected.assignee_id and selected.assignee_id|int == u.id %}selected{% endif %}>{{ u.full_name or u.email }}</option>
@@ -14,7 +14,7 @@
       </label>
     {% endif %}
     <label>Status
-      <select name="status" class="ml-1 rounded border border-slate-300 px-2 py-1">
+      <select name="status" class="ml-1 rounded border border-slate-300 px-2 py-1" style="max-width: 14rem">
         <option value="">All</option>
         <option value="todo" {% if selected and selected.status == 'todo' %}selected{% endif %}>To Do</option>
         <option value="in_progress" {% if selected and selected.status == 'in_progress' %}selected{% endif %}>In Progress</option>
@@ -23,7 +23,7 @@
       </select>
     </label>
     <label>Project
-      <select name="project_id" class="ml-1 rounded border border-slate-300 px-2 py-1">
+      <select name="project_id" class="ml-1 rounded border border-slate-300 px-2 py-1" style="max-width: 14rem">
         <option value="">All</option>
         {% for p in (projects or []) %}
           <option value="{{ p.id }}" {% if selected and selected.project_id and selected.project_id|int == p.id %}selected{% endif %}>{{ p.name }}</option>

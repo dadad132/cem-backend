@@ -47,8 +47,8 @@
   <h2 class="text-lg font-medium mb-4">Workspace Members ({{ users|length }})</h2>
   <div class="space-y-3">
     {% for member in users %}
-      <div class="flex items-center justify-between p-3 border border-slate-200 rounded">
-        <div class="flex items-center gap-3">
+      <div class="flex flex-wrap items-center justify-between gap-3 p-3 border border-slate-200 rounded">
+        <div class="flex items-center gap-3 min-w-0">
           {% if member.profile_picture %}
             <img src="/web{{ member.profile_picture }}" alt="{{ member.full_name or member.username }}" class="w-10 h-10 rounded-full object-cover">
           {% else %}
@@ -56,12 +56,12 @@
               {{ member.full_name[:1] if member.full_name else member.email[:1] }}
             </div>
           {% endif %}
-          <div>
+          <div class="min-w-0">
             <div class="font-medium">{{ member.full_name or 'User' }}</div>
             <div class="text-sm text-slate-500">{{ member.email }}</div>
           </div>
         </div>
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2">
           {% if not member.is_active %}
             <span class="px-2 py-1 bg-red-100 text-red-800 text-xs rounded">Deactivated</span>
           {% endif %}
