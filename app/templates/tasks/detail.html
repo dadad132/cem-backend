@@ -114,6 +114,14 @@
         {% endif %}
       </div>
 
+      {% if task.status.value != 'done' and not task.is_archived %}
+      <!-- Resolves and closes in one step, via the SLA / Billable choice -->
+      <button type="button" onclick="openCompleteTaskModal()"
+              class="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700" style="margin-bottom: 1rem;">
+        <i class="fas fa-check mr-2"></i>Mark as Resolved &amp; Close Task
+      </button>
+      {% endif %}
+
       {% if task.customer_name or task.customer_surname or task.customer_email or task.customer_phone %}
       <!-- Customer Information -->
       <div style="background: #f0fdf4; border: 1px solid #86efac; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem;">

@@ -15396,6 +15396,8 @@ async def web_tickets_close_with_details(
     ticket.status = 'closed'
     ticket.close_type = 'sla' if is_sla else 'billable'
     ticket.updated_at = now
+    if not ticket.resolved_at:
+        ticket.resolved_at = now  # resolved and closed in one step
     ticket.closed_at = now
     ticket.closed_by_id = user_id
     ticket.is_archived = True
