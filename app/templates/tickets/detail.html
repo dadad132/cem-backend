@@ -1015,6 +1015,13 @@ function showCloseStep(step) {
   .sig-btn-secondary { background:#f1f5f9; color:#475569; }
   .sig-btn-done { flex:1; color:#fff; background:linear-gradient(135deg, var(--ac-d), var(--ac)); }
   .sig-btn-done:disabled { opacity:.45; }
+  .sig-error {
+    flex-shrink:0; font-size:.9rem; font-weight:600; color:#b91c1c;
+    background:#fef2f2; border:1px solid #fecaca; border-radius:.5rem; padding:.5rem .75rem;
+  }
+  #signaturePad input.sig-input-invalid {
+    border-color:#ef4444 !important; box-shadow:0 0 0 3px rgba(239,68,68,.2) !important;
+  }
 </style>
 
 <div id="signaturePad" class="hidden" role="dialog" aria-modal="true" aria-labelledby="signatureTitle">
@@ -1032,10 +1039,13 @@ function showCloseStep(step) {
     <input type="hidden" name="signature_data" id="signatureData">
     <div class="sig-body">
       <p class="text-sm text-slate-600">By signing below, I confirm that the work on this ticket has been completed and is working.</p>
+      {# Who is signing: the guest who raised the ticket, else the job card's client #}
+      {% set signer_default = ((ticket.guest_name or '') ~ ' ' ~ (ticket.guest_surname or '')) | trim %}
+      {% if not signer_default %}{% set signer_default = ((ticket.job_client_name or '') ~ ' ' ~ (ticket.job_client_surname or '')) | trim %}{% endif %}
       <label class="block">
-        <span class="block text-xs text-slate-500 mb-1">Name of the person signing</span>
-        <input type="text" name="signer_name" id="signerName" maxlength="120" required autocomplete="name"
-               value="{{ ((ticket.guest_name or '') ~ ' ' ~ (ticket.guest_surname or '')) | trim }}"
+        <span class="block text-xs text-slate-500 mb-1">Name of the person signing <span class="text-red-500">*</span></span>
+        <input type="text" name="signer_name" id="signerName" maxlength="120" autocomplete="name"
+               value="{{ signer_default }}"
                class="w-full px-3 py-2 border border-slate-300 rounded-md text-base">
       </label>
       <div class="sig-canvas-wrap" id="signatureArea">
@@ -1043,11 +1053,12 @@ function showCloseStep(step) {
         <p class="sig-hint">Sign here with your finger</p>
         <canvas id="signatureCanvas"></canvas>
       </div>
+      <p class="sig-error" id="signatureError" role="alert" hidden></p>
     </div>
     <div class="sig-footer">
       <button type="button" class="sig-btn sig-btn-secondary" onclick="clearSignature()">Clear</button>
       <button type="button" class="sig-btn sig-btn-secondary" onclick="closeSignaturePad()">Cancel</button>
-      <button type="submit" class="sig-btn sig-btn-done" id="signatureDone" disabled>
+      <button type="submit" class="sig-btn sig-btn-done" id="signatureDone">
         <i class="fas fa-check mr-1"></i>Done
       </button>
     </div>
@@ -1081,6 +1092,7 @@ if (location.hash === '#signed') {
     var canvas = document.getElementById('signatureCanvas');
     var nameInput = document.getElementById('signerName');
     var doneBtn = document.getElementById('signatureDone');
+    var errorBox = document.getElementById('signatureError');
     var ctx = canvas.getContext('2d');
     var strokes = [], current = null;
 
@@ -1088,24 +1100,24 @@ if (location.hash === '#signed') {
     // the floating mobile menu button) can cover the pad
     document.body.appendChild(pad);
 
-    function setPen() {
-        ctx.lineWidth = 2.5;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.strokeStyle = '#0f172a';
+    function setPen(c) {
+        c.lineWidth = 2.5;
+        c.lineCap = 'round';
+        c.lineJoin = 'round';
+        c.strokeStyle = '#0f172a';
     }
-    function drawStroke(points, from) {
-        setPen();
-        ctx.beginPath();
+    function drawStroke(c, points, from) {
+        setPen(c);
+        c.beginPath();
         var start = points[Math.max(from - 1, 0)];
-        ctx.moveTo(start.x, start.y);
-        if (points.length === 1) ctx.lineTo(start.x + 0.1, start.y + 0.1);  // a dot
-        for (var i = Math.max(from, 1); i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
-        ctx.stroke();
+        c.moveTo(start.x, start.y);
+        if (points.length === 1) c.lineTo(start.x + 0.1, start.y + 0.1);  // a dot
+        for (var i = Math.max(from, 1); i < points.length; i++) c.lineTo(points[i].x, points[i].y);
+        c.stroke();
     }
     function redraw() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        strokes.forEach(function (s) { drawStroke(s, 0); });
+        strokes.forEach(function (s) { drawStroke(ctx, s, 0); });
     }
     function resize() {
         var rect = area.getBoundingClientRect();
@@ -1119,9 +1131,29 @@ if (location.hash === '#signed') {
         var r = canvas.getBoundingClientRect();
         return { x: e.clientX - r.left, y: e.clientY - r.top };
     }
+    function showError(message) {
+        errorBox.textContent = message;
+        errorBox.hidden = !message;
+    }
     function updateState() {
         area.classList.toggle('sig-has-ink', strokes.length > 0);
-        doneBtn.disabled = !strokes.length || !nameInput.value.trim();
+        if (nameInput.value.trim()) nameInput.classList.remove('sig-input-invalid');
+        if (strokes.length && nameInput.value.trim()) showError('');
+    }
+
+    // Phones and tablets: an on-screen keyboard (e.g. while typing the name)
+    // covers the bottom of the screen. Keep the pad inside the part that is
+    // still visible, so the Done button stays above the keyboard.
+    function fitToVisibleArea() {
+        var vv = window.visualViewport;
+        if (!vv || pad.classList.contains('hidden')) return;
+        pad.style.top = vv.offsetTop + 'px';
+        pad.style.height = vv.height + 'px';
+        pad.style.bottom = 'auto';
+    }
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', fitToVisibleArea);
+        window.visualViewport.addEventListener('scroll', fitToVisibleArea);
     }
 
     canvas.addEventListener('pointerdown', function (e) {
@@ -1129,7 +1161,7 @@ if (location.hash === '#signed') {
         canvas.setPointerCapture(e.pointerId);
         current = [pointFrom(e)];
         strokes.push(current);
-        drawStroke(current, 0);
+        drawStroke(ctx, current, 0);
         updateState();
     });
     canvas.addEventListener('pointermove', function (e) {
@@ -1139,25 +1171,37 @@ if (location.hash === '#signed') {
         if (!events.length) events = [e];
         var from = current.length;
         events.forEach(function (ev) { current.push(pointFrom(ev)); });
-        drawStroke(current, from);
+        drawStroke(ctx, current, from);
     });
     function endStroke() { current = null; }
     canvas.addEventListener('pointerup', endStroke);
     canvas.addEventListener('pointercancel', endStroke);
     nameInput.addEventListener('input', updateState);
-    window.addEventListener('resize', function () {
+    // Re-fit the drawing surface whenever the signing box changes size (window,
+    // rotation, or the pad shrinking for an on-screen keyboard)
+    function refit() {
         if (!pad.classList.contains('hidden')) resize();
-    });
+    }
+    if (window.ResizeObserver) {
+        new ResizeObserver(refit).observe(area);
+    } else {
+        window.addEventListener('resize', refit);
+    }
 
     window.openSignaturePad = function () {
         pad.classList.remove('hidden');
         document.body.style.overflow = 'hidden';
         strokes = [];
+        showError('');
+        nameInput.classList.remove('sig-input-invalid');
+        doneBtn.disabled = false;
+        fitToVisibleArea();
         resize();
         updateState();
     };
     window.closeSignaturePad = function () {
         pad.classList.add('hidden');
+        pad.style.top = pad.style.height = pad.style.bottom = '';
         document.body.style.overflow = '';
     };
     window.clearSignature = function () {
@@ -1166,19 +1210,47 @@ if (location.hash === '#signed') {
         updateState();
     };
 
-    document.getElementById('signatureForm').addEventListener('submit', function (e) {
-        if (!strokes.length || !nameInput.value.trim()) { e.preventDefault(); return; }
-        // Saved on white (the canvas is transparent), at most 1200px wide
-        var scale = Math.min(1, 1200 / canvas.width);
+    // The saved image is drawn from the strokes and cropped to them, so it does
+    // not depend on how big the signing box is at that moment (an open
+    // keyboard makes it smaller). White background, at most 1200px wide.
+    function signaturePng() {
+        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        strokes.forEach(function (s) {
+            s.forEach(function (pt) {
+                minX = Math.min(minX, pt.x); minY = Math.min(minY, pt.y);
+                maxX = Math.max(maxX, pt.x); maxY = Math.max(maxY, pt.y);
+            });
+        });
+        var margin = 20;
+        var w = maxX - minX + margin * 2, h = maxY - minY + margin * 2;
+        var scale = Math.min(3, 1200 / w);
         var out = document.createElement('canvas');
-        out.width = Math.round(canvas.width * scale);
-        out.height = Math.round(canvas.height * scale);
+        out.width = Math.max(1, Math.round(w * scale));
+        out.height = Math.max(1, Math.round(h * scale));
         var octx = out.getContext('2d');
         octx.fillStyle = '#ffffff';
         octx.fillRect(0, 0, out.width, out.height);
-        octx.drawImage(canvas, 0, 0, out.width, out.height);
-        document.getElementById('signatureData').value = out.toDataURL('image/png');
-        doneBtn.disabled = true;
+        octx.setTransform(scale, 0, 0, scale, (margin - minX) * scale, (margin - minY) * scale);
+        strokes.forEach(function (s) { drawStroke(octx, s, 0); });
+        return out.toDataURL('image/png');
+    }
+
+    // Done is always tappable; if something is missing it says what
+    document.getElementById('signatureForm').addEventListener('submit', function (e) {
+        if (!strokes.length) {
+            e.preventDefault();
+            showError('Please sign in the box first.');
+            return;
+        }
+        if (!nameInput.value.trim()) {
+            e.preventDefault();
+            showError('Please enter the name of the person signing.');
+            nameInput.classList.add('sig-input-invalid');
+            nameInput.focus();
+            return;
+        }
+        document.getElementById('signatureData').value = signaturePng();
+        doneBtn.disabled = true;  // no double submit
     });
 })();
 </script>
