@@ -14688,8 +14688,17 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         comment_time_fmt = '%b %d, %Y %I:%M %p'
     comment_tz = (workspace.comment_timezone or workspace.timezone or 'UTC') if workspace else 'UTC'
 
-    from app.models.ticket import TicketTimeEntry
+    from app.models.ticket import TicketSignature, TicketTimeEntry
     timer = await _work_timer_context(db, TicketTimeEntry.ticket_id, ticket_id)
+
+    signatures = (await db.execute(
+        select(TicketSignature)
+        .where(TicketSignature.ticket_id == ticket_id)
+        .order_by(TicketSignature.signed_at.desc())
+    )).scalars().all()
+
+    # For "who" fields stored as user ids (signatures, assignment history)
+    user_names = {u.id: (u.full_name or u.username) for u in users}
 
     return templates.TemplateResponse('tickets/detail.html', {
         'request': request,
@@ -14708,7 +14717,104 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         'comment_time_fmt': comment_time_fmt,
         'comment_tz': comment_tz,
         'timer': timer,
+        'signatures': signatures,
+        'user_names': user_names,
     })
+
+
+def _decode_signature_png(data_url: Optional[str]) -> Optional[bytes]:
+    """PNG bytes from the signature pad's data URL, or None if it is not a valid PNG."""
+    import base64
+    import binascii
+
+    prefix = 'data:image/png;base64,'
+    if not data_url or not data_url.startswith(prefix) or len(data_url) > 3_000_000:
+        return None
+    try:
+        png = base64.b64decode(data_url[len(prefix):], validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    return png if png.startswith(b'\x89PNG\r\n\x1a\n') else None
+
+
+@router.post('/tickets/{ticket_id}/signature')
+async def web_tickets_signature(
+    request: Request,
+    ticket_id: int,
+    signer_name: Optional[str] = Form(None),
+    signature_data: Optional[str] = Form(None),
+    db: AsyncSession = Depends(get_session)
+):
+    """Save a customer's signature, drawn on the technician's device, to the ticket"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        return RedirectResponse('/web/login', status_code=303)
+
+    from app.models.ticket import Ticket, TicketHistory, TicketSignature
+
+    ticket = (await db.execute(select(Ticket).where(
+        Ticket.id == ticket_id,
+        Ticket.workspace_id == user.workspace_id
+    ))).scalar_one_or_none()
+    if not ticket:
+        return RedirectResponse('/web/tickets', status_code=303)
+
+    name = (signer_name or '').strip()[:120]
+    png = _decode_signature_png(signature_data)
+    if not name or png is None:
+        request.session['error_message'] = (
+            'The signature was not saved: enter the name of the person signing.' if not name
+            else 'The signature was not saved: please sign in the box, then press Done.'
+        )
+        return RedirectResponse(f'/web/tickets/{ticket_id}#signed', status_code=303)
+
+    db.add(TicketSignature(
+        ticket_id=ticket_id,
+        signer_name=name,
+        image_png=png,
+        captured_by_id=user_id,
+    ))
+    db.add(TicketHistory(
+        ticket_id=ticket_id,
+        user_id=user_id,
+        action='customer_signed',
+        new_value=name
+    ))
+    ticket.updated_at = datetime.utcnow()
+    await db.commit()
+
+    request.session['success_message'] = f'Signature from {name} saved on ticket #{ticket.ticket_number}.'
+    return RedirectResponse(f'/web/tickets/{ticket_id}#signed', status_code=303)
+
+
+@router.get('/tickets/signatures/{signature_id}/image')
+async def web_ticket_signature_image(request: Request, signature_id: int, db: AsyncSession = Depends(get_session)):
+    """The signature image, for the ticket's Signed tab"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        raise HTTPException(status_code=401, detail='Not authenticated')
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail='Not authenticated')
+
+    from fastapi import Response
+    from app.models.ticket import Ticket, TicketSignature
+
+    signature = (await db.execute(
+        select(TicketSignature)
+        .join(Ticket, TicketSignature.ticket_id == Ticket.id)
+        .where(TicketSignature.id == signature_id, Ticket.workspace_id == user.workspace_id)
+    )).scalar_one_or_none()
+    if not signature:
+        raise HTTPException(status_code=404, detail='Signature not found')
+
+    return Response(content=signature.image_png, media_type='image/png',
+                    headers={'Cache-Control': 'private, max-age=86400'})
 
 
 @router.post('/tickets/{ticket_id}/timer/{action}')
@@ -15877,10 +15983,12 @@ async def web_tickets_forward(
 async def web_tickets_assign(
     request: Request,
     ticket_id: int,
-    assigned_to_id: Optional[int] = Form(None),
+    # A string: "-- Unassigned --" posts an empty value, which int parsing rejects
+    assigned_to_id: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_session)
 ):
     """Assign ticket to user"""
+    assigned_to_id = int(assigned_to_id) if assigned_to_id and assigned_to_id.strip().isdigit() else None
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
@@ -15898,7 +16006,17 @@ async def web_tickets_assign(
     ))).scalar_one_or_none()
     if not ticket:
         return RedirectResponse('/web/tickets', status_code=303)
-    
+
+    # Only someone in this company can be assigned
+    if assigned_to_id:
+        assignee = (await db.execute(select(User).where(
+            User.id == assigned_to_id,
+            User.workspace_id == user.workspace_id
+        ))).scalar_one_or_none()
+        if not assignee:
+            request.session['error_message'] = 'That technician could not be found.'
+            return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+
     old_assigned = ticket.assigned_to_id
     ticket.assigned_to_id = assigned_to_id
     ticket.updated_at = datetime.utcnow()
@@ -17207,7 +17325,7 @@ async def web_workload(
     # Get assignments
     task_ids = [t.id for t in all_tasks]
     assignments = (await db.execute(
-        select(Assignment.task_id, Assignment.user_id)
+        select(Assignment.task_id, Assignment.assignee_id)
         .where(Assignment.task_id.in_(task_ids))
     )).all() if task_ids else []
     
@@ -17215,7 +17333,7 @@ async def web_workload(
     for a in assignments:
         if a.task_id not in assignments_map:
             assignments_map[a.task_id] = []
-        assignments_map[a.task_id].append(a.user_id)
+        assignments_map[a.task_id].append(a.assignee_id)
     
     # Get team members
     team_members = (await db.execute(
@@ -18183,7 +18301,7 @@ async def web_admin_storage_delete_archived(request: Request, db: AsyncSession =
     if redirect:
         return redirect
 
-    from app.models.ticket import Ticket, TicketAttachment, TicketComment, TicketHistory, TicketTimeEntry
+    from app.models.ticket import Ticket, TicketAttachment, TicketComment, TicketHistory, TicketSignature, TicketTimeEntry
     from sqlalchemy import delete as sa_delete
 
     form = await request.form()
@@ -18220,11 +18338,12 @@ async def web_admin_storage_delete_archived(request: Request, db: AsyncSession =
                 except Exception as e:
                     logger.warning(f"Could not delete attachment file {att.file_path}: {e}")
 
-            # Delete DB records: attachments, comments, history, time entries, then ticket
+            # Delete DB records: attachments, comments, history, time entries, signatures, then ticket
             await db.execute(sa_delete(TicketAttachment).where(TicketAttachment.ticket_id == tid))
             await db.execute(sa_delete(TicketComment).where(TicketComment.ticket_id == tid))
             await db.execute(sa_delete(TicketHistory).where(TicketHistory.ticket_id == tid))
             await db.execute(sa_delete(TicketTimeEntry).where(TicketTimeEntry.ticket_id == tid))
+            await db.execute(sa_delete(TicketSignature).where(TicketSignature.ticket_id == tid))
             await db.execute(sa_delete(Ticket).where(Ticket.id == tid))
             deleted_count += 1
 

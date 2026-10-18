@@ -118,6 +118,19 @@ class TicketHistory(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class TicketSignature(SQLModel, table=True):
+    """A customer's signature confirming the work on a ticket.
+
+    Drawn with a finger on the technician's tablet or phone, usually on site.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    ticket_id: int = Field(foreign_key="ticket.id", ondelete="CASCADE", index=True)
+    signer_name: str
+    image_png: bytes  # The signature as drawn, as a PNG
+    captured_by_id: Optional[int] = Field(default=None, foreign_key="user.id")  # Whose device it was signed on
+    signed_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class TicketTimeEntry(SQLModel, table=True):
     """One stretch of work on a ticket, from Start/Resume until Pause.
 

@@ -17,7 +17,7 @@ from .contact import Contact
 from .lead import Lead, LeadStatus, LeadSource
 from .deal import Deal, DealStage
 from .activity import Activity, ActivityType
-from .ticket import Ticket, TicketComment, TicketAttachment, TicketHistory, TicketTimeEntry
+from .ticket import Ticket, TicketComment, TicketAttachment, TicketHistory, TicketSignature, TicketTimeEntry
 from .email_settings import EmailSettings
 from .processed_mail import ProcessedMail
 from .incoming_email_account import IncomingEmailAccount
@@ -79,6 +79,7 @@ __all__ = [
     "TicketComment",
     "TicketAttachment",
     "TicketHistory",
+    "TicketSignature",
     "TicketTimeEntry",
     "EmailSettings",
     "ProcessedMail",
