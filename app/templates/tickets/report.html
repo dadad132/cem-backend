@@ -87,7 +87,7 @@
                         <option value="">All Users</option>
                         {% for usr in all_users %}
                         <option value="{{ usr.id }}" {% if selected_user_id == usr.id %}selected{% endif %}>
-                            {{ usr.full_name or usr.username }}
+                            {{ usr.shown_name or usr.username }}
                         </option>
                         {% endfor %}
                     </select>
@@ -124,10 +124,10 @@
         <div class="bg-indigo-50 border border-indigo-200 rounded-lg p-4 flex items-center justify-between flex-1">
             <div class="flex items-center gap-3">
                 <div class="w-10 h-10 bg-indigo-600 rounded-full flex items-center justify-center text-white font-semibold">
-                    {{ (selected_user.full_name or selected_user.username)[:2]|upper }}
+                    {{ (selected_user.shown_name or selected_user.username)[:2]|upper }}
                 </div>
                 <div>
-                    <p class="font-semibold text-indigo-900">User: {{ selected_user.full_name or selected_user.username }}</p>
+                    <p class="font-semibold text-indigo-900">User: {{ selected_user.shown_name or selected_user.username }}</p>
                     <p class="text-sm text-indigo-600">{{ selected_user.email }}</p>
                 </div>
             </div>

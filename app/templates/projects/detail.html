@@ -361,7 +361,7 @@ function taskSuggestions() {
               <form method="post" action="/web/tasks/{{ t.id }}/assign" class="flex items-center gap-1 flex-1">
                 <select name="assignee_id" class="text-[11px] rounded border border-slate-300 px-2 py-1.5 flex-1 min-w-0">
                   {% for u in users %}
-                    <option value="{{ u.id }}">{{ u.full_name or u.email }}</option>
+                    <option value="{{ u.id }}">{{ u.shown_name or u.email }}</option>
                   {% endfor %}
                 </select>
                 <button class="text-[11px] px-2 py-1.5 rounded bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 whitespace-nowrap">+</button>
@@ -369,7 +369,7 @@ function taskSuggestions() {
               <form method="post" action="/web/tasks/{{ t.id }}/unassign" class="flex items-center gap-1 flex-1">
                 <select name="assignee_id" class="text-[11px] rounded border border-slate-300 px-2 py-1.5 flex-1 min-w-0">
                   {% for u in users %}
-                    <option value="{{ u.id }}">{{ u.full_name or u.email }}</option>
+                    <option value="{{ u.id }}">{{ u.shown_name or u.email }}</option>
                   {% endfor %}
                 </select>
                 <button class="text-[11px] px-2 py-1.5 rounded bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 whitespace-nowrap">−</button>

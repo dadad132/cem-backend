@@ -189,7 +189,7 @@
       {% for ws_user in workspace_users %}
         <div class="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 rounded-lg border-2 shadow-sm hover:shadow-md transition" style="border-color: {{ ws_user.calendar_color }}; background: linear-gradient(135deg, {{ ws_user.calendar_color }}15, {{ ws_user.calendar_color }}05);">
           <div class="w-2.5 h-2.5 sm:w-3 sm:h-3 rounded-full border-2 flex-shrink-0" style="background-color: {{ ws_user.calendar_color }}; border-color: {{ ws_user.calendar_color }};"></div>
-          <span class="text-[10px] sm:text-xs font-medium text-gray-800 truncate">{{ ws_user.full_name or ws_user.username }}</span>
+          <span class="text-[10px] sm:text-xs font-medium text-gray-800 truncate">{{ ws_user.shown_name or ws_user.username }}</span>
         </div>
       {% endfor %}
     </div>
@@ -305,7 +305,7 @@
                   {% if project_user %}
                     <span class="inline-flex items-center gap-1 ml-1">
                       <span class="w-2 h-2 rounded-full" style="background-color: {{ user_color }};"></span>
-                      <span>{{ project_user.full_name or project_user.username }}</span>
+                      <span>{{ project_user.shown_name or project_user.username }}</span>
                     </span>
                   {% endif %}
                 </div>
@@ -331,7 +331,7 @@
             {% else %}
               {% set gradient_bg = 'background: linear-gradient(to right, ' ~ display_color ~ '25, ' ~ display_color ~ '10);' %}
             {% endif %}
-            <a href="/web/tasks/{{ item.id }}" class="flex items-center gap-3 p-3 rounded-lg border-l-4 transition shadow-sm hover:shadow-md" style="border-left-color: {{ display_color }}; {{ gradient_bg }}" title="{{ item.title }}{% if assigned_users %} - {% for u in assigned_users %}{{ u.full_name or u.username }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}">
+            <a href="/web/tasks/{{ item.id }}" class="flex items-center gap-3 p-3 rounded-lg border-l-4 transition shadow-sm hover:shadow-md" style="border-left-color: {{ display_color }}; {{ gradient_bg }}" title="{{ item.title }}{% if assigned_users %} - {% for u in assigned_users %}{{ u.shown_name or u.username }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}">
               <div class="text-2xl flex items-center gap-1">
                 {% if assigned_users %}
                   {% for user in assigned_users[:3] %}
@@ -348,9 +348,9 @@
                 <div class="font-semibold text-gray-800">{{ item.title }}</div>
                 <div class="text-sm text-gray-600">
                   {% if is_collaboration %}
-                    👥 {{ primary_user.full_name or primary_user.username }} and {{ assigned_users|length - 1 }} other{{ 's' if assigned_users|length > 2 else '' }}
+                    👥 {{ primary_user.shown_name or primary_user.username }} and {{ assigned_users|length - 1 }} other{{ 's' if assigned_users|length > 2 else '' }}
                   {% elif primary_user %}
-                    {{ primary_user.full_name or primary_user.username }}
+                    {{ primary_user.shown_name or primary_user.username }}
                   {% else %}
                     Unassigned
                   {% endif %}
@@ -366,7 +366,7 @@
                   {% if task_user %}
                     <span class="inline-flex items-center gap-1 ml-1">
                       <span class="w-2 h-2 rounded-full" style="background-color: {{ user_color }};"></span>
-                      <span>{{ task_user.full_name or task_user.username }}</span>
+                      <span>{{ task_user.shown_name or task_user.username }}</span>
                     </span>
                   {% endif %}
                   {% if overdue %}<span class="text-red-600 font-semibold ml-1">❌ OVERDUE</span>{% endif %}
@@ -411,7 +411,7 @@
             {% for p in projects_by_day.get(day, []) %}
               {% set project_user = project_users.get(p.id) %}
               {% set user_color = project_user.calendar_color if project_user else '#10B981' %}
-              <a href="/web/projects/{{ p.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ user_color }}; background: linear-gradient(to right, {{ user_color }}35, {{ user_color }}18);" title="{{ p.name }} ({{ p.start_date.strftime('%d/%m') }} - {{ p.due_date.strftime('%d/%m') }}){% if project_user %} - {{ project_user.full_name or project_user.username }}{% endif %}">
+              <a href="/web/projects/{{ p.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ user_color }}; background: linear-gradient(to right, {{ user_color }}35, {{ user_color }}18);" title="{{ p.name }} ({{ p.start_date.strftime('%d/%m') }} - {{ p.due_date.strftime('%d/%m') }}){% if project_user %} - {{ project_user.shown_name or project_user.username }}{% endif %}">
                 <div class="flex items-center gap-1">
                   <span class="text-base">📁</span>
                   <span class="w-1.5 h-1.5 rounded-full flex-shrink-0" style="background-color: {{ user_color }};"></span>
@@ -440,7 +440,7 @@
               {% else %}
                 {% set gradient_bg = 'background: linear-gradient(to right, ' ~ display_color ~ '35, ' ~ display_color ~ '18);' %}
               {% endif %}
-              <a href="/web/tasks/{{ t.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ display_color }}; {{ gradient_bg }}" title="{{ t.title }}{% if t.due_time %} at {{ t.due_time.strftime('%I:%M %p') }}{% endif %}{% if assigned_users %} - {% for u in assigned_users %}{{ u.full_name or u.username }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}">
+              <a href="/web/tasks/{{ t.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ display_color }}; {{ gradient_bg }}" title="{{ t.title }}{% if t.due_time %} at {{ t.due_time.strftime('%I:%M %p') }}{% endif %}{% if assigned_users %} - {% for u in assigned_users %}{{ u.shown_name or u.username }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}">
                 <div class="flex items-center gap-1 font-semibold text-gray-800">
                   {% if assigned_users %}
                     {% for user in assigned_users[:3] %}
@@ -452,9 +452,9 @@
                   {% endif %}
                   <span class="text-xs truncate">
                     {% if is_collaboration %}
-                      👥 {{ primary_user.full_name or primary_user.username }} +{{ assigned_users|length - 1 }}
+                      👥 {{ primary_user.shown_name or primary_user.username }} +{{ assigned_users|length - 1 }}
                     {% elif primary_user %}
-                      {{ primary_user.full_name or primary_user.username }}
+                      {{ primary_user.shown_name or primary_user.username }}
                     {% else %}
                       Unassigned
                     {% endif %}
@@ -509,7 +509,7 @@
             {% for p in projects_by_day.get(day, []) %}
               {% set project_user = project_users.get(p.id) %}
               {% set user_color = project_user.calendar_color if project_user else '#10B981' %}
-              <a href="/web/projects/{{ p.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ user_color }}; background: linear-gradient(to right, {{ user_color }}35, {{ user_color }}18);" title="{{ p.name }} ({{ p.start_date.strftime('%d/%m') }} - {{ p.due_date.strftime('%d/%m') }}){% if project_user %} - {{ project_user.full_name or project_user.username }}{% endif %}">
+              <a href="/web/projects/{{ p.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ user_color }}; background: linear-gradient(to right, {{ user_color }}35, {{ user_color }}18);" title="{{ p.name }} ({{ p.start_date.strftime('%d/%m') }} - {{ p.due_date.strftime('%d/%m') }}){% if project_user %} - {{ project_user.shown_name or project_user.username }}{% endif %}">
                 <div class="flex items-center gap-1">
                   <span class="text-base">📁</span>
                   <span class="w-1.5 h-1.5 rounded-full flex-shrink-0" style="background-color: {{ user_color }};"></span>
@@ -538,7 +538,7 @@
               {% else %}
                 {% set gradient_bg = 'background: linear-gradient(to right, ' ~ display_color ~ '35, ' ~ display_color ~ '18);' %}
               {% endif %}
-              <a href="/web/tasks/{{ t.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ display_color }}; {{ gradient_bg }}" title="{{ t.title }}{% if assigned_users %} - {% for u in assigned_users %}{{ u.full_name or u.username }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}">
+              <a href="/web/tasks/{{ t.id }}" class="block text-xs rounded-lg px-2 py-1.5 border-l-4 shadow-sm transition hover:shadow-md" style="border-left-color: {{ display_color }}; {{ gradient_bg }}" title="{{ t.title }}{% if assigned_users %} - {% for u in assigned_users %}{{ u.shown_name or u.username }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}">
                 <div class="flex items-center gap-1 font-semibold text-gray-800">
                   {% if assigned_users %}
                     {% for user in assigned_users[:3] %}
@@ -550,9 +550,9 @@
                   {% endif %}
                   <span class="text-xs truncate">
                     {% if is_collaboration %}
-                      👥 {{ primary_user.full_name or primary_user.username }} +{{ assigned_users|length - 1 }}
+                      👥 {{ primary_user.shown_name or primary_user.username }} +{{ assigned_users|length - 1 }}
                     {% elif primary_user %}
-                      {{ primary_user.full_name or primary_user.username }}
+                      {{ primary_user.shown_name or primary_user.username }}
                     {% else %}
                       Unassigned
                     {% endif %}

@@ -82,10 +82,10 @@
         <!-- Avatar and Name -->
         <div class="w-40 flex items-center gap-3 flex-shrink-0">
           <div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white font-bold text-sm">
-            {{ (member.full_name or member.username)[0]|upper }}
+            {{ (member.shown_name or member.username)[0]|upper }}
           </div>
           <div class="min-w-0">
-            <p class="font-medium text-slate-900 truncate">{{ member.full_name or member.username }}</p>
+            <p class="font-medium text-slate-900 truncate">{{ member.shown_name or member.username }}</p>
             <p class="text-xs text-slate-500">{{ member.task_count }} tasks</p>
           </div>
         </div>

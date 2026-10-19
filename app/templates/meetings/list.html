@@ -212,15 +212,15 @@
                            onchange="updatePreferencesNotice()" />
                     <div class="flex-shrink-0">
                       {% if u.profile_picture %}
-                      <img src="/web{{ u.profile_picture }}" alt="{{ u.full_name or u.email or 'User' }}" class="w-8 h-8 rounded-full object-cover">
+                      <img src="/web{{ u.profile_picture }}" alt="{{ u.shown_name or u.email or 'User' }}" class="w-8 h-8 rounded-full object-cover">
                       {% else %}
                       <div class="w-8 h-8 rounded-full bg-gradient-to-br from-slate-400 to-slate-600 flex items-center justify-center text-white text-xs font-semibold">
-                        {{ (u.full_name[:1] if u.full_name else (u.email[:1] if u.email else '?')) }}
+                        {{ (u.shown_name[:1] if u.shown_name else (u.email[:1] if u.email else '?')) }}
                       </div>
                       {% endif %}
                     </div>
                     <div class="flex-1 min-w-0">
-                      <span class="text-sm font-medium text-gray-900 block truncate">{{ u.full_name or u.email or 'Unknown User' }}</span>
+                      <span class="text-sm font-medium text-gray-900 block truncate">{{ u.shown_name or u.email or 'Unknown User' }}</span>
                       {% if u.preferred_meeting_platform %}
                       <span class="text-xs 
                         {% if u.preferred_meeting_platform.value == 'google_meet' %}text-green-600

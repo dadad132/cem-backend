@@ -90,6 +90,7 @@ async def init_models() -> None:
         if engine.url.get_backend_name().startswith("sqlite"):
             for table, column, ddl in (
                 ("user", "is_superadmin", "BOOLEAN NOT NULL DEFAULT 0"),
+                ("user", "display_name", "VARCHAR"),
                 ("incoming_email_account", "imap_uid_state", "VARCHAR"),
                 ("ticket", "close_type", "VARCHAR"),
                 ("task", "close_type", "VARCHAR"),

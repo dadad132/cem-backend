@@ -35,7 +35,7 @@ from app.core.security import verify_password, get_password_hash
 from app.core.email import send_email
 from app.models.project import Project
 from app.models.task import Task
-from app.models.user import User
+from app.models.user import User, USER_SHOWN_NAME
 from app.models.enums import TaskStatus, TaskPriority, MeetingPlatform
 from app.models.workspace import Workspace
 from app.models.assignment import Assignment
@@ -806,7 +806,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
     
     # 2. Tasks allocated TO the user (by others)
     tasks_allocated_to_me_result = await db.execute(
-        select(Task, Project.name.label('project_name'), User.full_name.label('creator_name'), User.username.label('creator_username'))
+        select(Task, Project.name.label('project_name'), USER_SHOWN_NAME.label('creator_name'), User.username.label('creator_username'))
         .join(Project, Task.project_id == Project.id)
         .join(Assignment, Task.id == Assignment.task_id)
         .join(User, Task.creator_id == User.id)
@@ -834,7 +834,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
     
     # 3. Tasks the user allocated to OTHERS
     tasks_allocated_by_me_result = await db.execute(
-        select(Task, Project.name.label('project_name'), User.full_name.label('assignee_name'), User.username.label('assignee_username'))
+        select(Task, Project.name.label('project_name'), USER_SHOWN_NAME.label('assignee_name'), User.username.label('assignee_username'))
         .join(Project, Task.project_id == Project.id)
         .join(Assignment, Task.id == Assignment.task_id)
         .join(User, Assignment.assignee_id == User.id)
@@ -904,7 +904,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
     task_progress_updates = []
     if my_task_ids:
         progress_result = await db.execute(
-            select(TaskHistory, Task.title.label('task_title'), User.full_name.label('user_name'), User.username.label('user_username'))
+            select(TaskHistory, Task.title.label('task_title'), USER_SHOWN_NAME.label('user_name'), User.username.label('user_username'))
             .join(Task, TaskHistory.task_id == Task.id)
             .join(User, TaskHistory.editor_id == User.id)
             .where(
@@ -977,7 +977,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
             team_members_result = await db.execute(
                 select(User)
                 .where(User.workspace_id == user.workspace_id, User.is_active == True)
-                .order_by(User.full_name)
+                .order_by(USER_SHOWN_NAME)
             )
             team_members = team_members_result.scalars().all()
             
@@ -1251,7 +1251,7 @@ async def get_what_changed(request: Request, db: AsyncSession = Depends(get_sess
     
     # 1. New tasks assigned to user since last seen
     new_tasks_result = await db.execute(
-        select(Task, Project.name.label('project_name'), User.full_name.label('creator_name'))
+        select(Task, Project.name.label('project_name'), USER_SHOWN_NAME.label('creator_name'))
         .join(Project, Task.project_id == Project.id)
         .join(Assignment, Task.id == Assignment.task_id)
         .join(User, Task.creator_id == User.id)
@@ -1284,7 +1284,7 @@ async def get_what_changed(request: Request, db: AsyncSession = Depends(get_sess
     
     if my_task_ids:
         task_updates_result = await db.execute(
-            select(TaskHistory, Task.title.label('task_title'), User.full_name.label('editor_name'))
+            select(TaskHistory, Task.title.label('task_title'), USER_SHOWN_NAME.label('editor_name'))
             .join(Task, TaskHistory.task_id == Task.id)
             .join(User, TaskHistory.editor_id == User.id)
             .where(
@@ -1745,7 +1745,7 @@ async def web_global_search(
         # Search comments
         comment_results = await db.execute(
             select(Comment, Task.id.label('task_id'), Task.title.label('task_title'), 
-                   Project.name.label('project_name'), User.full_name.label('author_name'))
+                   Project.name.label('project_name'), USER_SHOWN_NAME.label('author_name'))
             .join(Task, Comment.task_id == Task.id)
             .join(Project, Task.project_id == Project.id)
             .join(User, Comment.author_id == User.id)
@@ -2090,7 +2090,7 @@ async def web_task_get_time_logs(
     # Get time logs
     from app.models.task_extensions import TimeLog
     logs_result = await db.execute(
-        select(TimeLog, User.full_name, User.username)
+        select(TimeLog, USER_SHOWN_NAME, User.username)
         .join(User, TimeLog.user_id == User.id)
         .where(TimeLog.task_id == task_id)
         .order_by(TimeLog.logged_at.desc())
@@ -2333,6 +2333,8 @@ async def web_admin_users_list(
             'request': request,
             'user': user,
             'users': users,
+            # Set by web_admin_edit_user just before the page reloads
+            'notice': request.session.pop('users_notice', None),
         },
     )
 
@@ -2372,6 +2374,7 @@ async def web_admin_create_user_post(
     password: str = Form(...),
     full_name: str = Form(...),
     email: str = Form(...),
+    display_name: str = Form(''),
     is_admin: bool = Form(False),
     db: AsyncSession = Depends(get_session),
 ):
@@ -2438,6 +2441,7 @@ async def web_admin_create_user_post(
         username=username,
         hashed_password=get_password_hash(password),
         full_name=full_name,
+        display_name=display_name.strip() or None,
         email=email,
         workspace_id=user.workspace_id,
         is_admin=is_admin,
@@ -2527,7 +2531,7 @@ async def web_admin_user_activity_report(
         await db.execute(
             select(User)
             .where(User.workspace_id == user.workspace_id)
-            .order_by(User.full_name, User.username)
+            .order_by(USER_SHOWN_NAME, User.username)
         )
     ).scalars().all()
     
@@ -2794,7 +2798,7 @@ async def web_admin_generate_user_activity_pdf(
     
     # Title
     elements.append(Paragraph(f"User Activity Report", title_style))
-    elements.append(Paragraph(f"{target_user.full_name or target_user.username}", heading_style))
+    elements.append(Paragraph(f"{target_user.shown_name or target_user.username}", heading_style))
     elements.append(Paragraph(
         f"Period: {start_dt.strftime('%B %d, %Y')} - {end_dt.strftime('%B %d, %Y')}",
         subheading_style
@@ -2924,7 +2928,7 @@ async def web_admin_generate_user_activity_pdf(
         for task, assignment in task_assignments:
             # Task creator is the one who assigned it
             assigner = (await db.execute(select(User).where(User.id == task.creator_id))).scalar_one_or_none()
-            assigner_name = assigner.full_name or assigner.username if assigner else 'Unknown'
+            assigner_name = assigner.shown_name or assigner.username if assigner else 'Unknown'
             due_str = task.due_date.strftime('%Y-%m-%d') if task.due_date else 'None'
             if task.due_date and is_overdue(task.due_date) and task.status.value not in ['done', 'completed', 'archived']:
                 due_str += ' (LATE)'
@@ -3394,7 +3398,7 @@ async def web_admin_generate_user_activity_excel(
     ws_summary = wb.active
     ws_summary.title = "Summary"
     ws_summary.append(["User Activity Report"])
-    ws_summary.append([f"User: {target_user.full_name or target_user.username}"])
+    ws_summary.append([f"User: {target_user.shown_name or target_user.username}"])
     ws_summary.append([f"Period: {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}"])
     ws_summary.append([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"])
     ws_summary.append([])
@@ -3674,7 +3678,7 @@ async def web_admin_user_activity_view(
         task_assignments.append({
             'id': task.id,
             'title': task.title,
-            'assigned_by': assigner.full_name or assigner.username if assigner else 'Unknown',
+            'assigned_by': assigner.shown_name or assigner.username if assigner else 'Unknown',
             'due_date': task.due_date.strftime('%Y-%m-%d') if task.due_date else None,
             'status': task.status.value,
             'time_spent_hours': round(time_spent, 1) if time_spent else None,
@@ -4238,6 +4242,85 @@ async def web_admin_change_user_password(
     await db.commit()
     
     return RedirectResponse('/web/admin/users', status_code=303)
+
+
+@router.post('/admin/users/{user_id}/edit')
+async def web_admin_edit_user(
+    request: Request,
+    user_id: int,
+    username: str = Form(...),
+    display_name: str = Form(''),
+    full_name: str = Form(''),
+    email: str = Form(''),
+    new_password: str = Form(''),
+    db: AsyncSession = Depends(get_session),
+):
+    """Save the Edit User dialog on Team Members.
+
+    Answers in JSON so the dialog can show a problem without losing what the
+    admin typed. A blank new_password keeps the current password.
+    """
+    current_user_id = request.session.get('user_id')
+    if not current_user_id:
+        return RedirectResponse('/web/login', status_code=303)
+
+    current_user = (await db.execute(select(User).where(User.id == current_user_id))).scalar_one_or_none()
+    if not current_user or not current_user.is_active:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    # Get the target user (admins may edit their own account too)
+    target_user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # The server operator account is not managed from company admin screens
+    if target_user.is_superadmin and not current_user.is_superadmin:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Must be in same workspace
+    if target_user.workspace_id != current_user.workspace_id:
+        raise HTTPException(status_code=403, detail="User not in your workspace")
+
+    username = username.strip()
+    email = email.strip()
+    if not username:
+        return JSONResponse({'error': 'Username is required'}, status_code=400)
+
+    if username != target_user.username:
+        taken = await db.execute(
+            select(User.id).where(User.username == username, User.id != user_id).limit(1)
+        )
+        if taken.first():
+            return JSONResponse({'error': 'Username already taken'}, status_code=400)
+
+    if email and email != target_user.email:
+        taken = await db.execute(
+            select(User.id).where(User.email == email, User.id != user_id).limit(1)
+        )
+        if taken.first():
+            return JSONResponse({'error': 'Email already in use'}, status_code=400)
+
+    if new_password:
+        from app.core.security import validate_password
+        is_valid, error_msg = validate_password(new_password)
+        if not is_valid:
+            return JSONResponse({'error': error_msg}, status_code=400)
+        target_user.hashed_password = get_password_hash(new_password)
+
+    target_user.username = username
+    # Blank means "not set", so the full name shows again
+    target_user.display_name = display_name.strip() or None
+    target_user.full_name = full_name.strip() or None
+    target_user.email = email or None
+    await db.commit()
+
+    saved = f'Saved changes to {target_user.shown_name or target_user.username}'
+    request.session['users_notice'] = saved + (', including a new password.' if new_password else '.')
+    return JSONResponse({'ok': True})
 
 
 # --------------------------
@@ -6573,7 +6656,7 @@ async def web_my_tasks(
     # Build assignees map {task_id: ["Name or Email", ...]}
     assocs = (
         await db.execute(
-            select(Assignment.task_id, User.full_name, User.email)
+            select(Assignment.task_id, USER_SHOWN_NAME, User.email)
             .join(User, Assignment.assignee_id == User.id)
             .join(Task, Assignment.task_id == Task.id)
             .join(Project, Task.project_id == Project.id)
@@ -6581,12 +6664,12 @@ async def web_my_tasks(
         )
     ).all()
     assignees_map: dict[int, list[str]] = {}
-    for task_id_val, full_name, email in assocs:
-        label = (full_name or '').strip() or email
+    for task_id_val, shown_name, email in assocs:
+        label = (shown_name or '').strip() or email
         assignees_map.setdefault(task_id_val, []).append(label)
 
     users = (
-        await db.execute(select(User).where(User.workspace_id == user.workspace_id, User.is_active == True).order_by(User.full_name, User.email))
+        await db.execute(select(User).where(User.workspace_id == user.workspace_id, User.is_active == True).order_by(USER_SHOWN_NAME, User.email))
     ).scalars().all()
     projects = (
         await db.execute(select(Project).where(Project.workspace_id == user.workspace_id).order_by(Project.name))
@@ -6862,7 +6945,7 @@ async def web_project_members(request: Request, project_id: int, db: AsyncSessio
         select(User, ProjectMember.assigned_at)
         .join(ProjectMember, User.id == ProjectMember.user_id)
         .where(ProjectMember.project_id == project_id)
-        .order_by(User.full_name, User.email)
+        .order_by(USER_SHOWN_NAME, User.email)
     )).all()
     
     # Get all active workspace users for assignment dropdown
@@ -6870,7 +6953,7 @@ async def web_project_members(request: Request, project_id: int, db: AsyncSessio
         select(User)
         .where(User.workspace_id == user.workspace_id)
         .where(User.is_active == True)
-        .order_by(User.full_name, User.email)
+        .order_by(USER_SHOWN_NAME, User.email)
     )).scalars().all()
     
     # Filter out already assigned users
@@ -6931,12 +7014,12 @@ async def web_project_members_add(
     )).scalar_one_or_none()
     
     if existing:
-        request.session['info_message'] = f'User {target_user.full_name or target_user.email} is already assigned to this project'
+        request.session['info_message'] = f'User {target_user.shown_name or target_user.email} is already assigned to this project'
     else:
         member = ProjectMember(project_id=project_id, user_id=target_user.id, assigned_by=user_id)
         db.add(member)
         await db.commit()
-        request.session['success_message'] = f'Successfully added {target_user.full_name or target_user.email} to the project'
+        request.session['success_message'] = f'Successfully added {target_user.shown_name or target_user.email} to the project'
     
     return RedirectResponse(f'/web/projects/{project_id}/members', status_code=303)
 
@@ -7055,7 +7138,7 @@ async def web_project_report(
         if assignment.task_id not in assignees_map:
             assignees_map[assignment.task_id] = []
         assignees_map[assignment.task_id].append((
-            assignee_user.full_name or assignee_user.username,
+            assignee_user.shown_name or assignee_user.username,
             assignee_user.email
         ))
     
@@ -7084,9 +7167,9 @@ async def web_project_report(
         if uid not in contributor_stats:
             contributor_stats[uid] = {
                 'user': assignee_user,
-                'name': assignee_user.full_name or assignee_user.username,
+                'name': assignee_user.shown_name or assignee_user.username,
                 'email': assignee_user.email,
-                'initials': ''.join([n[0].upper() for n in (assignee_user.full_name or assignee_user.email).split()[:2]]),
+                'initials': ''.join([n[0].upper() for n in (assignee_user.shown_name or assignee_user.email or assignee_user.username).split()[:2]]),
                 'tasks_assigned': 0,
                 'tasks_completed': 0,
                 'hours_logged': 0.0
@@ -7182,7 +7265,7 @@ async def web_project_report(
             activities.append({
                 'action': action,
                 'description': description,
-                'user_name': editor.full_name or editor.username,
+                'user_name': editor.shown_name or editor.username,
                 'task_title': task.title,
                 'created_at': history.created_at
             })
@@ -7282,7 +7365,7 @@ async def web_project_report_pdf(
     for assignment, assignee_user in assignments:
         if assignment.task_id not in assignees_map:
             assignees_map[assignment.task_id] = []
-        assignees_map[assignment.task_id].append(assignee_user.full_name or assignee_user.username)
+        assignees_map[assignment.task_id].append(assignee_user.shown_name or assignee_user.username)
     
     # Get completion dates
     task_completions = {}
@@ -7307,7 +7390,7 @@ async def web_project_report_pdf(
         uid = assignee_user.id
         if uid not in contributor_stats:
             contributor_stats[uid] = {
-                'name': assignee_user.full_name or assignee_user.username,
+                'name': assignee_user.shown_name or assignee_user.username,
                 'tasks_assigned': 0,
                 'tasks_completed': 0,
                 'hours_logged': 0.0
@@ -7532,19 +7615,19 @@ async def web_project_detail(request: Request, project_id: int, db: AsyncSession
         if t.status in columns:
             columns[t.status].append(t)
     
-    # Build assignees map: {task_id: [(full_name, email), ...]}
+    # Build assignees map: {task_id: [(shown name or email, email), ...]}
     assignees_map = {}
     if tasks:
         task_ids = [t.id for t in tasks]
         assignments = (await db.execute(
-            select(Assignment.task_id, User.full_name, User.email)
+            select(Assignment.task_id, USER_SHOWN_NAME, User.email)
             .join(User, User.id == Assignment.assignee_id)
             .where(Assignment.task_id.in_(task_ids))
         )).all()
-        for task_id, full_name, email in assignments:
+        for task_id, shown_name, email in assignments:
             if task_id not in assignees_map:
                 assignees_map[task_id] = []
-            assignees_map[task_id].append((full_name or email, email))
+            assignees_map[task_id].append((shown_name or email, email))
     
     # Fetch subtasks for all tasks
     from app.models.subtask import Subtask
@@ -7580,7 +7663,7 @@ async def web_project_detail(request: Request, project_id: int, db: AsyncSession
             attachment_counts[task_id] = count
     
     # Fetch all active users in workspace for assignment dropdown
-    users = (await db.execute(select(User).where(User.workspace_id == user.workspace_id, User.is_active == True).order_by(User.full_name, User.email))).scalars().all()
+    users = (await db.execute(select(User).where(User.workspace_id == user.workspace_id, User.is_active == True).order_by(USER_SHOWN_NAME, User.email))).scalars().all()
     return templates.TemplateResponse('projects/detail.html', {
         'request': request, 
         'project': project, 
@@ -7802,21 +7885,21 @@ async def web_tasks_list(
     # Get assignees for all tasks
     task_ids = [t.id for t in tasks]
     assocs = (await db.execute(
-        select(Assignment.task_id, User.full_name, User.email)
+        select(Assignment.task_id, USER_SHOWN_NAME, User.email)
         .join(User, Assignment.assignee_id == User.id)
         .where(Assignment.task_id.in_(task_ids) if task_ids else False)
     )).all()
     
     assignees_map: dict[int, list[str]] = {}
-    for task_id_val, full_name, email in assocs:
-        label = (full_name or '').strip() or email
+    for task_id_val, shown_name, email in assocs:
+        label = (shown_name or '').strip() or email
         assignees_map.setdefault(task_id_val, []).append(label)
     
     # Get all users and projects for filters
     users = (await db.execute(
         select(User)
         .where(User.workspace_id == user.workspace_id, User.is_active == True)
-        .order_by(User.full_name, User.email)
+        .order_by(USER_SHOWN_NAME, User.email)
     )).scalars().all()
     
     # Get projects user has access to
@@ -7917,7 +8000,7 @@ async def web_task_detail(request: Request, task_id: int, db: AsyncSession = Dep
     )).all()
     
     # Get all active workspace users
-    users = (await db.execute(select(User).where(User.workspace_id == user.workspace_id, User.is_active == True).order_by(User.full_name, User.email))).scalars().all()
+    users = (await db.execute(select(User).where(User.workspace_id == user.workspace_id, User.is_active == True).order_by(USER_SHOWN_NAME, User.email))).scalars().all()
     
     # Get subtasks ordered by their order field
     from app.models.subtask import Subtask
@@ -8233,7 +8316,7 @@ async def web_task_update(
                 title=task.title,
                 status='Done',
                 priority=task.priority.value.title(),
-                completed_by_name=user.full_name or user.username,
+                completed_by_name=user.shown_name or user.username,
                 created_at=task.created_at,
                 completed_at=task.archived_at or datetime.utcnow(),
                 additional_details=additional_details
@@ -8387,7 +8470,7 @@ async def web_task_complete_with_details(
                 priority=task.priority.value.title() if task.priority else "Normal",
                 created_at=task.created_at,
                 closed_at=task.archived_at or datetime.utcnow(),
-                technician_name=user.full_name or user.username,
+                technician_name=user.shown_name or user.username,
                 client_name=task.customer_name,
                 client_surname=task.customer_surname,
                 client_phone=task.customer_phone,
@@ -8414,7 +8497,7 @@ async def web_task_complete_with_details(
             title=task.title,
             status='Done',
             priority=task.priority.value.title(),
-            completed_by_name=user.full_name or user.username,
+            completed_by_name=user.shown_name or user.username,
             created_at=task.created_at,
             completed_at=task.archived_at,
             additional_details=additional_details,
@@ -8691,7 +8774,7 @@ async def web_task_add_comment(
     )
     assignees = (await db.execute(assignees_stmt)).scalars().all()
     
-    commenter_name = user.full_name or user.username
+    commenter_name = user.shown_name or user.username
     for assignee in assignees:
         notification = Notification(
             user_id=assignee.id,
@@ -9178,7 +9261,7 @@ async def web_task_assign(request: Request, task_id: int, assignee_id: int = For
         # Create notification for the assignee (don't notify if assigning to self)
         if assignee_id != user_id:
             assigner = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-            assigner_name = assigner.full_name or assigner.username if assigner else "Someone"
+            assigner_name = assigner.shown_name or assigner.username if assigner else "Someone"
             
             notification = Notification(
                 user_id=assignee_id,
@@ -9358,7 +9441,7 @@ async def web_meetings_list(request: Request, db: AsyncSession = Depends(get_ses
     users = (await db.execute(
         select(User)
         .where(User.workspace_id == user.workspace_id, User.is_active == True)
-        .order_by(User.full_name, User.email)
+        .order_by(USER_SHOWN_NAME, User.email)
     )).scalars().all()
     
     return templates.TemplateResponse('meetings/list.html', {
@@ -9409,7 +9492,7 @@ async def web_meeting_create(
             
             # Get users for the form
             users_result = await db.execute(
-                select(User).where(User.workspace_id == user.workspace_id).order_by(User.full_name)
+                select(User).where(User.workspace_id == user.workspace_id).order_by(USER_SHOWN_NAME)
             )
             users = users_result.scalars().all()
             
@@ -9602,13 +9685,13 @@ async def web_meeting_details(
         'url': meeting.url,
         'organizer': {
             'id': organizer.id if organizer else None,
-            'name': organizer.full_name if organizer else 'Unknown',
+            'name': organizer.shown_name if organizer else 'Unknown',
             'email': organizer.email if organizer else ''
         },
         'attendees': [
             {
                 'id': user_obj.id,
-                'name': user_obj.full_name,
+                'name': user_obj.shown_name,
                 'email': user_obj.email,
                 'status': attendee_obj.status or 'invited'
             }
@@ -9616,7 +9699,7 @@ async def web_meeting_details(
         ],
         'is_cancelled': meeting.is_cancelled,
         'cancelled_at': meeting.cancelled_at.strftime('%d/%m/%Y at %I:%M %p') if meeting.cancelled_at else None,
-        'cancelled_by': cancelled_by_user.full_name if cancelled_by_user else None,
+        'cancelled_by': cancelled_by_user.shown_name if cancelled_by_user else None,
         'is_organizer': is_organizer,
         'is_admin': user.is_admin
     })
@@ -9818,7 +9901,7 @@ async def web_calendar(
                 User.workspace_id == user.workspace_id,
                 User.is_active == True
             )
-            .order_by(User.full_name)
+            .order_by(USER_SHOWN_NAME)
         )
         workspace_users = (await db.execute(workspace_users_stmt)).scalars().all()
     
@@ -9948,7 +10031,7 @@ async def web_tickets_report(
     
     # Get all users for dropdown and lookups
     users_result = (await db.execute(
-        select(User).where(User.workspace_id == user.workspace_id).order_by(User.full_name, User.username)
+        select(User).where(User.workspace_id == user.workspace_id).order_by(USER_SHOWN_NAME, User.username)
     )).scalars().all()
     users_dict = {u.id: u for u in users_result}
     
@@ -10107,9 +10190,9 @@ async def web_tickets_report(
     for usr in users_result:
         agent_stats[usr.id] = {
             'user': usr,
-            'name': usr.full_name or usr.username,
+            'name': usr.shown_name or usr.username,
             'email': usr.email,
-            'initials': ''.join([n[0].upper() for n in (usr.full_name or usr.email).split()[:2]]),
+            'initials': ''.join([n[0].upper() for n in (usr.shown_name or usr.email or usr.username).split()[:2]]),
             'tickets_assigned': 0,
             'tickets_closed': 0,
             'comments_made': 0,
@@ -10232,7 +10315,7 @@ async def web_tickets_report(
                 'category': ticket.category,
                 'created_at': ticket.created_at,
                 'closed_at': ticket.closed_at,
-                'closed_by_name': (closed_by.full_name or closed_by.username) if closed_by else 'Unknown',
+                'closed_by_name': (closed_by.shown_name or closed_by.username) if closed_by else 'Unknown',
                 'resolution_hours': resolution_hours,
                 'billable_traveling': ticket.billable_traveling or '',
                 'billable_labour_onsite': ticket.billable_labour_onsite or '',
@@ -10256,8 +10339,8 @@ async def web_tickets_report(
                 usr = users_dict.get(comment.user_id)
                 if usr:
                     comment_stats_dict[comment.user_id] = {
-                        'name': usr.full_name or usr.username,
-                        'initials': ''.join([n[0].upper() for n in (usr.full_name or usr.email).split()[:2]]),
+                        'name': usr.shown_name or usr.username,
+                        'initials': ''.join([n[0].upper() for n in (usr.shown_name or usr.email or usr.username).split()[:2]]),
                         'total_comments': 0,
                         'public_comments': 0,
                         'internal_comments': 0,
@@ -10292,8 +10375,8 @@ async def web_tickets_report(
             recent_comments.append({
                 'ticket_id': ticket.id,
                 'ticket_number': ticket.ticket_number,
-                'author_name': (author.full_name or author.username) if author else 'Guest',
-                'author_initials': ''.join([n[0].upper() for n in ((author.full_name or author.email) if author else 'GU').split()[:2]]),
+                'author_name': (author.shown_name or author.username) if author else 'Guest',
+                'author_initials': ''.join([n[0].upper() for n in ((author.shown_name or author.email or author.username) if author else 'GU').split()[:2]]),
                 'content': comment.content,
                 'is_internal': comment.is_internal,
                 'created_at': comment.created_at,
@@ -10318,14 +10401,14 @@ async def web_tickets_report(
                 description = f'changed priority to {history.new_value}'
             elif action == 'assigned':
                 assignee = users_dict.get(int(history.new_value)) if history.new_value else None
-                description = f'assigned to {assignee.full_name or assignee.username}' if assignee else 'assigned'
+                description = f'assigned to {assignee.shown_name or assignee.username}' if assignee else 'assigned'
             elif action == 'commented':
                 description = 'added a comment'
             
             activities.append({
                 'action': action,
                 'description': description,
-                'user_name': (usr.full_name or usr.username) if usr else 'System',
+                'user_name': (usr.shown_name or usr.username) if usr else 'System',
                 'ticket_id': ticket.id,
                 'ticket_number': ticket.ticket_number,
                 'ticket_subject': ticket.subject,
@@ -10378,7 +10461,7 @@ async def web_tickets_report(
                 'category': ticket.category,
                 'status': ticket.status,
                 'created_at': ticket.created_at,
-                'assigned_to_name': (assigned_user.full_name or assigned_user.username) if assigned_user else 'Unknown',
+                'assigned_to_name': (assigned_user.shown_name or assigned_user.username) if assigned_user else 'Unknown',
                 'project_name': project.name if project else None,
             })
     assigned_tickets.sort(key=lambda x: x['created_at'], reverse=True)
@@ -10401,7 +10484,7 @@ async def web_tickets_report(
             'category': ticket.category,
             'status': ticket.status,
             'created_at': ticket.created_at,
-            'assigned_to_name': (assigned_user.full_name or assigned_user.username) if assigned_user else 'Unassigned',
+            'assigned_to_name': (assigned_user.shown_name or assigned_user.username) if assigned_user else 'Unassigned',
             'project_name': project.name if project else None,
             'time_open_hours': time_open,
         })
@@ -10421,8 +10504,8 @@ async def web_tickets_report(
             'category': ticket.category,
             'status': ticket.status,
             'created_at': ticket.created_at,
-            'created_by_name': (created_by_user.full_name or created_by_user.username) if created_by_user else (ticket.guest_name or 'Guest'),
-            'assigned_to_name': (assigned_user.full_name or assigned_user.username) if assigned_user else 'Unassigned',
+            'created_by_name': (created_by_user.shown_name or created_by_user.username) if created_by_user else (ticket.guest_name or 'Guest'),
+            'assigned_to_name': (assigned_user.shown_name or assigned_user.username) if assigned_user else 'Unassigned',
             'project_name': project.name if project else None,
         })
     created_tickets.sort(key=lambda x: x['created_at'], reverse=True)
@@ -10579,7 +10662,7 @@ async def web_tickets_report_pdf(
     agent_stats = {}
     for usr in users_result:
         agent_stats[usr.id] = {
-            'name': usr.full_name or usr.username,
+            'name': usr.shown_name or usr.username,
             'tickets_assigned': 0,
             'tickets_closed': 0,
             'comments_made': 0,
@@ -10703,7 +10786,7 @@ async def web_tickets_report_pdf(
             closed_data.append([
                 ticket.ticket_number,
                 Paragraph(ticket.subject, styles['Normal']),
-                Paragraph((closed_by.full_name or closed_by.username) if closed_by else 'Unknown', styles['Normal']),
+                Paragraph((closed_by.shown_name or closed_by.username) if closed_by else 'Unknown', styles['Normal']),
                 ticket.priority.title(),
                 f'{resolution_hours}h',
             ])
@@ -10772,7 +10855,7 @@ async def web_tickets_report_pdf(
         open_data.append([
             ticket.ticket_number,
             Paragraph(ticket.subject[:50] + ('...' if len(ticket.subject) > 50 else ''), styles['Normal']),
-            Paragraph((assigned_to.full_name or assigned_to.username) if assigned_to else 'Unassigned', styles['Normal']),
+            Paragraph((assigned_to.shown_name or assigned_to.username) if assigned_to else 'Unassigned', styles['Normal']),
             ticket.priority.title(),
             ticket.status.replace('_', ' ').title(),
             f'{days_open}d',
@@ -10806,7 +10889,7 @@ async def web_tickets_report_pdf(
         comment_data.append([
             comment.created_at.strftime('%m/%d %H:%M'),
             ticket.ticket_number if ticket else 'N/A',
-            Paragraph((author.full_name or author.username) if author else 'Guest', styles['Normal']),
+            Paragraph((author.shown_name or author.username) if author else 'Guest', styles['Normal']),
             Paragraph(comment_text, styles['Normal']),
         ])
     
@@ -10982,7 +11065,7 @@ async def web_tickets_report_excel(
     agent_stats = {}
     for usr in users_result:
         agent_stats[usr.id] = {
-            'name': usr.full_name or usr.username,
+            'name': usr.shown_name or usr.username,
             'email': usr.email,
             'tickets_assigned': 0,
             'tickets_closed': 0,
@@ -11063,7 +11146,7 @@ async def web_tickets_report_excel(
     ws_summary.append([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"])
     if user_id_int:
         filter_user = users_dict.get(user_id_int)
-        append_row(ws_summary, [f"Filtered by User: {filter_user.full_name or filter_user.username if filter_user else 'Unknown'}"])
+        append_row(ws_summary, [f"Filtered by User: {filter_user.shown_name or filter_user.username if filter_user else 'Unknown'}"])
     if project_id_int:
         filter_project = projects_dict.get(project_id_int)
         append_row(ws_summary, [f"Filtered by Project: {filter_project.name if filter_project else 'Unknown'}"])
@@ -11106,7 +11189,7 @@ async def web_tickets_report_excel(
             ticket.status,
             ticket.priority,
             ticket.category or '',
-            (assigned_to.full_name or assigned_to.username) if assigned_to else '',
+            (assigned_to.shown_name or assigned_to.username) if assigned_to else '',
             ticket.created_at.strftime('%Y-%m-%d %H:%M'),
             ticket.closed_at.strftime('%Y-%m-%d %H:%M') if ticket.closed_at else '',
             resolution_hrs,
@@ -11152,7 +11235,7 @@ async def web_tickets_report_excel(
                 client_name,
                 ticket.priority,
                 ticket.category or '',
-                (closed_by.full_name or closed_by.username) if closed_by else 'Unknown',
+                (closed_by.shown_name or closed_by.username) if closed_by else 'Unknown',
                 ticket.created_at.strftime('%Y-%m-%d %H:%M'),
                 ticket.closed_at.strftime('%Y-%m-%d %H:%M'),
                 resolution_hours,
@@ -11182,7 +11265,7 @@ async def web_tickets_report_excel(
             ticket.status.replace('_', ' ').title(),
             ticket.priority,
             ticket.category or '',
-            (assigned_to.full_name or assigned_to.username) if assigned_to else 'Unassigned',
+            (assigned_to.shown_name or assigned_to.username) if assigned_to else 'Unassigned',
             ticket.created_at.strftime('%Y-%m-%d %H:%M'),
             days_open,
             project.name if project else '',
@@ -11200,7 +11283,7 @@ async def web_tickets_report_excel(
         append_row(ws_comments, [
             comment.created_at.strftime('%Y-%m-%d %H:%M'),
             ticket.ticket_number if ticket else '',
-            (author.full_name or author.username) if author else 'Guest',
+            (author.shown_name or author.username) if author else 'Guest',
             comment.content,
             'Yes' if comment.is_internal else 'No',
         ])
@@ -11219,7 +11302,7 @@ async def web_tickets_report_excel(
         append_row(ws_history, [
             history.created_at.strftime('%Y-%m-%d %H:%M'),
             ticket.ticket_number if ticket else '',
-            (usr.full_name or usr.username) if usr else 'System',
+            (usr.shown_name or usr.username) if usr else 'System',
             history.action.replace('_', ' ').title(),
             details,
         ])
@@ -11324,6 +11407,7 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
             User.id == Ticket.assigned_to_id,
             or_(
                 User.full_name.ilike(search_pattern),
+                User.display_name.ilike(search_pattern),
                 User.email.ilike(search_pattern),
             )
         )
@@ -11333,6 +11417,7 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
             User.id == Ticket.created_by_id,
             or_(
                 User.full_name.ilike(search_pattern),
+                User.display_name.ilike(search_pattern),
                 User.email.ilike(search_pattern),
             )
         )
@@ -11576,7 +11661,7 @@ async def web_tickets_create(
             notification = Notification(
                 user_id=assigned_to_user_id,
                 type='ticket',
-                message=f'{user.full_name or user.username} assigned you ticket #{ticket_number}: {subject}{calendar_info}',
+                message=f'{user.shown_name or user.username} assigned you ticket #{ticket_number}: {subject}{calendar_info}',
                 url=f'/web/tickets/{ticket.id}',
                 related_id=ticket.id
             )
@@ -11596,13 +11681,13 @@ async def web_tickets_create(
             calendar_info = ""
             if scheduled_datetime and assigned_to_user_id:
                 assigned_user = (await db.execute(select(User).where(User.id == assigned_to_user_id))).scalar_one_or_none()
-                assigned_name = assigned_user.full_name or assigned_user.username if assigned_user else "Unknown"
+                assigned_name = assigned_user.shown_name or assigned_user.username if assigned_user else "Unknown"
                 calendar_info = f" and added to calendar for {assigned_name} on {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}"
             
             notification = Notification(
                 user_id=admin.id,
                 type='ticket',
-                message=f'{user.full_name or user.username} created ticket #{ticket_number}: {subject}{calendar_info}',
+                message=f'{user.shown_name or user.username} created ticket #{ticket_number}: {subject}{calendar_info}',
                 url=f'/web/tickets/{ticket.id}',
                 related_id=ticket.id
             )
@@ -14594,7 +14679,7 @@ async def _work_timer_context(db: AsyncSession, owner_col, owner_id: int) -> dic
     timer['user_names'] = {}
     if user_ids:
         for u in (await db.execute(select(User).where(User.id.in_(user_ids)))).scalars().all():
-            timer['user_names'][u.id] = u.full_name or u.username
+            timer['user_names'][u.id] = u.shown_name or u.username
     return timer
 
 
@@ -14698,7 +14783,7 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
     )).scalars().all()
 
     # For "who" fields stored as user ids (signatures, assignment history)
-    user_names = {u.id: (u.full_name or u.username) for u in users}
+    user_names = {u.id: (u.shown_name or u.username) for u in users}
 
     return templates.TemplateResponse('tickets/detail.html', {
         'request': request,
@@ -15187,7 +15272,7 @@ async def send_ticket_comment_email(ticket, content: str, user_id: int, db: Asyn
                 log(f"[EMAIL] Added References with {len(all_message_ids)} message IDs")
             
             # Build email body
-            commenter_name = user.full_name or user.username if user else "Support Team"
+            commenter_name = user.shown_name or user.username if user else "Support Team"
             
             email_body = f"""
 <html>
@@ -15396,7 +15481,7 @@ async def web_tickets_update_status(
             notification = Notification(
                 user_id=ticket.assigned_to_id,
                 type='ticket',
-                message=f'{user.full_name or user.username} changed ticket #{ticket.ticket_number} status to {status}',
+                message=f'{user.shown_name or user.username} changed ticket #{ticket.ticket_number} status to {status}',
                 url=f'/web/tickets/{ticket_id}',
                 related_id=ticket_id
             )
@@ -15417,7 +15502,7 @@ async def web_tickets_update_status(
                 title=ticket.subject,
                 status='Closed',
                 priority=ticket.priority.title() if ticket.priority else 'Normal',
-                completed_by_name=user.full_name or user.username,
+                completed_by_name=user.shown_name or user.username,
                 created_at=ticket.created_at,
                 completed_at=ticket.closed_at or datetime.utcnow(),
                 additional_details=additional_details
@@ -15567,7 +15652,7 @@ async def web_tickets_close_with_details(
             notification = Notification(
                 user_id=ticket.assigned_to_id,
                 type='ticket',
-                message=f'{user.full_name or user.username} closed ticket #{ticket.ticket_number}',
+                message=f'{user.shown_name or user.username} closed ticket #{ticket.ticket_number}',
                 url=f'/web/tickets/{ticket_id}',
                 related_id=ticket_id
             )
@@ -15623,7 +15708,7 @@ async def web_tickets_close_with_details(
                 priority=ticket.priority.title() if ticket.priority else "Normal",
                 created_at=ticket.created_at,
                 closed_at=ticket.closed_at,
-                technician_name=user.full_name or user.username,
+                technician_name=user.shown_name or user.username,
                 client_name=ticket.job_client_name,
                 client_surname=ticket.job_client_surname,
                 client_phone=ticket.job_client_phone,
@@ -15650,7 +15735,7 @@ async def web_tickets_close_with_details(
             title=ticket.subject,
             status='Closed',
             priority=ticket.priority.title() if ticket.priority else 'Normal',
-            completed_by_name=user.full_name or user.username,
+            completed_by_name=user.shown_name or user.username,
             created_at=ticket.created_at,
             completed_at=ticket.closed_at,
             additional_details=additional_details,
@@ -15855,7 +15940,7 @@ async def web_tickets_forward(
     if note and note.strip():
         note_block = f'''
         <div style="background:#eff6ff;border-left:4px solid #3b82f6;padding:14px 18px;margin-bottom:24px;border-radius:0 8px 8px 0;">
-            <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#1d4ed8;text-transform:uppercase;letter-spacing:.5px;">Note from {user.full_name or user.username}</p>
+            <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#1d4ed8;text-transform:uppercase;letter-spacing:.5px;">Note from {user.shown_name or user.username}</p>
             <p style="margin:0;color:#1e3a5f;font-size:14px;white-space:pre-wrap;">{note.strip()}</p>
         </div>'''
 
@@ -15864,7 +15949,7 @@ async def web_tickets_forward(
         comment_items = ''
         for c in comments:
             author = authors.get(c.user_id)
-            author_name = author.full_name or author.username if author else 'Guest'
+            author_name = author.shown_name or author.username if author else 'Guest'
             ts = c.created_at.strftime('%b %d, %Y %H:%M')
             comment_items += f'''
             <div style="border-left:3px solid #e2e8f0;padding:12px 16px;margin-bottom:12px;background:#f9fafb;border-radius:0 6px 6px 0;">
@@ -15888,11 +15973,11 @@ async def web_tickets_forward(
         submitter_name = ' '.join(p for p in parts if p) or ticket.guest_email or 'Guest'
     elif ticket.created_by_id:
         creator = (await db.execute(select(User).where(User.id == ticket.created_by_id))).scalar_one_or_none()
-        submitter_name = (creator.full_name or creator.username) if creator else 'Unknown'
+        submitter_name = (creator.shown_name or creator.username) if creator else 'Unknown'
 
     company_name = email_settings.company_name or email_settings.smtp_from_name or 'Support Team'
     created_fmt = ticket.created_at.strftime('%B %d, %Y at %H:%M')
-    forwarded_by = user.full_name or user.username
+    forwarded_by = user.shown_name or user.username
 
     html_body = f'''<!DOCTYPE html>
 <html>
@@ -16048,7 +16133,7 @@ async def web_tickets_assign(
             notification = Notification(
                 user_id=assigned_to_id,
                 type='ticket',
-                message=f'{user.full_name or user.username} assigned you ticket #{ticket.ticket_number}: {ticket.subject}',
+                message=f'{user.shown_name or user.username} assigned you ticket #{ticket.ticket_number}: {ticket.subject}',
                 url=f'/web/tickets/{ticket_id}',
                 related_id=ticket_id
             )
@@ -16480,7 +16565,7 @@ async def web_chats_list(request: Request, db: AsyncSession = Depends(get_sessio
     users = (await db.execute(
         select(User)
         .where(User.workspace_id == user.workspace_id, User.id != user_id, User.is_active == True)
-        .order_by(User.full_name, User.email)
+        .order_by(USER_SHOWN_NAME, User.email)
     )).scalars().all()
     
     return templates.TemplateResponse('chats/list.html', {
@@ -16561,7 +16646,7 @@ async def web_chat_detail(request: Request, chat_id: int, db: AsyncSession = Dep
     
     # Get all messages
     messages_stmt = (
-        select(Message, User.full_name, User.email)
+        select(Message, USER_SHOWN_NAME, User.email)
         .join(User, Message.author_id == User.id)
         .where(Message.chat_id == chat_id)
         .order_by(Message.created_at.asc())
@@ -16585,8 +16670,8 @@ async def web_chat_detail(request: Request, chat_id: int, db: AsyncSession = Dep
     
     # Combine messages with sender names and attachments
     messages_with_sender = [
-        (msg, full_name or email, attachments_by_message.get(msg.id, []))
-        for msg, full_name, email in results
+        (msg, shown_name or email, attachments_by_message.get(msg.id, []))
+        for msg, shown_name, email in results
     ]
     
     # Get chat members
@@ -16594,7 +16679,7 @@ async def web_chat_detail(request: Request, chat_id: int, db: AsyncSession = Dep
         select(User)
         .join(ChatMember, User.id == ChatMember.user_id)
         .where(ChatMember.chat_id == chat_id)
-        .order_by(User.full_name, User.email)
+        .order_by(USER_SHOWN_NAME, User.email)
     )
     members = (await db.execute(members_stmt)).scalars().all()
     
@@ -16750,7 +16835,7 @@ async def web_chat_send_message(
     
     # Build intelligent notification message
     chat_name = chat.name if chat and chat.name else 'chat'
-    sender_name = user.full_name or user.username
+    sender_name = user.shown_name or user.username
     
     # Create message preview (keep it short)
     message_preview = ""
@@ -16837,7 +16922,7 @@ async def web_invite_user_form(request: Request, db: AsyncSession = Depends(get_
     users = (await db.execute(
         select(User)
         .where(User.workspace_id == user.workspace_id)
-        .order_by(User.full_name, User.email)
+        .order_by(USER_SHOWN_NAME, User.email)
     )).scalars().all()
     
     return templates.TemplateResponse('users/invite.html', {
@@ -16875,7 +16960,7 @@ async def web_invite_user(
     users = (await db.execute(
         select(User)
         .where(User.workspace_id == user.workspace_id)
-        .order_by(User.full_name, User.email)
+        .order_by(USER_SHOWN_NAME, User.email)
     )).scalars().all()
     
     if existing:
@@ -16923,7 +17008,7 @@ async def web_invite_user(
     users = (await db.execute(
         select(User)
         .where(User.workspace_id == user.workspace_id)
-        .order_by(User.full_name, User.email)
+        .order_by(USER_SHOWN_NAME, User.email)
     )).scalars().all()
     
     return templates.TemplateResponse('users/invite.html', {
@@ -17073,7 +17158,7 @@ async def web_activity_feed(
             time_ago = f"{int(time_diff.total_seconds() / 86400)}d ago"
         
         activities.append({
-            'user_name': actor.full_name or actor.email if actor else 'Unknown',
+            'user_name': actor.shown_name or actor.email if actor else 'Unknown',
             'action_type': log.action_type,
             'action_text': log.action_type.replace('_', ' '),
             'entity_type': log.entity_type,
@@ -17169,7 +17254,7 @@ async def web_activity_feed(
                 
                 user_stats.append({
                     'user_id': member.id,
-                    'user_name': member.full_name or member.email,
+                    'user_name': member.shown_name or member.email,
                     'user_email': member.email,
                     'completed_month': len(completed_month),
                     'completed_late': len(completed_late),
@@ -17225,7 +17310,7 @@ async def web_activity_feed(
             
             user_stats.append({
                 'user_id': user.id,
-                'user_name': user.full_name or user.email,
+                'user_name': user.shown_name or user.email,
                 'user_email': user.email,
                 'completed_month': len(completed_month),
                 'completed_on_time': len(completed_on_time),
@@ -17352,7 +17437,7 @@ async def web_workload(
         team_workload.append({
             'id': member.id,
             'username': member.username,
-            'full_name': member.full_name,
+            'shown_name': member.shown_name,
             'task_count': len(member_tasks),
             'todo_count': todo_count,
             'in_progress_count': in_progress_count,
@@ -17450,7 +17535,7 @@ async def templates_page(
     # Get workspace members
     members = (await db.execute(
         select(User).where(User.workspace_id == user.workspace_id, User.is_active == True)
-        .order_by(User.full_name)
+        .order_by(USER_SHOWN_NAME)
     )).scalars().all()
     
     return templates.TemplateResponse("templates/index.html", {
@@ -18087,7 +18172,7 @@ async def web_kb_resolved_case_create(
         time_to_resolve=time_to_resolve,
         ticket_number=ticket_number.strip() or None,
         resolved_by_id=user.id,
-        resolved_by_name=user.full_name or user.username,
+        resolved_by_name=user.shown_name or user.username,
     )
     db.add(case)
     await db.commit()

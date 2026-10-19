@@ -1,6 +1,10 @@
 {% extends "base.html" %}
 
 {% block content %}
+{# What the Edit User dialog is filled with; read back in openEditUserModal #}
+{% macro edit_user_data(u) -%}
+data-user-id="{{ u.id }}" data-username="{{ u.username }}" data-display-name="{{ u.display_name or '' }}" data-full-name="{{ u.full_name or '' }}" data-email="{{ u.email or '' }}" data-shown-name="{{ u.shown_name or u.username }}"
+{%- endmacro %}
 <div class="max-w-7xl mx-auto">
     <!-- Header -->
     <div class="mb-8">
@@ -27,6 +31,13 @@
             {% endif %}
         </div>
     </div>
+
+    {% if notice %}
+    <div class="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3">
+        <i class="fas fa-check-circle text-green-600"></i>
+        <p class="text-sm font-medium text-green-800">{{ notice }}</p>
+    </div>
+    {% endif %}
 
     <!-- Stats Cards -->
     <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
@@ -103,12 +114,16 @@
                             <div class="flex items-center">
                                 <div class="flex-shrink-0 h-10 w-10">
                                     <div class="h-10 w-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-semibold">
-                                        {{ (u.full_name or u.username)[0]|upper }}
+                                        {{ (u.shown_name or u.username)[0]|upper }}
                                     </div>
                                 </div>
                                 <div class="ml-4">
                                     <div class="text-sm font-medium text-gray-900">
-                                        {{ u.full_name or 'No name set' }}
+                                        {{ u.shown_name or 'No name set' }}
+                                        {# Admins also see who a display name belongs to #}
+                                        {% if user.is_admin and u.display_name and u.full_name and u.display_name != u.full_name %}
+                                        <span class="text-gray-400" style="font-weight: 400;">({{ u.full_name }})</span>
+                                        {% endif %}
                                     </div>
                                     <div class="text-sm text-gray-500">
                                         {{ u.email or 'No email set' }}
@@ -180,15 +195,21 @@
                                          class="origin-top-right absolute right-0 mt-2 w-56 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 divide-y divide-gray-100 z-50"
                                          style="display: none;">
                                         <div class="py-1">
+                                            <!-- Edit username, names, email and password -->
+                                            <button type="button" @click="open = false; openEditUserModal($el)" {{ edit_user_data(u) }} class="block w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left">
+                                                <i class="fas fa-user-pen mr-2 text-indigo-600"></i>
+                                                Edit User
+                                            </button>
+
                                             <!-- Admin Toggle -->
                                             <form method="POST" action="/web/admin/users/{{ u.id }}/toggle-admin" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">
                                                 {% if u.is_admin %}
-                                                <button type="submit" onclick="return confirm('Remove admin rights from {{ u.username }}?');" class="w-full text-left flex items-center">
+                                                <button type="submit" onclick='return confirm({{ ("Remove admin rights from " ~ u.username ~ "?")|tojson }});' class="w-full text-left flex items-center">
                                                     <i class="fas fa-user-slash mr-2 text-purple-600"></i>
                                                     Revoke Admin
                                                 </button>
                                                 {% else %}
-                                                <button type="submit" onclick="return confirm('Grant admin rights to {{ u.username }}?');" class="w-full text-left flex items-center">
+                                                <button type="submit" onclick='return confirm({{ ("Grant admin rights to " ~ u.username ~ "?")|tojson }});' class="w-full text-left flex items-center">
                                                     <i class="fas fa-user-shield mr-2 text-purple-600"></i>
                                                     Grant Admin
                                                 </button>
@@ -199,12 +220,12 @@
                                             {% if not u.is_admin %}
                                             <form method="POST" action="/web/admin/users/{{ u.id }}/toggle-ticket-visibility" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">
                                                 {% if u.can_see_all_tickets %}
-                                                <button type="submit" onclick="return confirm('Restrict {{ u.username }} to project tickets only?');" class="w-full text-left flex items-center">
+                                                <button type="submit" onclick='return confirm({{ ("Restrict " ~ u.username ~ " to project tickets only?")|tojson }});' class="w-full text-left flex items-center">
                                                     <i class="fas fa-eye-slash mr-2 text-amber-600"></i>
                                                     Limit to Projects
                                                 </button>
                                                 {% else %}
-                                                <button type="submit" onclick="return confirm('Allow {{ u.username }} to see all tickets?');" class="w-full text-left flex items-center">
+                                                <button type="submit" onclick='return confirm({{ ("Allow " ~ u.username ~ " to see all tickets?")|tojson }});' class="w-full text-left flex items-center">
                                                     <i class="fas fa-eye mr-2 text-blue-600"></i>
                                                     Grant All Tickets
                                                 </button>
@@ -230,7 +251,7 @@
                                             {% endif %}
                                             
                                             <!-- Change Password -->
-                                            <button onclick="showPasswordModal({{ u.id }}, '{{ u.username }}'); open = false;" class="block w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left">
+                                            <button onclick='showPasswordModal({{ u.id }}, {{ u.username|tojson }}); open = false;' class="block w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 text-left">
                                                 <i class="fas fa-key mr-2 text-blue-600"></i>
                                                 Change Password
                                             </button>
@@ -240,7 +261,7 @@
                                             <!-- Activate/Deactivate -->
                                             {% if u.is_active %}
                                             <form method="POST" action="/web/admin/users/{{ u.id }}/deactivate" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">
-                                                <button type="submit" onclick="return confirm('Deactivate {{ u.username }}? They will lose access.');" class="w-full text-left flex items-center">
+                                                <button type="submit" onclick='return confirm({{ ("Deactivate " ~ u.username ~ "? They will lose access.")|tojson }});' class="w-full text-left flex items-center">
                                                     <i class="fas fa-user-lock mr-2 text-orange-600"></i>
                                                     Deactivate User
                                                 </button>
@@ -258,7 +279,7 @@
                                         <div class="py-1">
                                             <!-- Delete -->
                                             <form method="POST" action="/web/admin/users/{{ u.id }}/delete" class="block px-4 py-2 text-sm text-red-700 hover:bg-red-50">
-                                                <button type="submit" onclick="return confirm('PERMANENTLY DELETE {{ u.username }}? This cannot be undone!');" class="w-full text-left flex items-center">
+                                                <button type="submit" onclick='return confirm({{ ("PERMANENTLY DELETE " ~ u.username ~ "? This cannot be undone!")|tojson }});' class="w-full text-left flex items-center">
                                                     <i class="fas fa-trash mr-2 text-red-600"></i>
                                                     Delete User
                                                 </button>
@@ -267,7 +288,13 @@
                                     </div>
                                 </div>
                             {% else %}
-                                <span class="text-gray-400 text-xs italic">You</span>
+                                <div class="inline-flex items-center gap-3">
+                                    <span class="text-gray-400 text-xs italic">You</span>
+                                    <button type="button" onclick="openEditUserModal(this)" {{ edit_user_data(u) }} class="inline-flex items-center px-3 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50">
+                                        <i class="fas fa-user-pen mr-1"></i>
+                                        Edit
+                                    </button>
+                                </div>
                             {% endif %}
                         </td>
                         {% endif %}
@@ -417,4 +444,205 @@ document.getElementById('passwordModal').addEventListener('click', function(even
     }
 });
 </script>
+
+{% if user.is_admin %}
+<!-- Edit User dialog. Styled here rather than with Tailwind classes because the
+     compiled tailwind.min.css only has the classes in use when it was built. -->
+<style>
+  /* Padding clears the notch and home bar when installed as an app
+     (viewport-fit=cover); the card then fits in what is left. */
+  #editUserModal {
+    position:fixed; inset:0; z-index:70; display:flex; align-items:center; justify-content:center;
+    padding:max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right))
+            max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+    background:rgba(15,23,42,.55);
+  }
+  #editUserModal[hidden] { display:none; }
+  .eu-card {
+    width:100%; max-width:32rem; max-height:100%; display:flex; flex-direction:column; overflow:hidden;
+    background:#fff; border-radius:1rem; box-shadow:0 25px 50px -12px rgba(0,0,0,.4);
+  }
+  .eu-header {
+    display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; flex-shrink:0;
+    padding:1rem 1.25rem; color:#fff; background:linear-gradient(135deg, var(--sb-a) 0%, var(--ac-d) 100%);
+  }
+  .eu-kicker { font-size:.7rem; font-weight:600; letter-spacing:.1em; text-transform:uppercase; color:rgba(255,255,255,.65); }
+  .eu-title { font-size:1.05rem; font-weight:700; overflow-wrap:anywhere; }
+  .eu-close { padding:.25rem; font-size:1.1rem; line-height:1; color:rgba(255,255,255,.7); background:none; border:0; cursor:pointer; }
+  .eu-close:hover { color:#fff; }
+  .eu-form { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; }
+  .eu-body { min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:1rem; padding:1.25rem; }
+  .eu-label { display:block; margin-bottom:.35rem; font-size:.875rem; font-weight:600; color:#334155; }
+  .eu-required { color:#ef4444; }
+  .eu-input {
+    width:100%; padding:.6rem .8rem; font-size:.9rem; color:#0f172a; background:#fff;
+    border:1px solid #cbd5e1; border-radius:.5rem;
+  }
+  .eu-input:focus { outline:none; border-color:var(--ac); box-shadow:0 0 0 3px var(--ac-20); }
+  .eu-hint { margin-top:.3rem; font-size:.75rem; color:#64748b; }
+  .eu-password { display:grid; grid-template-columns:1fr; gap:1rem; padding-top:1rem; border-top:1px solid #e2e8f0; }
+  @media (min-width: 520px) { .eu-password { grid-template-columns:1fr 1fr; } }
+  .eu-password .eu-hint { grid-column:1 / -1; margin-top:-.5rem; }
+  .eu-error {
+    padding:.6rem .75rem; font-size:.875rem; font-weight:600; color:#b91c1c;
+    background:#fef2f2; border:1px solid #fecaca; border-radius:.5rem;
+  }
+  .eu-footer {
+    display:flex; justify-content:flex-end; gap:.75rem; flex-shrink:0; padding:.9rem 1.25rem;
+    border-top:1px solid #e2e8f0; background:#f8fafc;
+  }
+  .eu-btn { padding:.6rem 1.1rem; font-size:.9rem; font-weight:600; border-radius:.6rem; cursor:pointer; }
+  .eu-btn-secondary { color:#475569; background:#fff; border:1px solid #cbd5e1; }
+  .eu-btn-secondary:hover { background:#f1f5f9; }
+  .eu-btn-primary { color:#fff; border:0; background:linear-gradient(135deg, var(--ac-d), var(--ac)); }
+  .eu-btn-primary:disabled { opacity:.6; cursor:wait; }
+</style>
+
+<div id="editUserModal" role="dialog" aria-modal="true" aria-labelledby="editUserTitle" hidden>
+  <div class="eu-card">
+    <div class="eu-header">
+      <div style="min-width: 0;">
+        <p class="eu-kicker">Edit User</p>
+        <h2 id="editUserTitle" class="eu-title"></h2>
+      </div>
+      <button type="button" class="eu-close" onclick="closeEditUserModal()" aria-label="Close">
+        <i class="fas fa-times"></i>
+      </button>
+    </div>
+
+    <form id="editUserForm" class="eu-form">
+      <div class="eu-body">
+        <div id="euError" class="eu-error" role="alert" hidden></div>
+
+        <div>
+          <label class="eu-label" for="euUsername">Username <span class="eu-required">*</span></label>
+          <input class="eu-input" id="euUsername" name="username" type="text" required
+                 autocomplete="off" autocapitalize="none" spellcheck="false" style="font-family: monospace;">
+          <p class="eu-hint">Used to log in.</p>
+        </div>
+
+        <div>
+          <label class="eu-label" for="euDisplayName">Display name</label>
+          <input class="eu-input" id="euDisplayName" name="display_name" type="text" autocomplete="off" placeholder="e.g. John">
+          <p class="eu-hint">Shown everywhere instead of the full name, e.g. just a first name. Leave blank to show the full name.</p>
+        </div>
+
+        <div>
+          <label class="eu-label" for="euFullName">Full name</label>
+          <input class="eu-input" id="euFullName" name="full_name" type="text" autocomplete="off" placeholder="John Doe">
+        </div>
+
+        <div>
+          <label class="eu-label" for="euEmail">Email</label>
+          <input class="eu-input" id="euEmail" name="email" type="email" autocomplete="off" placeholder="john.doe@company.com">
+        </div>
+
+        <div class="eu-password">
+          <div>
+            <label class="eu-label" for="euNewPassword">New password</label>
+            <input class="eu-input" id="euNewPassword" name="new_password" type="password" minlength="6" autocomplete="new-password">
+          </div>
+          <div>
+            <label class="eu-label" for="euConfirmPassword">Confirm new password</label>
+            {# No name: only checked here, never sent #}
+            <input class="eu-input" id="euConfirmPassword" type="password" minlength="6" autocomplete="new-password">
+          </div>
+          <p class="eu-hint">Leave blank to keep the current password. A new one needs at least 6 characters, including an uppercase letter.</p>
+        </div>
+      </div>
+
+      <div class="eu-footer">
+        <button type="button" class="eu-btn eu-btn-secondary" onclick="closeEditUserModal()">Cancel</button>
+        <button type="submit" id="euSave" class="eu-btn eu-btn-primary">Save changes</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+(function () {
+    var modal = document.getElementById('editUserModal');
+    var form = document.getElementById('editUserForm');
+    var errorBox = document.getElementById('euError');
+    var confirmInput = document.getElementById('euConfirmPassword');
+    var saveButton = document.getElementById('euSave');
+    var editingId = null;
+    var opener = null;
+
+    function resetSaveButton() {
+        saveButton.disabled = false;
+        saveButton.textContent = 'Save changes';
+    }
+
+    function showError(message) {
+        errorBox.textContent = message;
+        errorBox.hidden = false;
+        errorBox.scrollIntoView({ block: 'nearest' });
+        resetSaveButton();
+    }
+
+    // Called with the clicked button, which carries the user's current values
+    window.openEditUserModal = function (button) {
+        var data = button.dataset;
+        opener = button;
+        editingId = data.userId;
+        document.getElementById('editUserTitle').textContent = data.shownName;
+        form.elements.username.value = data.username;
+        form.elements.display_name.value = data.displayName;
+        form.elements.full_name.value = data.fullName;
+        form.elements.email.value = data.email;
+        form.elements.new_password.value = '';
+        confirmInput.value = '';
+        errorBox.hidden = true;
+        resetSaveButton();
+        modal.hidden = false;
+        form.elements.username.focus();
+    };
+
+    window.closeEditUserModal = function () {
+        modal.hidden = true;
+        // The opener may be in an Actions menu that has closed since
+        if (opener && opener.offsetParent !== null) opener.focus();
+    };
+
+    form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        if (form.elements.new_password.value !== confirmInput.value) {
+            showError('The two passwords do not match.');
+            return;
+        }
+        errorBox.hidden = true;
+        saveButton.disabled = true;
+        saveButton.textContent = 'Saving...';
+        fetch('/web/admin/users/' + editingId + '/edit', {
+            method: 'POST',
+            body: new FormData(form),
+            credentials: 'same-origin'
+        }).then(function (response) {
+            // Signed out in the meantime: the server sent us to the login page
+            if (response.redirected) {
+                window.location.href = response.url;
+                return;
+            }
+            return response.json().then(function (result) {
+                if (response.ok) {
+                    window.location.reload();  // shows the new values and a notice
+                } else {
+                    showError(result.error || result.detail || 'The changes could not be saved.');
+                }
+            });
+        }).catch(function () {
+            showError('The changes could not be saved. Please try again.');
+        });
+    });
+
+    modal.addEventListener('click', function (event) {
+        if (event.target === modal) closeEditUserModal();
+    });
+    document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape' && !modal.hidden) closeEditUserModal();
+    });
+})();
+</script>
+{% endif %}
 {% endblock %}

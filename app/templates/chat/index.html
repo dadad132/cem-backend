@@ -23,7 +23,7 @@
       <form method="post" action="/web/chats/create-dm" class="flex gap-2">
         <select name="other_user_id" class="flex-1 rounded border border-slate-300 px-3 py-2 text-sm">
           {% for u in users %}
-            <option value="{{ u.id }}">{{ (u.full_name or '').strip() or u.email }}</option>
+            <option value="{{ u.id }}">{{ (u.shown_name or '').strip() or u.email }}</option>
           {% endfor %}
         </select>
         <button class="px-3 py-2 rounded bg-slate-900 text-white text-sm">Start DM</button>

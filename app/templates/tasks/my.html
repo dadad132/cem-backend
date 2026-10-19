@@ -8,7 +8,7 @@
         <select name="assignee_id" class="ml-1 rounded border border-slate-300 px-2 py-1" style="max-width: 14rem">
           <option value="">All</option>
           {% for u in (users or []) %}
-            <option value="{{ u.id }}" {% if selected and selected.assignee_id and selected.assignee_id|int == u.id %}selected{% endif %}>{{ u.full_name or u.email }}</option>
+            <option value="{{ u.id }}" {% if selected and selected.assignee_id and selected.assignee_id|int == u.id %}selected{% endif %}>{{ u.shown_name or u.email }}</option>
           {% endfor %}
         </select>
       </label>

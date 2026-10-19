@@ -110,10 +110,10 @@
                 {% if message.sender_id == user.id %}
                 <div class="flex-shrink-0 ml-3">
                   {% if user.profile_picture %}
-                    <img src="/web{{ user.profile_picture }}" alt="{{ user.full_name or user.username }}" class="w-8 h-8 rounded-full object-cover">
+                    <img src="/web{{ user.profile_picture }}" alt="{{ user.shown_name or user.username }}" class="w-8 h-8 rounded-full object-cover">
                   {% else %}
                     <div class="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center text-white text-xs font-semibold">
-                      {{ user.full_name[:1] if user.full_name else 'U' }}
+                      {{ user.shown_name[:1] if user.shown_name else 'U' }}
                     </div>
                   {% endif %}
                 </div>
@@ -182,16 +182,16 @@
           <div class="flex items-center gap-3 p-3 hover:bg-slate-50 transition-colors">
             <div class="relative flex-shrink-0">
               {% if member.profile_picture %}
-                <img src="/web{{ member.profile_picture }}" alt="{{ member.full_name or member.username }}" class="w-10 h-10 rounded-full object-cover">
+                <img src="/web{{ member.profile_picture }}" alt="{{ member.shown_name or member.username }}" class="w-10 h-10 rounded-full object-cover">
               {% else %}
                 <div class="w-10 h-10 rounded-full bg-gradient-to-br from-slate-400 to-slate-600 flex items-center justify-center text-white font-semibold text-sm">
-                  {{ member.full_name[:1] if member.full_name else member.email[:1] }}
+                  {{ member.shown_name[:1] if member.shown_name else member.email[:1] }}
                 </div>
               {% endif %}
               <div class="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-green-500 rounded-full border-2 border-white"></div>
             </div>
             <div class="flex-1 min-w-0">
-              <div class="font-medium text-sm text-gray-900 truncate">{{ member.full_name or 'User' }}</div>
+              <div class="font-medium text-sm text-gray-900 truncate">{{ member.shown_name or 'User' }}</div>
               <div class="text-xs text-slate-500 truncate">{{ member.email }}</div>
             </div>
             {% if member.id == user.id %}

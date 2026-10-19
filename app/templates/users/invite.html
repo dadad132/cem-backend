@@ -50,14 +50,14 @@
       <div class="flex flex-wrap items-center justify-between gap-3 p-3 border border-slate-200 rounded">
         <div class="flex items-center gap-3 min-w-0">
           {% if member.profile_picture %}
-            <img src="/web{{ member.profile_picture }}" alt="{{ member.full_name or member.username }}" class="w-10 h-10 rounded-full object-cover">
+            <img src="/web{{ member.profile_picture }}" alt="{{ member.shown_name or member.username }}" class="w-10 h-10 rounded-full object-cover">
           {% else %}
             <div class="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center font-medium">
-              {{ member.full_name[:1] if member.full_name else member.email[:1] }}
+              {{ member.shown_name[:1] if member.shown_name else member.email[:1] }}
             </div>
           {% endif %}
           <div class="min-w-0">
-            <div class="font-medium">{{ member.full_name or 'User' }}</div>
+            <div class="font-medium">{{ member.shown_name or 'User' }}</div>
             <div class="text-sm text-slate-500">{{ member.email }}</div>
           </div>
         </div>

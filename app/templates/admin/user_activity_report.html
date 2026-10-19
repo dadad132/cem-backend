@@ -22,7 +22,7 @@
           <option value="">-- Select a user --</option>
           {% for usr in users %}
             <option value="{{ usr.id }}">
-              {{ usr.full_name or usr.username }}
+              {{ usr.shown_name or usr.username }}
               {% if usr.is_admin %}(Admin){% endif %}
               {% if not usr.is_active %}[Inactive]{% endif %}
             </option>

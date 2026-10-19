@@ -238,7 +238,7 @@
                         class="w-full px-4 py-2.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary-500">
                     <option value="">Unassigned</option>
                     {% for member in members %}
-                    <option value="{{ member.id }}">{{ member.full_name or member.username }}</option>
+                    <option value="{{ member.id }}">{{ member.shown_name or member.username }}</option>
                     {% endfor %}
                 </select>
             </div>

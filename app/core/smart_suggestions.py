@@ -101,7 +101,7 @@ async def get_suggested_assignees(
                 if user:
                     suggestions.append({
                         'user_id': user.id,
-                        'name': user.full_name or user.username,
+                        'name': user.shown_name or user.username,
                         'email': user.email,
                         'frequency': count,
                         'confidence': min(count / 10, 1.0)  # Cap at 100%

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}User Activity Report - {{ target_user.full_name or target_user.username }}{% endblock %}
+{% block title %}User Activity Report - {{ target_user.shown_name or target_user.username }}{% endblock %}
 
 {% block content %}
 <div class="max-w-7xl mx-auto">
@@ -15,7 +15,7 @@
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
                 </svg>
-                <span>{{ target_user.full_name or target_user.username }}</span>
+                <span>{{ target_user.shown_name or target_user.username }}</span>
             </div>
             <h1 class="text-2xl font-bold text-gray-900">
                 <svg class="w-7 h-7 inline-block mr-2 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -75,10 +75,10 @@
     <div class="bg-gradient-to-r from-indigo-600 to-purple-600 rounded-lg shadow-lg p-6 mb-6 text-white">
         <div class="flex items-center gap-4">
             <div class="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center">
-                <span class="text-2xl font-bold">{{ (target_user.full_name or target_user.username)[:2]|upper }}</span>
+                <span class="text-2xl font-bold">{{ (target_user.shown_name or target_user.username)[:2]|upper }}</span>
             </div>
             <div>
-                <h2 class="text-2xl font-bold">{{ target_user.full_name or target_user.username }}</h2>
+                <h2 class="text-2xl font-bold">{{ target_user.shown_name or target_user.username }}</h2>
                 <p class="text-indigo-100">{{ target_user.email }}</p>
                 <p class="text-sm text-indigo-200 mt-1">
                     Report Period: {{ start_date }} to {{ end_date }}

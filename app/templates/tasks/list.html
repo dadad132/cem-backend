@@ -87,7 +87,7 @@
         <option value="">All Assignees</option>
         {% for user in users %}
           <option value="{{ user.id }}" {% if selected.assignee_id == user.id|string %}selected{% endif %}>
-            {{ user.full_name or user.email }}
+            {{ user.shown_name or user.email }}
           </option>
         {% endfor %}
       </select>

@@ -634,14 +634,14 @@
           {% if user %}
           <a href="/web/profile" class="nav-item flex items-center gap-3 px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white transition-all mb-2">
             {% if user.profile_picture %}
-              <img src="/web{{ user.profile_picture }}" alt="{{ user.full_name or user.username }}" class="w-8 h-8 rounded-full object-cover flex-shrink-0">
+              <img src="/web{{ user.profile_picture }}" alt="{{ user.shown_name or user.username }}" class="w-8 h-8 rounded-full object-cover flex-shrink-0">
             {% else %}
               <div class="w-8 h-8 rounded-full bg-gradient-to-br from-red-500 to-rose-600 flex items-center justify-center text-white text-sm font-bold flex-shrink-0">
-                {{ user.full_name[:1] if user.full_name else 'U' }}
+                {{ user.shown_name[:1] if user.shown_name else 'U' }}
               </div>
             {% endif %}
             <div class="flex-1 min-w-0">
-              <p class="text-sm font-medium text-white truncate">{{ user.full_name or user.username }}</p>
+              <p class="text-sm font-medium text-white truncate">{{ user.shown_name or user.username }}</p>
               <p class="text-xs text-gray-400 truncate">{{ user.email }}</p>
             </div>
           </a>
@@ -709,14 +709,14 @@
             <div class="relative group">
               <button class="flex items-center gap-1 lg:gap-2 px-2 lg:px-3 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 transition-all">
                 {% if user and user.profile_picture %}
-                  <img src="/web{{ user.profile_picture }}" alt="{{ user.full_name or user.username }}" class="w-7 h-7 lg:w-8 lg:h-8 rounded-full object-cover shadow-md">
+                  <img src="/web{{ user.profile_picture }}" alt="{{ user.shown_name or user.username }}" class="w-7 h-7 lg:w-8 lg:h-8 rounded-full object-cover shadow-md">
                 {% else %}
                   <div class="w-7 h-7 lg:w-8 lg:h-8 rounded-full bg-gradient-to-r from-red-600 to-red-700 flex items-center justify-center text-white font-semibold text-sm shadow-md">
-                    {{ user.full_name[:1] if user and user.full_name else 'U' }}
+                    {{ user.shown_name[:1] if user and user.shown_name else 'U' }}
                   </div>
                 {% endif %}
                 <div class="hidden lg:block text-left min-w-0" style="max-width: 11rem">
-                  <div class="text-sm font-medium text-gray-800 truncate">{{ user.full_name if user else 'User' }}</div>
+                  <div class="text-sm font-medium text-gray-800 truncate">{{ user.shown_name if user else 'User' }}</div>
                   <div class="text-xs text-gray-600 truncate">{{ user.email if user else '' }}</div>
                 </div>
                 <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">

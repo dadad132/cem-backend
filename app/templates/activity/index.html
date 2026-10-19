@@ -60,10 +60,10 @@
                             {% set activity_user = users_map.get(activity.user_id) %}
                             {% if activity_user %}
                             <div class="w-8 h-8 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 flex items-center justify-center text-white text-sm font-medium">
-                                {{ (activity_user.full_name or activity_user.username)[:1]|upper }}
+                                {{ (activity_user.shown_name or activity_user.username)[:1]|upper }}
                             </div>
                             <div>
-                                <span class="font-medium text-gray-900 dark:text-white">{{ activity_user.full_name or activity_user.username }}</span>
+                                <span class="font-medium text-gray-900 dark:text-white">{{ activity_user.shown_name or activity_user.username }}</span>
                                 <span class="text-gray-500 dark:text-gray-400 ml-1">{{ activity.action_type }} a {{ activity.entity_type }}</span>
                             </div>
                             {% else %}

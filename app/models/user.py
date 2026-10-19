@@ -4,6 +4,7 @@ from typing import Optional
 from datetime import datetime
 import random
 
+from sqlalchemy import func
 from sqlmodel import Field, SQLModel
 from .enums import MeetingPlatform
 
@@ -35,6 +36,9 @@ class UserBase(SQLModel):
     username: str = Field(index=True, unique=True)
     email: Optional[str] = Field(default=None, index=True)
     full_name: Optional[str] = None
+    # Shown instead of full_name when set, e.g. just a first name. Only admins
+    # set it (Team Members > Edit User); NULL, never '', when not set.
+    display_name: Optional[str] = None
     is_active: bool = True
     is_admin: bool = False
     preferred_meeting_platform: Optional[MeetingPlatform] = None
@@ -44,6 +48,14 @@ class UserBase(SQLModel):
     can_see_all_tickets: bool = Field(default=False)  # If True, user sees all tickets regardless of project membership
     mute_ticket_notifications: bool = Field(default=False)  # If True, user won't receive ticket notifications
     show_bubbles_analytics: bool = Field(default=False)  # If True (and can_see_all_tickets), show Bubbles analytics dashboard
+
+    @property
+    def shown_name(self) -> Optional[str]:
+        """The name to show for this user: the display name, else the full name.
+
+        Can be empty, so callers keep their own last fallback (username, email).
+        """
+        return self.display_name or self.full_name
 
 
 class User(UserBase, table=True):
@@ -66,6 +78,11 @@ class User(UserBase, table=True):
     # Activity tracking for "What Changed" feature
     last_seen_at: Optional[datetime] = None  # Last time user was active
     away_summary_preference: str = Field(default="ask")  # "always", "ask", or "never"
+
+
+# User.shown_name in SQL, for queries that select or sort by the name itself
+# instead of loading User rows. NULLIF matches the property if '' slips in.
+USER_SHOWN_NAME = func.coalesce(func.nullif(User.display_name, ''), User.full_name)
 
 
 class UserCreate(SQLModel):
