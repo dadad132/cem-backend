@@ -14995,6 +14995,93 @@ async def web_ticket_older_history(
     })
 
 
+async def _ticket_job_card_pdf(db: AsyncSession, ticket, workspace) -> bytes:
+    """The ticket's job card PDF, from what the ticket holds now.
+
+    The same card is e-mailed to billing on a billable close and printed from
+    the ticket page, so the two always match.
+    """
+    from app.core.job_card_pdf import generate_job_card_pdf
+    from app.core.work_timer import format_duration, get_time_entries, worked_seconds
+    from app.models.ticket import TicketSignature, TicketTimeEntry
+
+    # Who did the work: whoever closed the ticket, else its assigned technician
+    technician = None
+    for technician_id in (ticket.closed_by_id, ticket.assigned_to_id):
+        if technician_id:
+            technician = (await db.execute(select(User).where(User.id == technician_id))).scalar_one_or_none()
+            if technician:
+                break
+
+    worked = worked_seconds(await get_time_entries(db, TicketTimeEntry.ticket_id, ticket.id))
+    signature = (await db.execute(
+        select(TicketSignature)
+        .where(TicketSignature.ticket_id == ticket.id)
+        .order_by(TicketSignature.signed_at.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+
+    company_name, logo_path = 'Support Team', None
+    if workspace:
+        company_name = workspace.name or company_name
+        if workspace.logo_url:
+            logo_path = str(BASE_DIR / workspace.logo_url.lstrip('/'))
+
+    return generate_job_card_pdf(
+        ticket_number=ticket.ticket_number,
+        subject=ticket.subject,
+        priority=ticket.priority.title() if ticket.priority else 'Normal',
+        created_at=ticket.created_at,
+        closed_at=ticket.closed_at,
+        technician_name=(technician.shown_name or technician.username) if technician else 'Not assigned',
+        client_name=ticket.job_client_name,
+        client_surname=ticket.job_client_surname,
+        client_phone=ticket.job_client_phone,
+        client_office_number=ticket.job_client_office_number,
+        billable_traveling=ticket.billable_traveling,
+        billable_labour_onsite=ticket.billable_labour_onsite,
+        billable_remote_labour=ticket.billable_remote_labour,
+        billable_sundries=ticket.billable_equipment_used,
+        additional_notes=ticket.closing_notes,
+        time_worked=format_duration(worked) if worked else None,
+        close_type=ticket.close_type,
+        signature_png=signature.image_png if signature else None,
+        signer_name=signature.signer_name if signature else None,
+        signed_at=signature.signed_at if signature else None,
+        tz_name=workspace.timezone if workspace else None,
+        company_name=company_name,
+        logo_path=logo_path,
+    )
+
+
+@router.get('/tickets/{ticket_id}/job-card')
+async def web_ticket_job_card(request: Request, ticket_id: int, db: AsyncSession = Depends(get_session)):
+    """The ticket's job card as a PDF, opened in a new tab to print.
+
+    Anyone in the company can print it, at any stage of the ticket: it shows
+    the client, billable work, time worked and signature the ticket holds now.
+    """
+    from fastapi.responses import Response
+
+    user, ticket, workspace = await _ticket_part_access(request, db, ticket_id)
+    if not user:
+        return RedirectResponse('/web/login', status_code=303)
+    if not ticket:
+        return RedirectResponse('/web/tickets', status_code=303)
+    try:
+        pdf = await _ticket_job_card_pdf(db, ticket, workspace)
+    except Exception as e:
+        logger.error(f"Failed to generate job card PDF for ticket {ticket.ticket_number}: {e}")
+        return HTMLResponse('<p>The job card could not be created. The error has been logged.</p>', status_code=500)
+
+    filename = _re.sub(r'[^A-Za-z0-9_-]', '', ticket.ticket_number or str(ticket.id))
+    return Response(pdf, media_type='application/pdf', headers={
+        # inline: the browser shows it, with its own Print button
+        'Content-Disposition': f'inline; filename="JobCard_{filename}.pdf"',
+        'Cache-Control': 'no-store',
+    })
+
+
 def _decode_signature_png(data_url: Optional[str]) -> Optional[bytes]:
     """PNG bytes from the signature pad's data URL, or None if it is not a valid PNG."""
     import base64
@@ -15876,40 +15963,12 @@ async def web_tickets_close_with_details(
             additional_details_parts.append(f"Notes: {ticket.closing_notes}")
     additional_details = "\n".join(additional_details_parts)
 
-    # Generate PDF job card (billable only)
+    # Generate PDF job card (billable only), the same one the ticket page prints
     pdf_bytes = None
     if not is_sla:
         try:
-            from app.core.job_card_pdf import generate_job_card_pdf
-            from app.models.workspace import Workspace as WS
-            ws = (await db.execute(select(WS).where(WS.id == ticket.workspace_id))).scalar_one_or_none()
-            logo_path = None
-            company_name = "Support Team"
-            if ws:
-                company_name = ws.name or company_name
-                if ws.logo_url:
-                    import os
-                    logo_path = os.path.join(os.getcwd(), "app", ws.logo_url.lstrip("/"))
-            pdf_bytes = generate_job_card_pdf(
-                ticket_number=ticket.ticket_number,
-                subject=ticket.subject,
-                priority=ticket.priority.title() if ticket.priority else "Normal",
-                created_at=ticket.created_at,
-                closed_at=ticket.closed_at,
-                technician_name=user.shown_name or user.username,
-                client_name=ticket.job_client_name,
-                client_surname=ticket.job_client_surname,
-                client_phone=ticket.job_client_phone,
-                client_office_number=ticket.job_client_office_number,
-                billable_traveling=ticket.billable_traveling,
-                billable_labour_onsite=ticket.billable_labour_onsite,
-                billable_remote_labour=ticket.billable_remote_labour,
-                billable_sundries=ticket.billable_equipment_used,
-                additional_notes=ticket.closing_notes,
-                time_worked=time_worked,
-                company_name=company_name,
-                logo_path=logo_path,
-            )
+            ws = (await db.execute(select(Workspace).where(Workspace.id == ticket.workspace_id))).scalar_one_or_none()
+            pdf_bytes = await _ticket_job_card_pdf(db, ticket, ws)
         except Exception as e:
             logger.error(f"Failed to generate job card PDF for ticket {ticket.ticket_number}: {e}")
 

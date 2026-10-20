@@ -1,13 +1,15 @@
 """
 Job Card PDF Generator using ReportLab.
-Produces a professional A4 job card for closed tickets.
+Produces a professional A4 job card for tickets and tasks: e-mailed to billing
+on a billable close, and printed from the ticket page at any stage.
 """
 from __future__ import annotations
 
 import io
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
+from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
@@ -39,12 +41,37 @@ def _style(name, **kwargs) -> ParagraphStyle:
     return ParagraphStyle(name, parent=base, **kwargs)
 
 
+def _text(value) -> str:
+    """Plain text for a Paragraph, which otherwise reads <, > and & as markup
+    (a subject like "Tom & Jerry <b>" made the whole job card fail)."""
+    return escape(str(value)).replace("\n", "<br/>")
+
+
+def _zone(tz_name: Optional[str]):
+    """The company's timezone, or None for UTC (or when it is not known here)."""
+    if not tz_name or tz_name == "UTC":
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(tz_name)
+    except Exception:
+        return None
+
+
+def _local(dt: Optional[datetime], zone) -> Optional[datetime]:
+    """A stored (UTC) time as the company's local time."""
+    if dt is None or zone is None:
+        return dt
+    aware = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return aware.astimezone(zone).replace(tzinfo=None)
+
+
 def generate_job_card_pdf(
     ticket_number: str,
     subject: str,
     priority: str,
     created_at: datetime,
-    closed_at: datetime,
+    closed_at: Optional[datetime],  # None while the ticket is still open
     technician_name: str,
     # Client details
     client_name: Optional[str] = None,
@@ -60,11 +87,24 @@ def generate_job_card_pdf(
     additional_notes: Optional[str] = None,
     # Time on the ticket timer, e.g. "3h 05m" (row left out when None)
     time_worked: Optional[str] = None,
+    # "sla" when the client's SLA covers the work, so there is nothing to bill
+    close_type: Optional[str] = None,
+    # The customer's signature captured on the ticket, drawn on the signature line
+    signature_png: Optional[bytes] = None,
+    signer_name: Optional[str] = None,
+    signed_at: Optional[datetime] = None,
+    # Company timezone for the times printed (stored times are UTC)
+    tz_name: Optional[str] = None,
     # Branding
     company_name: str = "Support Team",
     logo_path: Optional[str] = None,
 ) -> bytes:
     """Return a PDF job card as bytes."""
+
+    zone = _zone(tz_name)
+    created_at, closed_at, signed_at = (_local(t, zone) for t in (created_at, closed_at, signed_at))
+    printed_at = _local(datetime.now(timezone.utc), zone).replace(tzinfo=None)
+    zone_label = tz_name if zone else "UTC"
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -108,18 +148,20 @@ def generate_job_card_pdf(
             img._restrictSize(48 * mm, 18 * mm)
             left_cells.append(img)
         except Exception:
-            left_cells.append(Paragraph(company_name, s_company))
+            left_cells.append(Paragraph(_text(company_name), s_company))
     else:
-        left_cells.append(Paragraph(company_name, s_company))
+        left_cells.append(Paragraph(_text(company_name), s_company))
 
     left_cells.append(Spacer(1, 2 * mm))
     left_cells.append(Paragraph("JOB CARD", s_jobcard_title))
 
+    # Closed tickets carry their closing time; an open one, when it was printed
+    card_time = closed_at or printed_at
     right_cells = [
-        Paragraph(f"#{ticket_number}", s_ticket_no),
+        Paragraph(_text(f"#{ticket_number}"), s_ticket_no),
         Spacer(1, 1 * mm),
-        Paragraph(f"Date: {closed_at.strftime('%d %B %Y')}", s_meta),
-        Paragraph(f"Time: {closed_at.strftime('%H:%M')}", s_meta),
+        Paragraph(f"Date: {card_time.strftime('%d %B %Y')}", s_meta),
+        Paragraph(f"Time: {card_time.strftime('%H:%M')}", s_meta),
     ]
 
     header_table = Table(
@@ -155,7 +197,7 @@ def generate_job_card_pdf(
     def info_row(label: str, value: str, alt: bool = False):
         bg = ROW_ALT if alt else colors.white
         row = Table(
-            [[Paragraph(label, s_label), Paragraph(value or "—", s_value_normal)]],
+            [[Paragraph(label, s_label), Paragraph(_text(value) if value else "—", s_value_normal)]],
             colWidths=[W * 0.38, W * 0.62],
         )
         row.setStyle(TableStyle([
@@ -174,7 +216,7 @@ def generate_job_card_pdf(
     story.append(info_row("Ticket Number", f"#{ticket_number}", True))
     story.append(info_row("Priority", priority.title(), False))
     story.append(info_row("Opened", created_at.strftime("%d %b %Y  %H:%M"), True))
-    story.append(info_row("Closed", closed_at.strftime("%d %b %Y  %H:%M"), False))
+    story.append(info_row("Closed", closed_at.strftime("%d %b %Y  %H:%M") if closed_at else "Not closed yet", False))
     story.append(info_row("Technician", technician_name, True))
     if time_worked:
         story.append(info_row("Time Worked", time_worked, False))
@@ -190,15 +232,18 @@ def generate_job_card_pdf(
 
     # ── Billable work ────────────────────────────────────────────────
     story.append(section_header("  BILLABLE WORK"))
-    story.append(info_row("Traveling", billable_traveling, False))
-    story.append(info_row("Labour Onsite", billable_labour_onsite, True))
-    story.append(info_row("Remote Labour", billable_remote_labour, False))
-    story.append(info_row("Sundries", billable_sundries, True))
+    if (close_type or "").lower() == "sla":
+        story.append(info_row("Billing", "Covered by the client's SLA - nothing to bill", False))
+    else:
+        story.append(info_row("Traveling", billable_traveling, False))
+        story.append(info_row("Labour Onsite", billable_labour_onsite, True))
+        story.append(info_row("Remote Labour", billable_remote_labour, False))
+        story.append(info_row("Sundries", billable_sundries, True))
     story.append(Spacer(1, 4 * mm))
 
     # ── Additional notes ─────────────────────────────────────────────
     story.append(section_header("  ADDITIONAL NOTES"))
-    notes_text = additional_notes or "No additional notes."
+    notes_text = _text(additional_notes) if additional_notes else "No additional notes."
     notes_tbl = Table(
         [[Paragraph(notes_text, s_note)]],
         colWidths=[W],
@@ -216,14 +261,27 @@ def generate_job_card_pdf(
 
     # ── Signature lines ──────────────────────────────────────────────
     sig_line = "_" * 32
+    client_sig = Paragraph(sig_line, s_sig_label)
+    client_label = "Client Signature"
+    if signature_png:
+        # The signature the customer drew on the ticket, in place of the blank line
+        try:
+            client_sig = Image(io.BytesIO(signature_png))
+            client_sig._restrictSize(W * 0.38, 22 * mm)
+            signed = [_text(signer_name)] if signer_name else []
+            if signed_at:
+                signed.append(signed_at.strftime("%d %b %Y %H:%M"))
+            client_label = "Client Signature" + ("<br/>" + "  ·  ".join(signed) if signed else "")
+        except Exception:
+            client_sig = Paragraph(sig_line, s_sig_label)
     sig_data = [
         [
-            Paragraph(sig_line, s_sig_label),
+            client_sig,
             Paragraph("", s_sig_label),
             Paragraph(sig_line, s_sig_label),
         ],
         [
-            Paragraph("Client Signature", s_sig_label),
+            Paragraph(client_label, s_sig_label),
             Paragraph("", s_sig_label),
             Paragraph("Technician Signature", s_sig_label),
         ],
@@ -231,6 +289,7 @@ def generate_job_card_pdf(
     sig_table = Table(sig_data, colWidths=[W * 0.4, W * 0.2, W * 0.4])
     sig_table.setStyle(TableStyle([
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, 0), "BOTTOM"),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
     ]))
@@ -240,7 +299,7 @@ def generate_job_card_pdf(
     # ── Footer ───────────────────────────────────────────────────────
     story.append(HRFlowable(width="100%", thickness=0.5, color=BRAND_BORDER, spaceAfter=3 * mm))
     story.append(Paragraph(
-        f"{company_name}  ·  Job Card generated {datetime.utcnow().strftime('%d %b %Y %H:%M')} UTC",
+        f"{_text(company_name)}  ·  Job Card generated {printed_at.strftime('%d %b %Y %H:%M')} {_text(zone_label)}",
         s_footer,
     ))
 
