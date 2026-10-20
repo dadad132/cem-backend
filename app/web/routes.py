@@ -163,6 +163,54 @@ templates.env.filters['format_clock'] = _format_clock
 import json as _json
 templates.env.filters['fromjson'] = lambda s: _json.loads(s) if s else {}
 
+import re as _re
+from markupsafe import Markup, escape
+
+# Web and e-mail addresses in plain text. Bounded repeats, and e-mail
+# addresses tried only where a word starts, keep the scan fast even on a huge
+# unbroken token in an e-mailed message.
+_LINK_RE = _re.compile(
+    r"https?://[^\s<>\"']{1,2000}"
+    r"|(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,24}"
+)
+
+
+def linkify(text) -> Markup:
+    """Escape plain text and make its web and e-mail addresses clickable.
+
+    Done on the server: rewriting innerHTML in the browser was slow on long
+    tickets, and let an e-mailed link inject attributes (and script).
+    """
+    if not text:
+        return Markup('')
+    parts, pos = [], 0
+    for match in _LINK_RE.finditer(text):
+        link, end = match.group(0), match.end()
+        if link.startswith(('http://', 'https://')):
+            # Sentence punctuation after a link is not part of it
+            while link[-1] in '.,;:!?' or (link[-1] == ')' and link.count('(') < link.count(')')):
+                link = link[:-1]
+            end = match.start() + len(link)
+            html = Markup('<a href="{0}" target="_blank" rel="noopener noreferrer" '
+                          'class="text-blue-600 hover:underline">{0}</a>').format(link)
+        else:
+            html = Markup('<a href="mailto:{0}" class="text-blue-600 hover:underline">{0}</a>').format(link)
+        parts.append(escape(text[pos:match.start()]))
+        parts.append(html)
+        pos = end
+    parts.append(escape(text[pos:]))
+    return Markup('').join(parts)
+
+
+templates.env.filters['linkify'] = linkify
+
+# Long-running tickets: the page shows the newest comments and history, and
+# the rest load when asked for. Longer comments (often whole HTML e-mails)
+# show their start, with "Show the full message".
+TICKET_COMMENTS_SHOWN = 30
+TICKET_HISTORY_SHOWN = 20
+templates.env.globals['comment_clip_chars'] = 5000
+
 router = APIRouter(tags=['web'])
 
 
@@ -14716,34 +14764,23 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
     if ticket.assigned_to_id:
         assigned_user = (await db.execute(select(User).where(User.id == ticket.assigned_to_id))).scalar_one_or_none()
     
-    # Get comments
-    comments_result = await db.execute(
-        select(TicketComment)
-        .where(TicketComment.ticket_id == ticket_id)
-        .order_by(TicketComment.created_at.asc())
+    # Newest comments only (newest first); "Show older comments" loads the rest
+    comments, older_comments = await _ticket_rows_page(
+        db, TicketComment, ticket_id, TICKET_COMMENTS_SHOWN
     )
-    comments = comments_result.scalars().all()
-    
-    # Get comment authors in a single batch query (avoid N+1)
-    comment_user_ids = list(set(c.user_id for c in comments if c.user_id))
-    comment_authors = {None: None}  # Pre-set None for guest comments
-    if comment_user_ids:
-        authors_result = await db.execute(select(User).where(User.id.in_(comment_user_ids)))
-        for author in authors_result.scalars().all():
-            comment_authors[author.id] = author
-    
+    comment_count = len(comments) + older_comments
+    comment_authors = await _comment_authors(db, comments)
+
     # Get attachments
     attachments = (await db.execute(
         select(TicketAttachment).where(TicketAttachment.ticket_id == ticket_id)
     )).scalars().all()
-    
-    # Get history
-    history = (await db.execute(
-        select(TicketHistory)
-        .where(TicketHistory.ticket_id == ticket_id)
-        .order_by(TicketHistory.created_at.desc())
-    )).scalars().all()
-    
+
+    # Newest history only; "Show older history" loads the rest
+    history, older_history = await _ticket_rows_page(
+        db, TicketHistory, ticket_id, TICKET_HISTORY_SHOWN
+    )
+
     # Get all users for assignment
     users = (await db.execute(
         select(User).where(User.workspace_id == user.workspace_id)
@@ -14768,10 +14805,7 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         select(Workspace).where(Workspace.id == user.workspace_id)
     )).scalar_one_or_none()
 
-    comment_time_fmt = '%b %d, %Y %H:%M'
-    if workspace and workspace.comment_time_format != '24hr':
-        comment_time_fmt = '%b %d, %Y %I:%M %p'
-    comment_tz = (workspace.comment_timezone or workspace.timezone or 'UTC') if workspace else 'UTC'
+    comment_time_fmt, comment_tz = _comment_time_settings(workspace)
 
     from app.models.ticket import TicketSignature, TicketTimeEntry
     timer = await _work_timer_context(db, TicketTimeEntry.ticket_id, ticket_id)
@@ -14792,9 +14826,12 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         'creator': creator,
         'assigned_user': assigned_user,
         'comments': comments,
+        'comment_count': comment_count,
+        'older_comments': older_comments,
         'comment_authors': comment_authors,
         'attachments': attachments,
         'history': history,
+        'older_history': older_history,
         'users': users,
         'related_project': related_project,
         'closed_by_user': closed_by_user,
@@ -14804,6 +14841,157 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         'timer': timer,
         'signatures': signatures,
         'user_names': user_names,
+    })
+
+
+async def _ticket_rows_page(db: AsyncSession, model, ticket_id: int, limit: int, before=None):
+    """A page of a ticket's comments or history, newest first, and how many older rows remain.
+
+    `before` is the oldest row already on the page; the new page continues after it.
+    """
+    conditions = [model.ticket_id == ticket_id]
+    if before is not None:
+        conditions.append(or_(
+            model.created_at < before.created_at,
+            and_(model.created_at == before.created_at, model.id < before.id),
+        ))
+    rows = (await db.execute(
+        select(model).where(*conditions)
+        .order_by(model.created_at.desc(), model.id.desc())
+        .limit(limit)
+    )).scalars().all()
+    if len(rows) < limit:
+        return rows, 0
+    from sqlalchemy import func
+    total = (await db.execute(select(func.count()).select_from(model).where(*conditions))).scalar() or 0
+    return rows, total - len(rows)
+
+
+async def _comment_authors(db: AsyncSession, comments) -> dict:
+    """Comment authors by id in one query; None stays None (e-mailed comments)."""
+    authors = {None: None}
+    author_ids = {c.user_id for c in comments if c.user_id}
+    if author_ids:
+        for author in (await db.execute(select(User).where(User.id.in_(author_ids)))).scalars().all():
+            authors[author.id] = author
+    return authors
+
+
+def _comment_time_settings(workspace) -> tuple:
+    """(strftime format, timezone) for comment times, from the company's settings."""
+    time_fmt = '%b %d, %Y %H:%M'
+    if workspace and workspace.comment_time_format != '24hr':
+        time_fmt = '%b %d, %Y %I:%M %p'
+    tz = (workspace.comment_timezone or workspace.timezone or 'UTC') if workspace else 'UTC'
+    return time_fmt, tz
+
+
+async def _ticket_part_access(request: Request, db: AsyncSession, ticket_id: int):
+    """(user, ticket, workspace) for the parts of the ticket page loaded on request.
+
+    Same rule as the page itself: signed in, and the ticket is in the user's
+    company. user is None when signed out, ticket None when not found.
+    """
+    from app.models.ticket import Ticket
+    user_id = request.session.get('user_id')
+    user = user_id and (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_active:
+        return None, None, None
+    ticket = (await db.execute(
+        select(Ticket).where(Ticket.id == ticket_id, Ticket.workspace_id == user.workspace_id)
+    )).scalar_one_or_none()
+    workspace = (await db.execute(select(Workspace).where(Workspace.id == user.workspace_id))).scalar_one_or_none()
+    return user, ticket, workspace
+
+
+def _htmx_login_redirect() -> HTMLResponse:
+    # htmx turns this into a full page load, instead of putting the login page inside the button
+    return HTMLResponse('', headers={'HX-Redirect': '/web/login'})
+
+
+@router.get('/tickets/{ticket_id}/comments/older', response_class=HTMLResponse)
+async def web_ticket_older_comments(
+    request: Request, ticket_id: int, before: int, db: AsyncSession = Depends(get_session)
+):
+    """The next comments for "Show older comments" on the ticket page."""
+    from app.models.ticket import TicketComment
+    user, ticket, workspace = await _ticket_part_access(request, db, ticket_id)
+    if not user:
+        return _htmx_login_redirect()
+    anchor = ticket and (await db.execute(
+        select(TicketComment).where(TicketComment.id == before, TicketComment.ticket_id == ticket_id)
+    )).scalar_one_or_none()
+    if not anchor:
+        return HTMLResponse('', status_code=404)
+
+    comments, older_comments = await _ticket_rows_page(
+        db, TicketComment, ticket_id, TICKET_COMMENTS_SHOWN, before=anchor
+    )
+    comment_time_fmt, comment_tz = _comment_time_settings(workspace)
+    return templates.TemplateResponse('tickets/_comments_page.html', {
+        'request': request,
+        'ticket': ticket,
+        'comments': comments,
+        'older_comments': older_comments,
+        'comment_authors': await _comment_authors(db, comments),
+        'comment_time_fmt': comment_time_fmt,
+        'comment_tz': comment_tz,
+    })
+
+
+@router.get('/tickets/{ticket_id}/comments/{comment_id}/full', response_class=HTMLResponse)
+async def web_ticket_comment_full(
+    request: Request, ticket_id: int, comment_id: int, db: AsyncSession = Depends(get_session)
+):
+    """A shortened comment in full, for "Show the full message"."""
+    from app.models.ticket import TicketComment
+    user, ticket, workspace = await _ticket_part_access(request, db, ticket_id)
+    if not user:
+        return _htmx_login_redirect()
+    comment = ticket and (await db.execute(
+        select(TicketComment).where(TicketComment.id == comment_id, TicketComment.ticket_id == ticket_id)
+    )).scalar_one_or_none()
+    if not comment:
+        return HTMLResponse('', status_code=404)
+
+    comment_time_fmt, comment_tz = _comment_time_settings(workspace)
+    return templates.TemplateResponse('tickets/_comment.html', {
+        'request': request,
+        'comment': comment,
+        'show_full': True,
+        'comment_authors': await _comment_authors(db, [comment]),
+        'comment_time_fmt': comment_time_fmt,
+        'comment_tz': comment_tz,
+    })
+
+
+@router.get('/tickets/{ticket_id}/history/older', response_class=HTMLResponse)
+async def web_ticket_older_history(
+    request: Request, ticket_id: int, before: int, db: AsyncSession = Depends(get_session)
+):
+    """The next history entries for "Show older history" on the ticket page."""
+    from app.models.ticket import TicketHistory
+    user, ticket, workspace = await _ticket_part_access(request, db, ticket_id)
+    if not user:
+        return _htmx_login_redirect()
+    anchor = ticket and (await db.execute(
+        select(TicketHistory).where(TicketHistory.id == before, TicketHistory.ticket_id == ticket_id)
+    )).scalar_one_or_none()
+    if not anchor:
+        return HTMLResponse('', status_code=404)
+
+    # History lines are short, so load more of them at a time
+    history, older_history = await _ticket_rows_page(
+        db, TicketHistory, ticket_id, TICKET_HISTORY_SHOWN * 5, before=anchor
+    )
+    users = (await db.execute(select(User).where(User.workspace_id == user.workspace_id))).scalars().all()
+    return templates.TemplateResponse('tickets/_history_page.html', {
+        'request': request,
+        'ticket': ticket,
+        'workspace': workspace,
+        'history': history,
+        'older_history': older_history,
+        'user_names': {u.id: (u.shown_name or u.username) for u in users},
     })
 
 

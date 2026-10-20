@@ -1,0 +1,12 @@
+{# A page of comments, newest first, then a button for the next older page.
+   Used by the ticket page and by "Show older comments". #}
+{% for comment in comments %}
+{% include 'tickets/_comment.html' %}
+{% endfor %}
+{% if older_comments %}
+<button type="button" class="tk-load-more tk-load-more-block"
+        hx-get="/web/tickets/{{ ticket.id }}/comments/older?before={{ (comments|last).id }}"
+        hx-target="this" hx-swap="outerHTML" hx-disabled-elt="this">
+    <i class="fas fa-chevron-down mr-1"></i>Show older comments ({{ older_comments }})
+</button>
+{% endif %}

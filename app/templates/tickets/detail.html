@@ -180,25 +180,8 @@
             {% if ticket.description %}
             <div class="bg-white rounded-lg shadow-sm p-6 overflow-hidden">
                 <h2 class="text-lg font-semibold text-gray-900 mb-3">Description</h2>
-                <div id="ticket-description" class="text-gray-700 whitespace-pre-wrap break-words overflow-wrap-anywhere" style="word-break: break-word; overflow-wrap: anywhere;">{{ ticket.description }}</div>
+                <div id="ticket-description" class="text-gray-700 whitespace-pre-wrap break-words overflow-wrap-anywhere" style="word-break: break-word; overflow-wrap: anywhere;">{{ ticket.description|linkify }}</div>
             </div>
-            <script>
-            // Make URLs clickable in description
-            (function() {
-                const desc = document.getElementById('ticket-description');
-                if (desc) {
-                    const urlRegex = /(https?:\/\/[^\s<]+)/g;
-                    const emailRegex = /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+)/g;
-                    const phoneRegex = /(\+?[\d\s\-()]{10,})/g;
-                    
-                    let html = desc.innerHTML;
-                    // Escape HTML but preserve existing structure
-                    html = html.replace(urlRegex, '<a href="$1" target="_blank" class="text-blue-600 hover:underline">$1</a>');
-                    html = html.replace(emailRegex, '<a href="mailto:$1" class="text-blue-600 hover:underline">$1</a>');
-                    desc.innerHTML = html;
-                }
-            })();
-            </script>
             {% endif %}
 
             <!-- Attachments -->
@@ -281,7 +264,7 @@
             <!-- Comments / Signed tabs -->
             <div class="bg-white rounded-lg shadow-sm px-2 sm:px-4 flex gap-1 overflow-x-auto" role="tablist" id="ticketTabs">
                 <button type="button" role="tab" class="tk-tab tk-tab-active" data-tab="comments" onclick="showTicketTab('comments')">
-                    <i class="fas fa-comments"></i>Comments <span class="tk-tab-count">{{ comments|length }}</span>
+                    <i class="fas fa-comments"></i>Comments <span class="tk-tab-count">{{ comment_count }}</span>
                 </button>
                 <button type="button" role="tab" class="tk-tab" data-tab="signed" onclick="showTicketTab('signed')">
                     <i class="fas fa-file-signature"></i>Signed <span class="tk-tab-count">{{ signatures|length }}</span>
@@ -294,46 +277,11 @@
                 <h2 class="text-lg font-semibold text-gray-900 mb-4">Comments</h2>
                 <div class="space-y-4">
                     {% if comments %}
-                        {% for comment in comments|reverse %}
-                        <div class="border-l-4 {% if comment.is_internal %}border-yellow-400 bg-yellow-50{% else %}border-gray-300 bg-gray-50{% endif %} p-4 rounded-r">
-                            <div class="flex flex-wrap items-start justify-between gap-2 mb-2">
-                                <div class="flex items-center gap-2">
-                                    <span class="font-semibold text-gray-900">
-                                        {% if comment.user_id and comment_authors.get(comment.user_id) %}
-                                            {{ comment_authors[comment.user_id].shown_name or comment_authors[comment.user_id].username }}
-                                        {% else %}
-                                            <i class="fas fa-envelope mr-1 text-blue-500"></i>Email Reply
-                                        {% endif %}
-                                    </span>
-                                    {% if comment.is_internal %}
-                                        <span class="px-2 py-0.5 text-xs font-semibold rounded bg-yellow-200 text-yellow-800">
-                                            <i class="fas fa-lock mr-1"></i>Internal
-                                        </span>
-                                    {% endif %}
-                                </div>
-                                <span class="text-sm text-gray-500">
-                                    {{ comment.created_at | format_datetime_tz(comment_tz if comment_tz else 'UTC', comment_time_fmt if comment_time_fmt else '%b %d, %Y %I:%M %p') }}
-                                </span>
-                            </div>
-                            <p class="text-gray-700 whitespace-pre-wrap break-words linkify-content" style="word-break: break-word; overflow-wrap: anywhere;">{{ comment.content }}</p>
-                        </div>
-                        {% endfor %}
+                        {% include 'tickets/_comments_page.html' %}
                     {% else %}
                         <p class="text-gray-500 text-center py-4">No comments yet</p>
                     {% endif %}
                 </div>
-                
-                <script>
-                // Make URLs and emails clickable in comments
-                document.querySelectorAll('.linkify-content').forEach(function(el) {
-                    const urlRegex = /(https?:\/\/[^\s<]+)/g;
-                    const emailRegex = /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+)/g;
-                    let html = el.innerHTML;
-                    html = html.replace(urlRegex, '<a href="$1" target="_blank" class="text-blue-600 hover:underline">$1</a>');
-                    html = html.replace(emailRegex, '<a href="mailto:$1" class="text-blue-600 hover:underline">$1</a>');
-                    el.innerHTML = html;
-                });
-                </script>
             </div>
 
             <!-- Add Comment Form -->
@@ -432,23 +380,7 @@
             <div class="bg-white rounded-lg shadow-sm p-6">
                 <h2 class="text-lg font-semibold text-gray-900 mb-4">History</h2>
                 <div class="space-y-3">
-                    {% for entry in history %}
-                    <div class="flex gap-3 text-sm">
-                        <div class="text-gray-500">
-                            {{ entry.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %I:%M %p') }}
-                        </div>
-                        <div class="flex-1">
-                            <span class="font-medium text-gray-700">{{ entry.action|replace('_', ' ')|title }}</span>
-                            {% if entry.action == 'assigned' %}
-                                <span class="text-gray-600">: {{ user_names.get(entry.old_value|int, entry.old_value) }} → {{ user_names.get(entry.new_value|int, entry.new_value) }}</span>
-                            {% elif entry.old_value and entry.new_value %}
-                                <span class="text-gray-600">: {{ entry.old_value }} → {{ entry.new_value }}</span>
-                            {% elif entry.new_value %}
-                                <span class="text-gray-600">: {{ entry.new_value }}</span>
-                            {% endif %}
-                        </div>
-                    </div>
-                    {% endfor %}
+                    {% include 'tickets/_history_page.html' %}
                 </div>
             </div>
             {% endif %}
@@ -983,6 +915,15 @@ function showCloseStep(step) {
     background:#f1f5f9; color:#475569;
   }
   .tk-tab-active .tk-tab-count { background:var(--ac-12); color:var(--ac); }
+  /* "Show older ..." and "Show the full message": the rest loads when pressed */
+  .tk-load-more { font-size:.875rem; font-weight:600; color:var(--ac); }
+  .tk-load-more:hover { text-decoration:underline; }
+  .tk-load-more:disabled { opacity:.5; cursor:wait; }
+  .tk-load-more-block {
+    display:block; width:100%; padding:.6rem; text-align:center; background:#fff;
+    border:1px dashed #cbd5e1; border-radius:.5rem;
+  }
+  .tk-load-more-block:hover { background:#f8fafc; text-decoration:none; }
   .sig-image-wrap { background:#fff; padding:.75rem; display:flex; justify-content:center; }
   /* Badges beside the title never take more than 40% of the header */
   @media (min-width: 640px) { .tk-header-badges { max-width: 40%; justify-content: flex-end; } }
