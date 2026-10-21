@@ -93,6 +93,10 @@ def generate_job_card_pdf(
     signature_png: Optional[bytes] = None,
     signer_name: Optional[str] = None,
     signed_at: Optional[datetime] = None,
+    # The technician's own signature, when they signed on the ticket
+    technician_signature_png: Optional[bytes] = None,
+    technician_signer_name: Optional[str] = None,
+    technician_signed_at: Optional[datetime] = None,
     # Company timezone for the times printed (stored times are UTC)
     tz_name: Optional[str] = None,
     # Branding
@@ -102,7 +106,8 @@ def generate_job_card_pdf(
     """Return a PDF job card as bytes."""
 
     zone = _zone(tz_name)
-    created_at, closed_at, signed_at = (_local(t, zone) for t in (created_at, closed_at, signed_at))
+    created_at, closed_at, signed_at, technician_signed_at = (
+        _local(t, zone) for t in (created_at, closed_at, signed_at, technician_signed_at))
     printed_at = _local(datetime.now(timezone.utc), zone).replace(tzinfo=None)
     zone_label = tz_name if zone else "UTC"
 
@@ -261,29 +266,34 @@ def generate_job_card_pdf(
 
     # ── Signature lines ──────────────────────────────────────────────
     sig_line = "_" * 32
-    client_sig = Paragraph(sig_line, s_sig_label)
-    client_label = "Client Signature"
-    if signature_png:
-        # The signature the customer drew on the ticket, in place of the blank line
-        try:
-            client_sig = Image(io.BytesIO(signature_png))
-            client_sig._restrictSize(W * 0.38, 22 * mm)
-            signed = [_text(signer_name)] if signer_name else []
-            if signed_at:
-                signed.append(signed_at.strftime("%d %b %Y %H:%M"))
-            client_label = "Client Signature" + ("<br/>" + "  ·  ".join(signed) if signed else "")
-        except Exception:
-            client_sig = Paragraph(sig_line, s_sig_label)
+
+    def signature_cell(title, png, name, when):
+        """A signature drawn on the ticket in place of the blank line, and its label."""
+        if png:
+            try:
+                drawn = Image(io.BytesIO(png))
+                drawn._restrictSize(W * 0.38, 22 * mm)
+                signed = [_text(name)] if name else []
+                if when:
+                    signed.append(when.strftime("%d %b %Y %H:%M"))
+                return drawn, title + ("<br/>" + "  ·  ".join(signed) if signed else "")
+            except Exception:
+                pass
+        return Paragraph(sig_line, s_sig_label), title
+
+    client_sig, client_label = signature_cell("Client Signature", signature_png, signer_name, signed_at)
+    tech_sig, tech_label = signature_cell("Technician Signature", technician_signature_png,
+                                          technician_signer_name, technician_signed_at)
     sig_data = [
         [
             client_sig,
             Paragraph("", s_sig_label),
-            Paragraph(sig_line, s_sig_label),
+            tech_sig,
         ],
         [
             Paragraph(client_label, s_sig_label),
             Paragraph("", s_sig_label),
-            Paragraph("Technician Signature", s_sig_label),
+            Paragraph(tech_label, s_sig_label),
         ],
     ]
     sig_table = Table(sig_data, colWidths=[W * 0.4, W * 0.2, W * 0.4])

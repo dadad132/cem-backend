@@ -12,7 +12,7 @@
 # SQLAlchemy uses metaprogramming that type checkers don't understand
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 from pathlib import Path
 from datetime import date, datetime, timedelta, time, timezone
 import calendar as pycalendar
@@ -203,6 +203,11 @@ def linkify(text) -> Markup:
 
 
 templates.env.filters['linkify'] = linkify
+
+# E-mailed text arrives with Windows line endings, invisible "blank" lines and
+# image placeholders; tidy it when shown (also fixes tickets stored before)
+from app.core.email_text import tidy_email_text as _tidy_email_text
+templates.env.filters['tidy_text'] = lambda text: _tidy_email_text(text) or ''
 
 # Long-running tickets: the page shows the newest comments and history, and
 # the rest load when asked for. Longer comments (often whole HTML e-mails)
@@ -2387,6 +2392,32 @@ async def web_admin_users_list(
     )
 
 
+async def _access_projects(db: AsyncSession, workspace_id: int):
+    """Active projects, for the "project tickets only" choice when adding a user."""
+    return (await db.execute(
+        select(Project)
+        .where(Project.workspace_id == workspace_id, Project.is_archived == False)
+        .order_by(Project.name)
+    )).scalars().all()
+
+
+async def _apply_ticket_access(db: AsyncSession, new_user: User, ticket_access: Optional[str],
+                               project_ids: List[int], added_by: User) -> None:
+    """Which tickets a new user sees: all of them, or only their projects' tickets
+    (and tickets assigned to them). Project-only users join the chosen projects."""
+    from app.models.project_member import ProjectMember
+
+    new_user.can_see_all_tickets = new_user.is_admin or ticket_access == 'all'
+    if new_user.can_see_all_tickets or not project_ids:
+        return
+    await db.flush()  # new_user.id
+    valid_ids = (await db.execute(
+        select(Project.id).where(Project.workspace_id == added_by.workspace_id, Project.id.in_(project_ids))
+    )).scalars().all()
+    for project_id in valid_ids:
+        db.add(ProjectMember(project_id=project_id, user_id=new_user.id, assigned_by=added_by.id))
+
+
 @router.get('/admin/users/create', response_class=HTMLResponse)
 async def web_admin_create_user(
     request: Request,
@@ -2403,11 +2434,13 @@ async def web_admin_create_user(
     
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
+    access_projects = await _access_projects(db, user.workspace_id)
     
     return templates.TemplateResponse(
         'admin/create_user.html',
         {
             'request': request,
+                'access_projects': access_projects,
             'user': user,
             'error': None,
             'success': None,
@@ -2424,6 +2457,8 @@ async def web_admin_create_user_post(
     email: str = Form(...),
     display_name: str = Form(''),
     is_admin: bool = Form(False),
+    ticket_access: Optional[str] = Form(None),  # 'all' or 'projects'
+    project_ids: List[int] = Form([]),
     db: AsyncSession = Depends(get_session),
 ):
     user_id = request.session.get('user_id')
@@ -2437,17 +2472,21 @@ async def web_admin_create_user_post(
     
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
+    access_projects = await _access_projects(db, user.workspace_id)
     
     # Import validation function
     from app.core.security import validate_password
     
     # Validate password
     is_valid, error_msg = validate_password(password)
+    if is_valid and not is_admin and ticket_access not in ('all', 'projects'):
+        is_valid, error_msg = False, "Choose whether this user sees all tickets or only their projects' tickets."
     if not is_valid:
         return templates.TemplateResponse(
             'admin/create_user.html',
             {
                 'request': request,
+                'access_projects': access_projects,
                 'user': user,
                 'error': error_msg,
                 'success': None,
@@ -2462,6 +2501,7 @@ async def web_admin_create_user_post(
             'admin/create_user.html',
             {
                 'request': request,
+                'access_projects': access_projects,
                 'user': user,
                 'error': 'Username already taken',
                 'success': None,
@@ -2477,6 +2517,7 @@ async def web_admin_create_user_post(
                 'admin/create_user.html',
                 {
                     'request': request,
+                'access_projects': access_projects,
                     'user': user,
                     'error': 'Email already in use',
                     'success': None,
@@ -2498,6 +2539,7 @@ async def web_admin_create_user_post(
         is_active=True,
     )
     db.add(new_user)
+    await _apply_ticket_access(db, new_user, ticket_access, project_ids, user)
     await db.commit()
     await db.refresh(new_user)
     
@@ -2505,6 +2547,7 @@ async def web_admin_create_user_post(
         'admin/create_user.html',
         {
             'request': request,
+                'access_projects': access_projects,
             'user': user,
             'error': None,
             'success': f'User "{username}" created successfully!',
@@ -7665,17 +7708,23 @@ async def web_project_detail(request: Request, project_id: int, db: AsyncSession
     
     # Build assignees map: {task_id: [(shown name or email, email), ...]}
     assignees_map = {}
+    # Who can be taken off each task: {task_id: [(user id, shown name or email), ...]}.
+    # Built from the assignments themselves, so a deactivated user can still be removed.
+    assigned_people_map = {}
     if tasks:
         task_ids = [t.id for t in tasks]
         assignments = (await db.execute(
-            select(Assignment.task_id, USER_SHOWN_NAME, User.email)
+            select(Assignment.task_id, Assignment.assignee_id, USER_SHOWN_NAME, User.email)
             .join(User, User.id == Assignment.assignee_id)
             .where(Assignment.task_id.in_(task_ids))
         )).all()
-        for task_id, shown_name, email in assignments:
+        for task_id, assignee_id, shown_name, email in assignments:
             if task_id not in assignees_map:
                 assignees_map[task_id] = []
             assignees_map[task_id].append((shown_name or email, email))
+            people = assigned_people_map.setdefault(task_id, [])
+            if all(uid != assignee_id for uid, _ in people):
+                people.append((assignee_id, shown_name or email))
     
     # Fetch subtasks for all tasks
     from app.models.subtask import Subtask
@@ -7719,6 +7768,7 @@ async def web_project_detail(request: Request, project_id: int, db: AsyncSession
         'TaskStatus': TaskStatus, 
         'columns': columns,
         'assignees_map': assignees_map,
+        'assigned_people_map': assigned_people_map,
         'subtasks_map': subtasks_map,
         'subtask_stats': subtask_stats,
         'attachment_counts': attachment_counts,
@@ -9301,7 +9351,7 @@ async def web_task_assign(request: Request, task_id: int, assignee_id: int = For
     if not assignee:
         raise HTTPException(status_code=400, detail='Invalid assignee or user is inactive')
     # Check if already assigned
-    existing = (await db.execute(select(Assignment).where(Assignment.task_id == task_id, Assignment.assignee_id == assignee_id))).scalar_one_or_none()
+    existing = (await db.execute(select(Assignment).where(Assignment.task_id == task_id, Assignment.assignee_id == assignee_id))).scalars().first()
     if not existing:
         assignment = Assignment(task_id=task_id, assignee_id=assignee_id)
         db.add(assignment)
@@ -9360,11 +9410,10 @@ async def web_task_unassign(request: Request, task_id: int, assignee_id: int = F
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail='Task not found')
-    # Delete assignment
-    assignment = (await db.execute(select(Assignment).where(Assignment.task_id == task_id, Assignment.assignee_id == assignee_id))).scalar_one_or_none()
-    if assignment:
-        await db.delete(assignment)
-        await db.commit()
+    # Delete assignment (every matching row, in case an old duplicate exists)
+    from sqlalchemy import delete as sa_delete
+    await db.execute(sa_delete(Assignment).where(Assignment.task_id == task_id, Assignment.assignee_id == assignee_id))
+    await db.commit()
     return RedirectResponse(f'/web/projects/{task.project_id}', status_code=303)
 
 
@@ -15014,12 +15063,14 @@ async def _ticket_job_card_pdf(db: AsyncSession, ticket, workspace) -> bytes:
                 break
 
     worked = worked_seconds(await get_time_entries(db, TicketTimeEntry.ticket_id, ticket.id))
-    signature = (await db.execute(
+    # Latest client and technician signature (older ones, without a role, are the client's)
+    signatures = (await db.execute(
         select(TicketSignature)
         .where(TicketSignature.ticket_id == ticket.id)
         .order_by(TicketSignature.signed_at.desc())
-        .limit(1)
-    )).scalar_one_or_none()
+    )).scalars().all()
+    signature = next((s for s in signatures if s.signer_role != 'technician'), None)
+    tech_signature = next((s for s in signatures if s.signer_role == 'technician'), None)
 
     company_name, logo_path = 'Support Team', None
     if workspace:
@@ -15048,6 +15099,9 @@ async def _ticket_job_card_pdf(db: AsyncSession, ticket, workspace) -> bytes:
         signature_png=signature.image_png if signature else None,
         signer_name=signature.signer_name if signature else None,
         signed_at=signature.signed_at if signature else None,
+        technician_signature_png=tech_signature.image_png if tech_signature else None,
+        technician_signer_name=tech_signature.signer_name if tech_signature else None,
+        technician_signed_at=tech_signature.signed_at if tech_signature else None,
         tz_name=workspace.timezone if workspace else None,
         company_name=company_name,
         logo_path=logo_path,
@@ -15102,10 +15156,11 @@ async def web_tickets_signature(
     request: Request,
     ticket_id: int,
     signer_name: Optional[str] = Form(None),
+    signer_role: Optional[str] = Form(None),  # 'client' or 'technician'
     signature_data: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_session)
 ):
-    """Save a customer's signature, drawn on the technician's device, to the ticket"""
+    """Save a client's or technician's signature, drawn on the technician's device, to the ticket"""
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
@@ -15124,6 +15179,7 @@ async def web_tickets_signature(
         return RedirectResponse('/web/tickets', status_code=303)
 
     name = (signer_name or '').strip()[:120]
+    role = 'technician' if signer_role == 'technician' else 'client'
     png = _decode_signature_png(signature_data)
     if not name or png is None:
         request.session['error_message'] = (
@@ -15135,20 +15191,124 @@ async def web_tickets_signature(
     db.add(TicketSignature(
         ticket_id=ticket_id,
         signer_name=name,
+        signer_role=role,
         image_png=png,
         captured_by_id=user_id,
     ))
     db.add(TicketHistory(
         ticket_id=ticket_id,
         user_id=user_id,
-        action='customer_signed',
+        action='technician_signed' if role == 'technician' else 'customer_signed',
         new_value=name
     ))
     ticket.updated_at = datetime.utcnow()
     await db.commit()
 
-    request.session['success_message'] = f'Signature from {name} saved on ticket #{ticket.ticket_number}.'
+    who = 'Technician' if role == 'technician' else 'Client'
+    request.session['success_message'] = f'{who} signature from {name} saved on ticket #{ticket.ticket_number}.'
     return RedirectResponse(f'/web/tickets/{ticket_id}#signed', status_code=303)
+
+
+def _photo_type(data: bytes) -> Optional[tuple]:
+    """(mime type, extension) of a photo, judged by its bytes, or None.
+
+    Only photo formats: no SVG, which can carry script.
+    """
+    if data[:3] == b'\xff\xd8\xff':
+        return 'image/jpeg', '.jpg'
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        return 'image/png', '.png'
+    if data[:6] in (b'GIF87a', b'GIF89a'):
+        return 'image/gif', '.gif'
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'image/webp', '.webp'
+    if data[4:8] == b'ftyp' and data[8:12] in (b'heic', b'heix', b'hevc', b'hevx', b'mif1', b'msf1'):
+        return 'image/heic', '.heic'
+    return None
+
+
+TICKET_PHOTO_MAX_BYTES = 15 * 1024 * 1024
+TICKET_PHOTOS_PER_UPLOAD = 20
+
+
+@router.post('/tickets/{ticket_id}/photos')
+async def web_tickets_add_photos(
+    request: Request,
+    ticket_id: int,
+    photos: List[UploadFile] = File(default=[]),
+    db: AsyncSession = Depends(get_session)
+):
+    """Photos a technician took or picked on the tablet, saved with the ticket's files"""
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+    user_id = request.session.get('user_id')
+    if not user_id:
+        if is_ajax:
+            return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+        return RedirectResponse('/web/login', status_code=303)
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        if is_ajax:
+            return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+        return RedirectResponse('/web/login', status_code=303)
+
+    from app.models.ticket import Ticket, TicketAttachment, TicketHistory
+
+    ticket = (await db.execute(select(Ticket).where(
+        Ticket.id == ticket_id,
+        Ticket.workspace_id == user.workspace_id
+    ))).scalar_one_or_none()
+    if not ticket:
+        if is_ajax:
+            return JSONResponse({'error': 'Ticket not found'}, status_code=404)
+        return RedirectResponse('/web/tickets', status_code=303)
+
+    upload_dir = BASE_DIR / 'uploads' / 'tickets'
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    saved, skipped = 0, []
+    for photo in photos[:TICKET_PHOTOS_PER_UPLOAD]:
+        name = Path(photo.filename or '').name[:120] or 'photo'
+        data = await photo.read()
+        kind = _photo_type(data) if data else None
+        if not kind:
+            skipped.append(f'{name} is not a photo')
+            continue
+        if len(data) > TICKET_PHOTO_MAX_BYTES:
+            skipped.append(f'{name} is larger than 15 MB')
+            continue
+        mime_type, ext = kind
+        stored = f"{uuid.uuid4()}{ext}"
+        (upload_dir / stored).write_bytes(data)
+        if not name.lower().endswith(ext) and not (ext == '.jpg' and name.lower().endswith('.jpeg')):
+            name = f"{Path(name).stem or 'photo'}{ext}"
+        db.add(TicketAttachment(
+            ticket_id=ticket_id,
+            filename=name,
+            file_path=f"app/uploads/tickets/{stored}",
+            file_size=len(data),
+            mime_type=mime_type,
+            uploaded_by_id=user_id,
+        ))
+        saved += 1
+
+    if saved:
+        db.add(TicketHistory(
+            ticket_id=ticket_id,
+            user_id=user_id,
+            action='photos_added',
+            new_value=f"{saved} photo{'' if saved == 1 else 's'}"
+        ))
+        ticket.updated_at = datetime.utcnow()
+        await db.commit()
+
+    if is_ajax:
+        error = None if saved else ('; '.join(skipped) or 'No photo was received.')
+        return JSONResponse({'saved': saved, 'skipped': skipped, 'error': error}, status_code=200 if saved else 400)
+    if saved:
+        request.session['success_message'] = f"{saved} photo{'' if saved == 1 else 's'} added to ticket #{ticket.ticket_number}."
+    else:
+        request.session['error_message'] = 'No photo was added: ' + ('; '.join(skipped) or 'no file was received.')
+    return RedirectResponse(f'/web/tickets/{ticket_id}#photos', status_code=303)
 
 
 @router.get('/tickets/signatures/{signature_id}/image')
@@ -17165,6 +17325,8 @@ async def web_invite_user_form(request: Request, db: AsyncSession = Depends(get_
         request.session.clear()
         return RedirectResponse('/web/login', status_code=303)
     
+    access_projects = await _access_projects(db, user.workspace_id)
+
     # Get current workspace users
     users = (await db.execute(
         select(User)
@@ -17174,6 +17336,7 @@ async def web_invite_user_form(request: Request, db: AsyncSession = Depends(get_
     
     return templates.TemplateResponse('users/invite.html', {
         'request': request,
+        'access_projects': access_projects,
         'users': users,
         'user': user,
         'error': None,
@@ -17187,6 +17350,8 @@ async def web_invite_user(
     email: str = Form(...),
     full_name: Optional[str] = Form(None),
     is_admin: bool = Form(False),
+    ticket_access: Optional[str] = Form(None),  # 'all' or 'projects'
+    project_ids: List[int] = Form([]),
     db: AsyncSession = Depends(get_session)
 ):
     user_id = request.session.get('user_id')
@@ -17201,6 +17366,8 @@ async def web_invite_user(
     if not user.is_admin:
         return RedirectResponse('/web/dashboard', status_code=303)
     
+    access_projects = await _access_projects(db, user.workspace_id)
+
     # Check if user with email already exists
     existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
     
@@ -17210,9 +17377,20 @@ async def web_invite_user(
         .order_by(USER_SHOWN_NAME, User.email)
     )).scalars().all()
     
+    if not is_admin and ticket_access not in ('all', 'projects'):
+        return templates.TemplateResponse('users/invite.html', {
+            'request': request,
+            'access_projects': access_projects,
+            'users': users,
+            'user': user,
+            'error': "Choose whether this user sees all tickets or only their projects' tickets.",
+            'success': None
+        }, status_code=400)
+
     if existing:
         return templates.TemplateResponse('users/invite.html', {
             'request': request,
+            'access_projects': access_projects,
             'users': users,
             'user': user,
             'error': 'User with this email already exists',
@@ -17248,6 +17426,7 @@ async def web_invite_user(
         profile_completed=True  # Skip profile completion for invited users
     )
     db.add(new_user)
+    await _apply_ticket_access(db, new_user, ticket_access, project_ids, user)
     await db.commit()
     
     # In a real app, you'd send an email with the temp password or invitation link
@@ -17260,6 +17439,7 @@ async def web_invite_user(
     
     return templates.TemplateResponse('users/invite.html', {
         'request': request,
+        'access_projects': access_projects,
         'users': users,
         'user': user,
         'error': None,

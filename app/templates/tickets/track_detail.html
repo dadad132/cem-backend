@@ -117,7 +117,7 @@
                 </svg>
                 Description
             </h2>
-            <div class="text-slate-700 whitespace-pre-wrap">{{ ticket.description }}</div>
+            <div class="text-slate-700 whitespace-pre-wrap">{{ ticket.description|tidy_text }}</div>
         </div>
         {% endif %}
 
@@ -146,7 +146,7 @@
                             {{ item.comment.created_at | format_datetime_tz(comment_tz if comment_tz else 'UTC', comment_time_fmt if comment_time_fmt else '%b %d, %Y %I:%M %p') }}
                         </span>
                     </div>
-                    <div class="text-slate-700">{{ item.comment.content }}</div>
+                    <div class="text-slate-700">{{ item.comment.content|tidy_text }}</div>
                 </div>
                 {% endfor %}
             </div>

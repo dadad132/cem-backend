@@ -126,6 +126,7 @@ class TicketSignature(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     ticket_id: int = Field(foreign_key="ticket.id", ondelete="CASCADE", index=True)
     signer_name: str
+    signer_role: Optional[str] = None  # client or technician (older signatures, without one, are the client's)
     image_png: bytes  # The signature as drawn, as a PNG
     captured_by_id: Optional[int] = Field(default=None, foreign_key="user.id")  # Whose device it was signed on
     signed_at: datetime = Field(default_factory=datetime.utcnow)

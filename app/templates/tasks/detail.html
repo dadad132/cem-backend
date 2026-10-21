@@ -53,14 +53,14 @@
               ⬇️ Download
             </a>
             {% if user.is_admin or attachment.uploaded_by == user.id %}
-            <button onclick="deleteTaskAttachment({{ attachment.id }}, '{{ attachment.filename | replace("'", "\\'") }}')"
+            <button data-name="{{ attachment.filename }}" onclick="deleteTaskAttachment({{ attachment.id }}, this.dataset.name)"
                     style="padding: 0.25rem 0.5rem; background: #ef4444; color: white; border: none; border-radius: 0.25rem; cursor: pointer; font-size: 0.75rem;"
                     title="Delete attachment">
               <i class="fas fa-trash"></i>
             </button>
             {% endif %}
             {% else %}
-            <button onclick="previewAttachment({{ attachment.id }}, '{{ attachment.filename }}', '{{ attachment.content_type }}')" 
+            <button data-name="{{ attachment.filename }}" data-type="{{ attachment.content_type }}" onclick="previewAttachment({{ attachment.id }}, this.dataset.name, this.dataset.type)" 
                     style="padding: 0.25rem 0.5rem; background: #3b82f6; color: white; border: none; border-radius: 0.25rem; cursor: pointer; font-size: 0.75rem;">
               👁️ Preview
             </button>
@@ -360,7 +360,7 @@
             {% for attachment in attachments_by_comment[comment.id] %}
             <div style="display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.25rem 0.5rem; margin-right: 0.5rem; margin-bottom: 0.5rem; background: white; border: 1px solid #d1d5db; border-radius: 0.25rem; font-size: 0.875rem;">
               <span style="color: #374151;">📄 {{ attachment.filename }} ({{ (attachment.file_size / 1024) | round(1) }} KB)</span>
-              <button onclick="previewAttachment({{ attachment.id }}, '{{ attachment.filename | replace("'", "\\'") }}', '{{ attachment.content_type }}')" 
+              <button data-name="{{ attachment.filename }}" data-type="{{ attachment.content_type }}" onclick="previewAttachment({{ attachment.id }}, this.dataset.name, this.dataset.type)" 
                       style="padding: 0.125rem 0.5rem; background: #3b82f6; color: white; border: none; border-radius: 0.25rem; cursor: pointer; font-size: 0.75rem;">
                 👁️ Preview
               </button>
@@ -369,7 +369,7 @@
                 ⬇️ Download
               </a>
               {% if user.is_admin or comment.user_id == user.id %}
-              <button onclick="deleteCommentAttachment({{ attachment.id }}, '{{ attachment.filename | replace("'", "\\'") }}')"
+              <button data-name="{{ attachment.filename }}" onclick="deleteCommentAttachment({{ attachment.id }}, this.dataset.name)"
                       style="padding: 0.125rem 0.5rem; background: #ef4444; color: white; border: none; border-radius: 0.25rem; cursor: pointer; font-size: 0.75rem;"
                       title="Delete attachment">
                 🗑️ Delete

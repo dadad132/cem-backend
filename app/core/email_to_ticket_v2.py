@@ -33,6 +33,7 @@ from app.models.notification import Notification
 from app.models.email_settings import EmailSettings
 from app.models.processed_mail import ProcessedMail
 from app.models.project import Project
+from app.core.email_text import SIGNATURE_IMAGE_MAX_BYTES, tidy_email_text
 
 # Upload directory for email attachments (same as web form uploads)
 UPLOAD_DIR = Path(__file__).resolve().parents[1] / 'uploads' / 'tickets'
@@ -82,6 +83,19 @@ def extract_email_attachments(msg) -> List[dict]:
         # Skip inline images without filenames (embedded logos etc.)
         if not filename and 'inline' in content_disposition.lower():
             continue
+        
+        # Mail clients also give signature logos and social icons a filename
+        # (image001.png ...). They are inline (shown in the body, not attached)
+        # and small; a photo the customer pasted in is far larger.
+        is_inline_image = (
+            part.get_content_maintype() == 'image'
+            and 'attachment' not in content_disposition.lower()
+            and ('inline' in content_disposition.lower() or part.get('Content-ID'))
+        )
+        if is_inline_image:
+            raw = part.get_payload(decode=True) or b''
+            if len(raw) < SIGNATURE_IMAGE_MAX_BYTES:
+                continue
         
         # Generate a filename if none provided
         if not filename:
@@ -139,8 +153,18 @@ async def save_email_attachments(
     # Ensure upload directory exists
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     
+    # Replies quote the same files again (logos, the original attachment);
+    # one copy per ticket is enough
+    already = set((await db.execute(
+        select(TicketAttachment.filename, TicketAttachment.file_size)
+        .where(TicketAttachment.ticket_id == ticket_id)
+    )).all())
+    
     saved = []
     for att in attachments:
+        if (att['filename'], att['size']) in already:
+            continue
+        already.add((att['filename'], att['size']))
         try:
             # Generate unique filename (same pattern as web form uploads)
             original_name = att['filename']
@@ -348,14 +372,9 @@ class EmailToTicketService:
     
     def clean_email_body(self, body: str) -> str:
         """Clean email body - preserve full content including quoted/forwarded sections"""
-        import re
-        
-        result = body.strip()
-        
-        # Clean up excessive whitespace 
-        result = re.sub(r'\n{4,}', '\n\n\n', result)  # Max 3 consecutive newlines
-        
-        return result
+        # Line endings, invisible "blank" lines, [cid:...] image placeholders,
+        # and runs of empty lines (see app/core/email_text.py)
+        return tidy_email_text(body) or ''
     
     def determine_priority(self, subject: str, body: str) -> str:
         """Auto-detect priority from email subject only (not body, to avoid false matches).
@@ -385,6 +404,8 @@ class EmailToTicketService:
             # Try to get both plain text and HTML versions
             for part in msg.walk():
                 content_type = part.get_content_type()
+                if 'attachment' in str(part.get('Content-Disposition', '')).lower():
+                    continue  # e.g. an attached .txt file is not the message
                 
                 if content_type == "text/plain" and not body:
                     try:
@@ -2054,6 +2075,8 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                     if msg.is_multipart():
                         for part in msg.walk():
                             content_type = part.get_content_type()
+                            if 'attachment' in str(part.get('Content-Disposition', '')).lower():
+                                continue  # e.g. an attached .txt file is not the message
                             if content_type == 'text/plain' and not body:
                                 payload = part.get_payload(decode=True)
                                 if payload:

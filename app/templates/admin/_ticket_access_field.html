@@ -1,0 +1,46 @@
+{# "Which tickets can this user see?" on the add-user forms. Needs access_projects. #}
+<fieldset id="ticketAccess" class="space-y-2">
+    <legend class="block text-sm font-medium text-gray-700 mb-2">Ticket access <span class="text-red-500">*</span></legend>
+    <label class="flex items-start gap-3 p-3 border border-gray-200 rounded-lg cursor-pointer hover:bg-gray-50">
+        <input type="radio" name="ticket_access" value="all" required class="mt-1">
+        <span class="min-w-0">
+            <span class="block font-medium text-gray-800">All tickets</span>
+            <span class="block text-sm text-gray-500">Sees every ticket in the company.</span>
+        </span>
+    </label>
+    <label class="flex items-start gap-3 p-3 border border-gray-200 rounded-lg cursor-pointer hover:bg-gray-50">
+        <input type="radio" name="ticket_access" value="projects" required class="mt-1">
+        <span class="min-w-0">
+            <span class="block font-medium text-gray-800">Project tickets only</span>
+            <span class="block text-sm text-gray-500">Sees the tickets of the projects they belong to, and tickets assigned to them.</span>
+        </span>
+    </label>
+    <div id="accessProjects" class="hidden p-3 bg-gray-50 border border-gray-200 rounded-lg">
+        {% if access_projects %}
+        <p class="text-sm text-gray-600 mb-2">Add them to these projects (you can change this later on each project's Members page):</p>
+        <div class="max-h-48 overflow-y-auto space-y-1">
+            {% for p in access_projects %}
+            <label class="flex items-center gap-2 text-sm text-gray-800 py-1">
+                <input type="checkbox" name="project_ids" value="{{ p.id }}" class="rounded">
+                <span class="min-w-0">{{ p.name }}</span>
+            </label>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-sm text-gray-500">There are no projects yet. Add them to projects later on each project's Members page.</p>
+        {% endif %}
+    </div>
+    <p class="text-xs text-gray-500">Administrators always see all tickets.</p>
+</fieldset>
+<script>
+(function () {
+    // The project list only matters for "Project tickets only"
+    var box = document.getElementById('ticketAccess');
+    function sync() {
+        var chosen = box.querySelector('input[name="ticket_access"]:checked');
+        document.getElementById('accessProjects').classList.toggle('hidden', !chosen || chosen.value !== 'projects');
+    }
+    box.addEventListener('change', sync);
+    sync();
+})();
+</script>
