@@ -361,25 +361,27 @@ function taskSuggestions() {
             {% set assigned_people = assigned_people_map.get(t.id, []) %}
             {% set assigned_ids = assigned_people | map('first') | list %}
             {% set addable = users | rejectattr('id', 'in', assigned_ids) | list %}
-            <div class="task-actions mt-2 pt-2 border-t border-slate-100 flex flex-col sm:flex-row gap-2">
+            {# Add on top, Remove right under it. Each row is the card's full width and
+               the list shrinks to fit, so the buttons are never pushed off the card. #}
+            <div class="task-actions mt-2 pt-2 border-t border-slate-100 space-y-2">
               {% if addable %}
-              <form method="post" action="/web/tasks/{{ t.id }}/assign" class="flex items-center gap-1 flex-1">
-                <select name="assignee_id" aria-label="Add a person to this task" class="text-[11px] rounded border border-slate-300 px-2 py-1.5 flex-1 min-w-0">
+              <form method="post" action="/web/tasks/{{ t.id }}/assign" class="flex items-center gap-1 w-full">
+                <select name="assignee_id" aria-label="Add a person to this task" class="text-[11px] rounded border border-slate-300 px-2 py-1.5 flex-1 min-w-0 w-full">
                   {% for u in addable %}
                     <option value="{{ u.id }}">{{ u.shown_name or u.email }}</option>
                   {% endfor %}
                 </select>
-                <button title="Add to this task" class="text-[11px] px-2 py-1.5 rounded bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 whitespace-nowrap">+</button>
+                <button title="Add to this task" class="flex-shrink-0 text-[11px] px-2 py-1.5 rounded bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 whitespace-nowrap"><i class="fas fa-plus mr-1"></i>Add</button>
               </form>
               {% endif %}
               {% if assigned_people %}
-              <form method="post" action="/web/tasks/{{ t.id }}/unassign" class="flex items-center gap-1 flex-1">
-                <select name="assignee_id" aria-label="Remove a person from this task" class="text-[11px] rounded border border-slate-300 px-2 py-1.5 flex-1 min-w-0">
+              <form method="post" action="/web/tasks/{{ t.id }}/unassign" class="flex items-center gap-1 w-full">
+                <select name="assignee_id" aria-label="Remove a person from this task" class="text-[11px] rounded border border-slate-300 px-2 py-1.5 flex-1 min-w-0 w-full">
                   {% for person_id, person_name in assigned_people %}
                     <option value="{{ person_id }}">{{ person_name }}</option>
                   {% endfor %}
                 </select>
-                <button title="Remove from this task" class="text-[11px] px-2 py-1.5 rounded bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 whitespace-nowrap">−</button>
+                <button title="Remove from this task" class="flex-shrink-0 text-[11px] px-2 py-1.5 rounded bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 whitespace-nowrap"><i class="fas fa-minus mr-1"></i>Remove</button>
               </form>
               {% endif %}
             </div>
