@@ -587,6 +587,12 @@
                                 <dd class="font-medium text-slate-800">{{ ticket.job_client_phone }}</dd>
                             </div>
                             {% endif %}
+                            {% if ticket.job_client_branch %}
+                            <div>
+                                <dt class="text-xs text-slate-400">Branch</dt>
+                                <dd class="font-medium text-slate-800">{{ ticket.job_client_branch }}</dd>
+                            </div>
+                            {% endif %}
                             {% if ticket.job_client_office_number %}
                             <div class="col-span-2">
                                 <dt class="text-xs text-slate-400">Office</dt>
@@ -745,8 +751,8 @@ var previousStatus = '{{ ticket.status }}';
 function handleStatusChange(selectElement) {
     var newStatus = selectElement.value;
     
-    // If changing to closed, open the modal instead of submitting
-    if (newStatus === 'closed') {
+    // Resolving or closing goes through the SLA / Billable popup (job card)
+    if (newStatus === 'closed' || newStatus === 'resolved') {
         // Reset the dropdown to previous value
         selectElement.value = previousStatus;
         openCloseTicketModal();
@@ -873,24 +879,35 @@ function showCloseStep(step) {
             </span>
             <span class="text-xs font-bold text-slate-500 uppercase tracking-widest">Client Details</span>
           </div>
-          <div class="grid grid-cols-2 gap-x-5 gap-y-4">
+          {# Name, surname, phone and branch are required to close the ticket #}
+          <div class="grid grid-cols-2" style="column-gap: 1.25rem; row-gap: 1rem">
             <div>
-              <label class="block text-xs text-slate-400 mb-1">First Name</label>
-              <input class="jc-input" type="text" name="job_client_name" value="{{ ticket.guest_name or '' }}" placeholder="John">
+              <label class="block text-xs text-slate-400 mb-1" for="jcFirstName">First Name <span class="text-red-500">*</span></label>
+              <input class="jc-input" type="text" id="jcFirstName" name="job_client_name" required pattern=".*\S.*" data-required-label="first name"
+                     value="{{ ticket.job_client_name or ticket.guest_name or '' }}" placeholder="John">
             </div>
             <div>
-              <label class="block text-xs text-slate-400 mb-1">Last Name</label>
-              <input class="jc-input" type="text" name="job_client_surname" value="{{ ticket.guest_surname or '' }}" placeholder="Smith">
+              <label class="block text-xs text-slate-400 mb-1" for="jcLastName">Last Name <span class="text-red-500">*</span></label>
+              <input class="jc-input" type="text" id="jcLastName" name="job_client_surname" required pattern=".*\S.*" data-required-label="last name"
+                     value="{{ ticket.job_client_surname or ticket.guest_surname or '' }}" placeholder="Smith">
             </div>
             <div>
-              <label class="block text-xs text-slate-400 mb-1">Phone</label>
-              <input class="jc-input" type="text" name="job_client_phone" value="{{ ticket.guest_phone or '' }}" placeholder="011 123 4567">
+              <label class="block text-xs text-slate-400 mb-1" for="jcPhone">Phone <span class="text-red-500">*</span></label>
+              <input class="jc-input" type="tel" id="jcPhone" name="job_client_phone" required pattern=".*\S.*" data-required-label="phone number"
+                     value="{{ ticket.job_client_phone or ticket.guest_phone or '' }}" placeholder="011 123 4567">
             </div>
             <div>
-              <label class="block text-xs text-slate-400 mb-1">Office Number</label>
-              <input class="jc-input" type="text" name="job_client_office_number" value="{{ ticket.guest_office_number or '' }}" placeholder="012 345 6789">
+              <label class="block text-xs text-slate-400 mb-1" for="jcBranch">Branch <span class="text-red-500">*</span></label>
+              <input class="jc-input" type="text" id="jcBranch" name="job_client_branch" required pattern=".*\S.*" data-required-label="branch"
+                     value="{{ ticket.job_client_branch or ticket.guest_branch or '' }}" placeholder="Sandton">
+            </div>
+            <div class="col-span-2">
+              <label class="block text-xs text-slate-400 mb-1" for="jcOffice">Office Number</label>
+              <input class="jc-input" type="text" id="jcOffice" name="job_client_office_number"
+                     value="{{ ticket.job_client_office_number or ticket.guest_office_number or '' }}" placeholder="012 345 6789">
             </div>
           </div>
+          <p class="text-xs text-slate-400 mt-3"><span class="text-red-500">*</span> Needed to close the ticket.</p>
         </div>
 
         <div class="border-t border-dashed border-slate-200"></div>
@@ -910,7 +927,7 @@ function showCloseStep(step) {
           </div>
           {% endif %}
           <div class="space-y-4">
-            <div class="grid grid-cols-2 gap-x-5">
+            <div class="grid grid-cols-2" style="column-gap: 1.25rem">
               <div>
                 <label class="block text-xs text-slate-400 mb-1"><i class="fas fa-car mr-1 text-slate-300"></i>Traveling</label>
                 <input class="jc-input" type="text" name="billable_traveling" placeholder="R8.50/km — 45km">
@@ -920,7 +937,7 @@ function showCloseStep(step) {
                 <input class="jc-input" type="text" name="billable_labour_onsite" placeholder="R850/hr — 2hrs">
               </div>
             </div>
-            <div class="grid grid-cols-2 gap-x-5">
+            <div class="grid grid-cols-2" style="column-gap: 1.25rem">
               <div>
                 <label class="block text-xs text-slate-400 mb-1"><i class="fas fa-laptop mr-1 text-slate-300"></i>Remote Labour</label>
                 <input class="jc-input" type="text" name="billable_remote_labour" placeholder="R400/hr — 1hr">

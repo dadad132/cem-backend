@@ -78,6 +78,7 @@ def generate_job_card_pdf(
     client_surname: Optional[str] = None,
     client_phone: Optional[str] = None,
     client_office_number: Optional[str] = None,
+    client_branch: Optional[str] = None,
     # Billing
     billable_traveling: Optional[str] = None,
     billable_labour_onsite: Optional[str] = None,
@@ -232,7 +233,8 @@ def generate_job_card_pdf(
     full_name = " ".join(filter(None, [client_name, client_surname])) or None
     story.append(info_row("Full Name", full_name, False))
     story.append(info_row("Phone Number", client_phone, True))
-    story.append(info_row("Office Number", client_office_number, False))
+    story.append(info_row("Branch", client_branch, False))
+    story.append(info_row("Office Number", client_office_number, True))
     story.append(Spacer(1, 4 * mm))
 
     # ── Billable work ────────────────────────────────────────────────

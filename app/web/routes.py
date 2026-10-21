@@ -8344,6 +8344,12 @@ async def web_task_update(
         task.description = description
     
     new_status = TaskStatus(status)
+    # Done goes through "Mark as Resolved & Close Task" (SLA or Billable job card)
+    if new_status == TaskStatus.done and task.status != TaskStatus.done:
+        new_status = task.status
+        request.session['error_message'] = ('Your other changes were saved, but the task was not marked as done: '
+                                            'use "Mark as Resolved & Close Task", which asks SLA or Billable '
+                                            'and, when billable, needs the job card filled in.')
     task_just_completed = False
     if task.status != new_status:
         changes.append(('status', task.status.value, new_status.value))
@@ -8425,6 +8431,20 @@ async def web_task_update(
     return RedirectResponse(f'/web/tasks/{task_id}', status_code=303)
 
 
+def _missing_job_card_details(first_name, last_name, phone, branch) -> list:
+    """The client details a job card still lacks. All four are required before
+    a ticket or task can be closed as billable."""
+    return [label for label, value in (
+        ('first name', first_name), ('last name', last_name),
+        ('phone number', phone), ('branch', branch),
+    ) if not (value or '').strip()]
+
+
+def _job_card_missing_message(missing: list, what: str) -> str:
+    listed = missing[0] if len(missing) == 1 else ', '.join(missing[:-1]) + ' and ' + missing[-1]
+    return f"The {what} was not closed: fill in the client's {listed} on the job card."
+
+
 @router.post('/tasks/{task_id}/complete-with-details')
 async def web_task_complete_with_details(
     request: Request,
@@ -8436,6 +8456,7 @@ async def web_task_complete_with_details(
     customer_surname: Optional[str] = Form(None),
     customer_phone: Optional[str] = Form(None),
     customer_office_number: Optional[str] = Form(None),
+    customer_branch: Optional[str] = Form(None),
     # Billable items
     billable_traveling: Optional[str] = Form(None),
     billable_labour_onsite: Optional[str] = Form(None),
@@ -8471,6 +8492,16 @@ async def web_task_complete_with_details(
     is_sla = (close_type or '').strip().lower() == 'sla'
     now = datetime.utcnow()
 
+    # A billable job card must say who the client is
+    if not is_sla:
+        missing = _missing_job_card_details(customer_name, customer_surname, customer_phone, customer_branch)
+        if missing:
+            message = _job_card_missing_message(missing, 'task')
+            if request.headers.get('accept', '').find('application/json') != -1 or request.headers.get('x-requested-with') == 'XMLHttpRequest':
+                return JSONResponse({'success': False, 'error': message}, status_code=400)
+            request.session['error_message'] = message
+            return RedirectResponse(f'/web/tasks/{task_id}', status_code=303)
+
     # Update task to done
     task.status = TaskStatus.done
     task.close_type = 'sla' if is_sla else 'billable'
@@ -8498,6 +8529,7 @@ async def web_task_complete_with_details(
         task.customer_surname = _c(customer_surname)
         task.customer_phone = _c(customer_phone)
         task.customer_office_number = _c(customer_office_number)
+        task.customer_branch = _c(customer_branch)
         # Save billable details
         task.billable_traveling = _c(billable_traveling)
         task.billable_labour_onsite = _c(billable_labour_onsite)
@@ -8533,7 +8565,8 @@ async def web_task_complete_with_details(
     if time_worked:
         additional_details_parts.append(f"Time Worked: {time_worked}")
     if not is_sla:
-        client_parts = [task.customer_name, task.customer_surname, task.customer_phone, task.customer_office_number]
+        client_parts = [task.customer_name, task.customer_surname, task.customer_phone,
+                        task.customer_branch, task.customer_office_number]
         if any(client_parts):
             additional_details_parts.append("CLIENT: " + ", ".join(p for p in client_parts if p))
         for label, val in [
@@ -8573,6 +8606,7 @@ async def web_task_complete_with_details(
                 client_surname=task.customer_surname,
                 client_phone=task.customer_phone,
                 client_office_number=task.customer_office_number,
+                client_branch=task.customer_branch,
                 billable_traveling=task.billable_traveling,
                 billable_labour_onsite=task.billable_labour_onsite,
                 billable_remote_labour=task.billable_remote_labour,
@@ -8607,7 +8641,6 @@ async def web_task_complete_with_details(
     
     # Check if this is an AJAX request
     if request.headers.get('accept', '').find('application/json') != -1 or request.headers.get('x-requested-with') == 'XMLHttpRequest':
-        from fastapi.responses import JSONResponse
         return JSONResponse({
             'success': True, 
             'task_id': task_id,
@@ -9275,6 +9308,14 @@ async def web_task_update_status(request: Request, task_id: int, status_value: s
     if status_value not in [s.value for s in TaskStatus]:
         raise HTTPException(status_code=400, detail='Invalid status')
     
+    # Done goes through the completion drawer (SLA or Billable job card)
+    if status_value == 'done' and task.status != TaskStatus.done:
+        message = 'Complete the task with "Mark as Resolved & Close Task" (SLA or Billable job card).'
+        if request.headers.get('accept', '').find('application/json') != -1 or request.headers.get('x-requested-with') == 'XMLHttpRequest':
+            return JSONResponse({'success': False, 'error': message}, status_code=400)
+        request.session['error_message'] = message
+        return RedirectResponse(f'/web/tasks/{task_id}', status_code=303)
+    
     # Track change
     old_status = task.status.value
     task.status = TaskStatus(status_value)
@@ -9320,7 +9361,6 @@ async def web_task_update_status(request: Request, task_id: int, status_value: s
     
     # Check if this is an AJAX request (fetch)
     if request.headers.get('accept', '').find('application/json') != -1 or request.headers.get('x-requested-with') == 'XMLHttpRequest':
-        from fastapi.responses import JSONResponse
         return JSONResponse({'success': True, 'status': status_value})
     
     return RedirectResponse(f'/web/projects/{task.project_id}', status_code=303)
@@ -15089,6 +15129,7 @@ async def _ticket_job_card_pdf(db: AsyncSession, ticket, workspace) -> bytes:
         client_surname=ticket.job_client_surname,
         client_phone=ticket.job_client_phone,
         client_office_number=ticket.job_client_office_number,
+        client_branch=ticket.job_client_branch,
         billable_traveling=ticket.billable_traveling,
         billable_labour_onsite=ticket.billable_labour_onsite,
         billable_remote_labour=ticket.billable_remote_labour,
@@ -15867,6 +15908,16 @@ async def web_tickets_update_status(
             return JSONResponse({'error': f'Invalid status. Must be one of: {valid_statuses}'}, status_code=400)
         return RedirectResponse('/web/tickets', status_code=303)
     
+    # Resolving or closing goes through "Mark as Resolved & Close Ticket", which
+    # asks SLA or Billable and, when billable, requires the job card
+    if status in ('resolved', 'closed') and ticket.status != status:
+        message = ('Use "Mark as Resolved & Close Ticket" to resolve this ticket: '
+                   'it asks SLA or Billable, and a billable job card must be filled in.')
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return JSONResponse({'error': message}, status_code=400)
+        request.session['error_message'] = message
+        return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+    
     old_status = ticket.status
     ticket.status = status
     ticket.updated_at = datetime.utcnow()
@@ -15984,6 +16035,7 @@ async def web_tickets_close_with_details(
     job_client_surname: Optional[str] = Form(None),
     job_client_phone: Optional[str] = Form(None),
     job_client_office_number: Optional[str] = Form(None),
+    job_client_branch: Optional[str] = Form(None),
     # Billable items
     billable_traveling: Optional[str] = Form(None),
     billable_labour_onsite: Optional[str] = Form(None),
@@ -16017,6 +16069,13 @@ async def web_tickets_close_with_details(
     # Anything else is billable, which is also what forms without the choice sent.
     is_sla = (close_type or '').strip().lower() == 'sla'
     now = datetime.utcnow()
+
+    # A billable job card must say who the client is
+    if not is_sla:
+        missing = _missing_job_card_details(job_client_name, job_client_surname, job_client_phone, job_client_branch)
+        if missing:
+            request.session['error_message'] = _job_card_missing_message(missing, 'ticket')
+            return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
     # Update status to closed
     ticket.status = 'closed'
@@ -16057,6 +16116,7 @@ async def web_tickets_close_with_details(
         ticket.job_client_surname = _clean(job_client_surname)
         ticket.job_client_phone = _clean(job_client_phone)
         ticket.job_client_office_number = _clean(job_client_office_number)
+        ticket.job_client_branch = _clean(job_client_branch)
         # Save billable details
         ticket.billable_traveling = _clean(billable_traveling)
         ticket.billable_labour_onsite = _clean(billable_labour_onsite)
@@ -16106,7 +16166,8 @@ async def web_tickets_close_with_details(
     if time_worked:
         additional_details_parts.append(f"Time Worked: {time_worked}")
     if not is_sla:
-        client_parts = [ticket.job_client_name, ticket.job_client_surname, ticket.job_client_phone, ticket.job_client_office_number]
+        client_parts = [ticket.job_client_name, ticket.job_client_surname, ticket.job_client_phone,
+                        ticket.job_client_branch, ticket.job_client_office_number]
         if any(client_parts):
             additional_details_parts.append(
                 "CLIENT: " + ", ".join(p for p in client_parts if p)

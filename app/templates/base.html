@@ -1225,6 +1225,18 @@
         });
       })();
     </script>
+    <script>
+      // Required job card fields: a plain message, and spaces alone do not count
+      document.addEventListener('invalid', function (e) {
+        var el = e.target;
+        if (el.dataset && el.dataset.requiredLabel && !el.value.trim()) {
+          el.setCustomValidity('Fill in the client\'s ' + el.dataset.requiredLabel + '; it is needed for the job card.');
+        }
+      }, true);
+      document.addEventListener('input', function (e) {
+        if (e.target.dataset && e.target.dataset.requiredLabel) e.target.setCustomValidity('');
+      }, true);
+    </script>
     {% block scripts %}{% endblock %}
   </body>
 </html>

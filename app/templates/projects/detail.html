@@ -482,24 +482,29 @@ function taskSuggestions() {
             </span>
             <span class="text-xs font-bold text-slate-500 uppercase tracking-widest">Client Details</span>
           </div>
-          <div class="grid grid-cols-2 gap-x-5 gap-y-4">
+          <div class="grid grid-cols-2" style="column-gap: 1.25rem; row-gap: 1rem">
             <div>
-              <label class="block text-xs text-slate-400 mb-1">First Name</label>
-              <input class="jcb-input" type="text" name="customer_name" placeholder="John">
+              <label class="block text-xs text-slate-400 mb-1">First Name <span class="text-red-500">*</span></label>
+              <input class="jcb-input" type="text" name="customer_name" required pattern=".*\S.*" data-required-label="first name" placeholder="John">
             </div>
             <div>
-              <label class="block text-xs text-slate-400 mb-1">Last Name</label>
-              <input class="jcb-input" type="text" name="customer_surname" placeholder="Smith">
+              <label class="block text-xs text-slate-400 mb-1">Last Name <span class="text-red-500">*</span></label>
+              <input class="jcb-input" type="text" name="customer_surname" required pattern=".*\S.*" data-required-label="last name" placeholder="Smith">
             </div>
             <div>
-              <label class="block text-xs text-slate-400 mb-1">Phone</label>
-              <input class="jcb-input" type="text" name="customer_phone" placeholder="011 123 4567">
+              <label class="block text-xs text-slate-400 mb-1">Phone <span class="text-red-500">*</span></label>
+              <input class="jcb-input" type="tel" name="customer_phone" required pattern=".*\S.*" data-required-label="phone number" placeholder="011 123 4567">
             </div>
             <div>
+              <label class="block text-xs text-slate-400 mb-1">Branch <span class="text-red-500">*</span></label>
+              <input class="jcb-input" type="text" name="customer_branch" required pattern=".*\S.*" data-required-label="branch" placeholder="Sandton">
+            </div>
+            <div class="col-span-2">
               <label class="block text-xs text-slate-400 mb-1">Office Number</label>
               <input class="jcb-input" type="text" name="customer_office_number" placeholder="012 345 6789">
             </div>
           </div>
+          <p class="text-xs text-slate-400 mt-3"><span class="text-red-500">*</span> Needed to close the task.</p>
         </div>
 
         <div class="border-t border-dashed border-slate-200"></div>
@@ -513,7 +518,7 @@ function taskSuggestions() {
             <span class="text-xs font-bold text-slate-500 uppercase tracking-widest">Billable Work</span>
           </div>
           <div class="space-y-4">
-            <div class="grid grid-cols-2 gap-x-5">
+            <div class="grid grid-cols-2" style="column-gap: 1.25rem">
               <div>
                 <label class="block text-xs text-slate-400 mb-1"><i class="fas fa-car mr-1 text-slate-300"></i>Traveling</label>
                 <input class="jcb-input" type="text" name="billable_traveling" placeholder="R8.50/km — 45km">
@@ -523,7 +528,7 @@ function taskSuggestions() {
                 <input class="jcb-input" type="text" name="billable_labour_onsite" placeholder="R850/hr — 2hrs">
               </div>
             </div>
-            <div class="grid grid-cols-2 gap-x-5">
+            <div class="grid grid-cols-2" style="column-gap: 1.25rem">
               <div>
                 <label class="block text-xs text-slate-400 mb-1"><i class="fas fa-laptop mr-1 text-slate-300"></i>Remote Labour</label>
                 <input class="jcb-input" type="text" name="billable_remote_labour" placeholder="R400/hr — 1hr">
@@ -672,6 +677,8 @@ async function submitTaskCompletion(closeType, btn) {
   if (!pendingTaskCompletion) return;
   
   const form = document.getElementById('completeTaskForm');
+  // A billable job card needs the client's name, surname, phone and branch
+  if (closeType === 'billable' && !form.reportValidity()) return;
   const formData = new FormData(form);
   formData.set('close_type', closeType);
   if (btn) btn.disabled = true;
@@ -686,6 +693,13 @@ async function submitTaskCompletion(closeType, btn) {
       }
     });
     
+    if (res.status === 400) {
+      // Refused (e.g. job card details missing): say why and leave the card open to fix
+      const refusal = await res.json().catch(() => ({}));
+      if (btn) btn.disabled = false;
+      alert(refusal.error || 'Could not complete task');
+      return;
+    }
     if (!res.ok) throw new Error('Failed to complete task');
     
     const data = await res.json();

@@ -34,6 +34,7 @@ class TaskBase(SQLModel):
     customer_email: Optional[str] = None
     customer_phone: Optional[str] = None
     customer_office_number: Optional[str] = None
+    customer_branch: Optional[str] = None
     # Completion/Billing details (optional, filled when completing task)
     # Billable items
     billable_traveling: Optional[str] = None

@@ -1,5 +1,15 @@
 {% extends "base.html" %}
 {% block content %}
+{% if request.session.get('error_message') %}
+<div class="mb-4 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg" role="alert">
+  <i class="fas fa-exclamation-circle mr-2"></i>{{ request.session.pop('error_message') }}
+</div>
+{% endif %}
+{% if request.session.get('success_message') %}
+<div class="mb-4 bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg">
+  <i class="fas fa-check-circle mr-2"></i>{{ request.session.pop('success_message') }}
+</div>
+{% endif %}
 <div style="margin-bottom: 1rem;">
   <a href="/web/projects/{{ project.id }}" style="color: #2563eb;" class="text-sm sm:text-base">← Back to {{ project.name }}</a>
 </div>
@@ -137,6 +147,9 @@
         {% endif %}
         {% if task.customer_phone %}
         <p><strong>Phone:</strong> <a href="tel:{{ task.customer_phone }}" style="color: #2563eb;">{{ task.customer_phone }}</a></p>
+        {% endif %}
+        {% if task.customer_branch %}
+        <p><strong>Branch:</strong> {{ task.customer_branch }}</p>
         {% endif %}
       </div>
       {% endif %}
@@ -936,24 +949,29 @@ function closeCompleteTaskModal() {
             </span>
             <span class="text-xs font-bold text-slate-500 uppercase tracking-widest">Client Details</span>
           </div>
-          <div class="grid grid-cols-2 gap-x-5 gap-y-4">
+          <div class="grid grid-cols-2" style="column-gap: 1.25rem; row-gap: 1rem">
             <div>
-              <label class="block text-xs text-slate-400 mb-1">First Name</label>
-              <input class="jct-input" type="text" name="customer_name" value="{{ task.customer_name or '' }}" placeholder="John">
+              <label class="block text-xs text-slate-400 mb-1">First Name <span class="text-red-500">*</span></label>
+              <input class="jct-input" type="text" name="customer_name" required pattern=".*\S.*" data-required-label="first name" value="{{ task.customer_name or '' }}" placeholder="John">
             </div>
             <div>
-              <label class="block text-xs text-slate-400 mb-1">Last Name</label>
-              <input class="jct-input" type="text" name="customer_surname" value="{{ task.customer_surname or '' }}" placeholder="Smith">
+              <label class="block text-xs text-slate-400 mb-1">Last Name <span class="text-red-500">*</span></label>
+              <input class="jct-input" type="text" name="customer_surname" required pattern=".*\S.*" data-required-label="last name" value="{{ task.customer_surname or '' }}" placeholder="Smith">
             </div>
             <div>
-              <label class="block text-xs text-slate-400 mb-1">Phone</label>
-              <input class="jct-input" type="text" name="customer_phone" value="{{ task.customer_phone or '' }}" placeholder="011 123 4567">
+              <label class="block text-xs text-slate-400 mb-1">Phone <span class="text-red-500">*</span></label>
+              <input class="jct-input" type="tel" name="customer_phone" required pattern=".*\S.*" data-required-label="phone number" value="{{ task.customer_phone or '' }}" placeholder="011 123 4567">
             </div>
             <div>
+              <label class="block text-xs text-slate-400 mb-1">Branch <span class="text-red-500">*</span></label>
+              <input class="jct-input" type="text" name="customer_branch" required pattern=".*\S.*" data-required-label="branch" value="{{ task.customer_branch or '' }}" placeholder="Sandton">
+            </div>
+            <div class="col-span-2">
               <label class="block text-xs text-slate-400 mb-1">Office Number</label>
               <input class="jct-input" type="text" name="customer_office_number" value="{{ task.customer_office_number or '' }}" placeholder="012 345 6789">
             </div>
           </div>
+          <p class="text-xs text-slate-400 mt-3"><span class="text-red-500">*</span> Needed to close the task.</p>
         </div>
 
         <div class="border-t border-dashed border-slate-200"></div>
@@ -973,7 +991,7 @@ function closeCompleteTaskModal() {
           </div>
           {% endif %}
           <div class="space-y-4">
-            <div class="grid grid-cols-2 gap-x-5">
+            <div class="grid grid-cols-2" style="column-gap: 1.25rem">
               <div>
                 <label class="block text-xs text-slate-400 mb-1"><i class="fas fa-car mr-1 text-slate-300"></i>Traveling</label>
                 <input class="jct-input" type="text" name="billable_traveling" placeholder="R8.50/km — 45km">
@@ -983,7 +1001,7 @@ function closeCompleteTaskModal() {
                 <input class="jct-input" type="text" name="billable_labour_onsite" placeholder="R850/hr — 2hrs">
               </div>
             </div>
-            <div class="grid grid-cols-2 gap-x-5">
+            <div class="grid grid-cols-2" style="column-gap: 1.25rem">
               <div>
                 <label class="block text-xs text-slate-400 mb-1"><i class="fas fa-laptop mr-1 text-slate-300"></i>Remote Labour</label>
                 <input class="jct-input" type="text" name="billable_remote_labour" placeholder="R400/hr — 1hr">

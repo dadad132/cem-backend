@@ -57,6 +57,7 @@ class TicketBase(SQLModel):
     job_client_surname: Optional[str] = None
     job_client_phone: Optional[str] = None
     job_client_office_number: Optional[str] = None
+    job_client_branch: Optional[str] = None
     # Billable items
     billable_traveling: Optional[str] = None
     billable_labour_onsite: Optional[str] = None
