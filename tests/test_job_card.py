@@ -52,13 +52,38 @@ def test_job_card_contents():
         **{**BASE, 'subject': 'Tom & Jerry <b>'}, closed_at=datetime(2026, 10, 14, 13, 40),
         billable_labour_onsite='2h 30m', billable_sundries='Toner x1', time_worked='3h 05m',
         signature_png=_signature_png(), signer_name='Thandi Mokoena', signed_at=datetime(2026, 10, 14, 13, 35),
-        tz_name='Africa/Johannesburg', company_name='Kyotech Connect',
+        company_name='Kyotech Connect',
     )
     text = _pdf_text(pdf)
     assert 'Tom & Jerry <b>' in text, 'shown as typed, not read as markup'
-    assert 'Opened 14 Oct 2026 09:05' in text and 'Closed 14 Oct 2026 15:40' in text, 'company time (UTC+2)'
+    assert 'Opened 14 Oct 2026 07:05' in text and 'Closed 14 Oct 2026 13:40' in text
     assert 'Labour Onsite 2h 30m' in text and 'Sundries Toner x1' in text and 'Time Worked 3h 05m' in text
-    assert 'Thandi Mokoena' in text and '14 Oct 2026 15:35' in text
+    assert 'Thandi Mokoena' in text and '14 Oct 2026 13:35' in text
+
+
+def _has_timezone(name: str) -> bool:
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(name)
+        return True
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _has_timezone('Africa/Johannesburg'),
+                    reason='no timezone database here (Linux has one; on Windows: pip install tzdata)')
+def test_job_card_times_are_in_the_company_timezone():
+    text = _pdf_text(generate_job_card_pdf(
+        **BASE, closed_at=datetime(2026, 10, 14, 13, 40), signature_png=_signature_png(),
+        signer_name='Thandi Mokoena', signed_at=datetime(2026, 10, 14, 13, 35), tz_name='Africa/Johannesburg',
+    ))
+    assert 'Opened 14 Oct 2026 09:05' in text and 'Closed 14 Oct 2026 15:40' in text, 'UTC+2'
+    assert '14 Oct 2026 15:35' in text and 'Africa/Johannesburg' in text
+
+
+def test_unknown_timezone_prints_utc_and_says_so():
+    text = _pdf_text(generate_job_card_pdf(**BASE, closed_at=datetime(2026, 10, 14, 13, 40), tz_name='Nowhere/Atlantis'))
+    assert 'Opened 14 Oct 2026 07:05' in text and ' UTC' in text
 
 
 def test_open_and_sla_job_cards_say_so():
