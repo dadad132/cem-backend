@@ -10,13 +10,14 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import SQLModel
 
-from app.core import app_download
+from app.core import app_download, server_settings
 from app.models.user import User
 from app.web.routes import (
     download_app,
     download_app_android,
     download_app_unlock,
     web_superadmin_app_download_code,
+    web_superadmin_support_email,
 )
 
 
@@ -24,7 +25,7 @@ from app.web.routes import (
 def settings_file(tmp_path, monkeypatch):
     """Each test gets its own settings file and a clean wrong-code count."""
     path = tmp_path / 'server_settings.json'
-    monkeypatch.setattr(app_download, 'SETTINGS_FILE', path)
+    monkeypatch.setattr(server_settings, 'SETTINGS_FILE', path)
     monkeypatch.setattr(app_download, '_failures', {})
     return path
 
@@ -168,6 +169,47 @@ async def test_only_the_super_admin_changes_the_code(tmp_path):
         signed_out = await web_superadmin_app_download_code(_request({}), code='778899', confirm_code='778899', db=db)
         assert signed_out.headers['location'] == '/web/login/superadmin'
         assert app_download.check_code(app_download.DEFAULT_CODE) and not app_download.code_status()['custom']
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+# --- support e-mail on the download page -----------------------------------------------
+
+@pytest.mark.asyncio
+async def test_download_page_shows_the_support_email():
+    page = await download_app(_request())
+    assert b'mailto:support@myit.africa' in page.body, 'the original address until the super admin changes it'
+
+    server_settings.update('support_email', 'help@kyotechconnect.com')
+    page = await download_app(_request())
+    assert b'mailto:help@kyotechconnect.com' in page.body and b'support@myit.africa' not in page.body
+
+
+@pytest.mark.asyncio
+async def test_super_admin_changes_the_support_email(tmp_path, settings_file):
+    engine, db, root, company_admin = await _seed(tmp_path / 'sa.db')
+    try:
+        async def save(address, user=root):
+            response = await web_superadmin_support_email(_request({'user_id': user.id}),
+                                                          support_email=address, db=db)
+            return response.headers['location']
+
+        assert await save(' help@kyotechconnect.com ') == '/web/superadmin?success=support_email'
+        assert server_settings.support_email() == 'help@kyotechconnect.com'
+
+        for bad in ('', 'not-an-email', 'a@b', 'x"onclick=1@evil.com', 'a@b.c<script>'):
+            assert await save(bad) == '/web/superadmin?error=support_email', bad
+        assert server_settings.support_email() == 'help@kyotechconnect.com', 'unchanged after refusals'
+
+        app_download.set_code('abcd1234', changed_by='root')
+        assert server_settings.support_email() == 'help@kyotechconnect.com', 'settings keep each other'
+        assert app_download.check_code('abcd1234')
+
+        with pytest.raises(HTTPException) as refused:
+            await save('evil@example.com', user=company_admin)
+        assert refused.value.status_code == 404
+        assert server_settings.support_email() == 'help@kyotechconnect.com'
     finally:
         await db.close()
         await engine.dispose()

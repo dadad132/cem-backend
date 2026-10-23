@@ -275,11 +275,12 @@ async def resolve_public_workspace_id(request: Request, db: AsyncSession) -> int
 async def download_app(request: Request):
     """Download page for mobile app - shows Android APK download or iOS PWA instructions
     once the access code (set on the super admin console) has been entered"""
-    from app.core import app_download
+    from app.core import app_download, server_settings
     return templates.TemplateResponse('download.html', {
         'request': request,
         'unlocked': app_download.is_unlocked(request.session),
         'error': request.session.pop('download_error', None),
+        'support_email': server_settings.support_email(),
     })
 
 
@@ -19366,7 +19367,7 @@ async def web_superadmin_console(request: Request, db: AsyncSession = Depends(ge
         )).scalar() or 0
         companies.append({'id': ws.id, 'name': ws.name, 'user_count': user_count})
 
-    from app.core import app_download
+    from app.core import app_download, server_settings
     return templates.TemplateResponse('admin/superadmin.html', {
         'request': request,
         'user': user,
@@ -19375,7 +19376,29 @@ async def web_superadmin_console(request: Request, db: AsyncSession = Depends(ge
         'companies': companies,
         'download_code': app_download.code_status(),
         'download_code_lengths': (app_download.MIN_LENGTH, app_download.MAX_LENGTH),
+        'support_email': server_settings.support_email(),
     })
+
+
+@router.post('/superadmin/support-email')
+async def web_superadmin_support_email(
+    request: Request,
+    support_email: str = Form(''),
+    db: AsyncSession = Depends(get_session),
+):
+    """Change the support address shown at the bottom of the mobile app download page."""
+    user, redirect = await _require_superadmin(request, db)
+    if redirect:
+        return redirect
+
+    from app.core import server_settings
+    support_email = support_email.strip()
+    if not server_settings.is_valid_email(support_email):
+        return RedirectResponse('/web/superadmin?error=support_email', status_code=303)
+
+    server_settings.update('support_email', support_email)
+    logger.info(f"Support e-mail set to {support_email} by super admin '{user.username}'")
+    return RedirectResponse('/web/superadmin?success=support_email', status_code=303)
 
 
 @router.post('/superadmin/app-download-code')

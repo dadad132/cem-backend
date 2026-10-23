@@ -1,24 +1,22 @@
 """Access code for the mobile app download page (/web/download).
 
 The super admin sets the code on the super admin console. It is one code for
-the whole server, so it lives in a small settings file beside the database
-rather than in any company's data, and only a hash of it is stored. The code
-is checked on the server: the page used to carry it in its own script, where
-anyone could read it, and the APK was a public file besides.
+the whole server, so it is kept with the server settings (see
+server_settings.py) rather than in any company's data, and only a hash of it
+is stored. The code is checked on the server: the page used to carry it in
+its own script, where anyone could read it, and the APK was a public file
+besides.
 """
 from __future__ import annotations
 
 import hmac
-import json
 import secrets
 import time
 from datetime import datetime
 from pathlib import Path
 
+from app.core import server_settings
 from app.core.security import get_password_hash, verify_password
-
-# Beside data.db: both are relative to the app's working directory
-SETTINGS_FILE = Path('server_settings.json')
 
 # The Android app. Outside app/static, so it is only sent once the code is right.
 APK_PATH = Path(__file__).resolve().parents[1] / 'downloads' / 'cem-mobile.apk'
@@ -38,11 +36,7 @@ _failures: dict[str, list[float]] = {}
 
 
 def _stored() -> dict:
-    try:
-        settings = json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))
-    except (OSError, ValueError):
-        return {}
-    return settings.get('app_download_code') or {}
+    return server_settings.read().get('app_download_code') or {}
 
 
 def code_status() -> dict:
@@ -64,20 +58,12 @@ def check_code(code: str) -> bool:
 
 def set_code(code: str, changed_by: str) -> None:
     """Replace the code. Downloads unlocked with the old one close again."""
-    try:
-        settings = json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))
-    except (OSError, ValueError):
-        settings = {}
-    settings['app_download_code'] = {
+    server_settings.update('app_download_code', {
         'hash': get_password_hash(code),
         'version': secrets.token_hex(8),
         'changed_at': datetime.utcnow().strftime('%d/%m/%Y %H:%M UTC'),
         'changed_by': changed_by,
-    }
-    # Write a new file and swap it in, so a crash cannot leave half a file
-    temp = SETTINGS_FILE.with_name(SETTINGS_FILE.name + '.tmp')
-    temp.write_text(json.dumps(settings, indent=2), encoding='utf-8')
-    temp.replace(SETTINGS_FILE)
+    })
 
 
 def unlock(session: dict) -> None:
