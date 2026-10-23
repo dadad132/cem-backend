@@ -33,3 +33,7 @@ crm_install_log.txt
 
 # Claude Code session data
 .claude/
+
+# Server-wide settings set from the super admin console (hashed app download code)
+server_settings.json
+server_settings.json.tmp

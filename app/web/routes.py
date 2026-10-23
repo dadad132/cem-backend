@@ -273,8 +273,44 @@ async def resolve_public_workspace_id(request: Request, db: AsyncSession) -> int
 # --------------------------
 @router.get('/download', response_class=HTMLResponse)
 async def download_app(request: Request):
-    """Download page for mobile app - shows Android APK download or iOS PWA instructions"""
-    return templates.TemplateResponse('download.html', {'request': request})
+    """Download page for mobile app - shows Android APK download or iOS PWA instructions
+    once the access code (set on the super admin console) has been entered"""
+    from app.core import app_download
+    return templates.TemplateResponse('download.html', {
+        'request': request,
+        'unlocked': app_download.is_unlocked(request.session),
+        'error': request.session.pop('download_error', None),
+    })
+
+
+@router.post('/download')
+async def download_app_unlock(request: Request, code: str = Form('')):
+    """Check the access code on the server; the page then shows the downloads."""
+    from app.core import app_download
+    client = request.client.host if request.client else 'unknown'
+    if app_download.too_many_failures(client):
+        request.session['download_error'] = 'Too many wrong codes. Please wait 15 minutes and try again.'
+    elif app_download.check_code(code.strip()):
+        app_download.unlock(request.session)
+    else:
+        app_download.record_failure(client)
+        request.session['download_error'] = 'Invalid access code'
+    return RedirectResponse('/web/download', status_code=303)
+
+
+@router.get('/download/android')
+async def download_app_android(request: Request):
+    """The Android app (APK), only once the access code has been entered."""
+    from app.core import app_download
+    if not app_download.is_unlocked(request.session):
+        return RedirectResponse('/web/download', status_code=303)
+    if not app_download.APK_PATH.is_file():
+        raise HTTPException(status_code=404, detail='The Android app is not on this server')
+    return FileResponse(
+        app_download.APK_PATH,
+        media_type='application/vnd.android.package-archive',
+        filename='cem-mobile.apk',
+    )
 
 
 # --------------------------
@@ -19330,13 +19366,40 @@ async def web_superadmin_console(request: Request, db: AsyncSession = Depends(ge
         )).scalar() or 0
         companies.append({'id': ws.id, 'name': ws.name, 'user_count': user_count})
 
+    from app.core import app_download
     return templates.TemplateResponse('admin/superadmin.html', {
         'request': request,
         'user': user,
         'stats': stats,
         'backups': backups,
         'companies': companies,
+        'download_code': app_download.code_status(),
+        'download_code_lengths': (app_download.MIN_LENGTH, app_download.MAX_LENGTH),
     })
+
+
+@router.post('/superadmin/app-download-code')
+async def web_superadmin_app_download_code(
+    request: Request,
+    code: str = Form(''),
+    confirm_code: str = Form(''),
+    db: AsyncSession = Depends(get_session),
+):
+    """Change the access code people enter on /web/download to get the mobile app."""
+    user, redirect = await _require_superadmin(request, db)
+    if redirect:
+        return redirect
+
+    from app.core import app_download
+    code, confirm_code = code.strip(), confirm_code.strip()
+    if code != confirm_code:
+        return RedirectResponse('/web/superadmin?error=download_code_mismatch', status_code=303)
+    if not app_download.MIN_LENGTH <= len(code) <= app_download.MAX_LENGTH:
+        return RedirectResponse('/web/superadmin?error=download_code_length', status_code=303)
+
+    app_download.set_code(code, changed_by=user.username)
+    logger.warning(f"Mobile app download code changed by super admin '{user.username}'")
+    return RedirectResponse('/web/superadmin?success=download_code', status_code=303)
 
 
 @router.post('/superadmin/backup/create')

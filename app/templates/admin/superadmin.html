@@ -21,6 +21,12 @@
 <div class="mb-4 p-4 bg-green-50 border border-green-200 rounded text-green-800">✅ Backup uploaded</div>
 {% elif request.query_params.get('success') == 'backup_deleted' %}
 <div class="mb-4 p-4 bg-green-50 border border-green-200 rounded text-green-800">✅ Backup deleted</div>
+{% elif request.query_params.get('success') == 'download_code' %}
+<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded text-green-800">✅ App download code changed. Anyone who had unlocked the download page needs the new code.</div>
+{% elif request.query_params.get('error') == 'download_code_mismatch' %}
+<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ The two codes did not match. The download code was not changed.</div>
+{% elif request.query_params.get('error') == 'download_code_length' %}
+<div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ The download code must be {{ download_code_lengths[0] }} to {{ download_code_lengths[1] }} characters long. It was not changed.</div>
 {% elif request.query_params.get('error') == 'not_confirmed' %}
 <div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ Restore cancelled — the confirmation phrase did not match.</div>
 {% elif request.query_params.get('error') == 'restore_failed' %}
@@ -72,6 +78,48 @@
     <div class="text-sm text-slate-600">Latest</div>
     <div class="text-sm font-medium mt-1">{{ stats.latest_time or 'Never' }}</div>
   </div>
+</div>
+
+<!-- Access code for the mobile app download page -->
+<div class="mb-6 bg-white rounded-lg border border-slate-200 p-4">
+  <div class="flex flex-wrap items-start justify-between gap-2 mb-3">
+    <div>
+      <h3 class="font-semibold">📱 Mobile App Download</h3>
+      <p class="text-sm text-slate-600 mt-1">
+        People enter this code on the
+        <a href="/web/download" target="_blank" rel="noopener" class="text-blue-600 underline">download page</a>
+        before they can get the Android app or the iPhone steps. Share it with your staff.
+      </p>
+    </div>
+    <p class="text-xs text-slate-500">
+      {% if download_code.custom %}
+        Last changed {{ download_code.changed_at }} by {{ download_code.changed_by }}
+      {% else %}
+        Still the original code. Change it to one only your staff know.
+      {% endif %}
+    </p>
+  </div>
+  <form method="post" action="/web/superadmin/app-download-code" class="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+    <label class="block">
+      <span class="text-sm text-slate-700">New code</span>
+      <input type="password" name="code" required autocomplete="new-password"
+             minlength="{{ download_code_lengths[0] }}" maxlength="{{ download_code_lengths[1] }}"
+             class="mt-1 w-full border border-slate-300 rounded px-3 py-2 text-sm">
+    </label>
+    <label class="block">
+      <span class="text-sm text-slate-700">Confirm new code</span>
+      <input type="password" name="confirm_code" required autocomplete="new-password"
+             minlength="{{ download_code_lengths[0] }}" maxlength="{{ download_code_lengths[1] }}"
+             class="mt-1 w-full border border-slate-300 rounded px-3 py-2 text-sm">
+    </label>
+    <button type="submit" class="px-4 py-2 bg-slate-900 text-white rounded hover:bg-slate-800">
+      🔑 Change Download Code
+    </button>
+  </form>
+  <p class="text-xs text-slate-500 mt-2">
+    {{ download_code_lengths[0] }} to {{ download_code_lengths[1] }} characters, numbers or letters.
+    Pages already unlocked with the old code lock again.
+  </p>
 </div>
 
 <div class="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">
