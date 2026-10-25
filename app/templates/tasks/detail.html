@@ -124,6 +124,46 @@
         {% endif %}
       </div>
 
+      {% if user.is_admin %}
+      <!-- Admins: who works on this task (Remove right under each name, Add underneath) -->
+      {% set assigned_ids = assignments | map(attribute='id') | list %}
+      {% set addable = users | rejectattr('id', 'in', assigned_ids) | list %}
+      <div style="background: #fff; border: 1px solid #e2e8f0; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem;">
+        <p style="font-weight: 600; margin-bottom: 0.5rem;"><i class="fas fa-user-check mr-1" style="color:#64748b"></i>Assigned to</p>
+        {% if assignments %}
+        <ul class="space-y-2" style="margin-bottom: 0.75rem;">
+          {% for a in assignments %}
+          <li class="flex items-center justify-between gap-2">
+            <span class="min-w-0 truncate">{{ a.shown_name or a.username }}</span>
+            <form method="post" action="/web/tasks/{{ task.id }}/unassign" class="flex-shrink-0">
+              <input type="hidden" name="assignee_id" value="{{ a.id }}">
+              <input type="hidden" name="next" value="/web/tasks/{{ task.id }}">
+              <button type="submit" class="text-xs px-2 py-1 rounded bg-red-50 text-red-700 border border-red-200 hover:bg-red-100">
+                <i class="fas fa-minus mr-1"></i>Remove
+              </button>
+            </form>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="text-sm text-gray-500" style="margin-bottom: 0.75rem;">Nobody is assigned yet.</p>
+        {% endif %}
+        {% if addable %}
+        <form method="post" action="/web/tasks/{{ task.id }}/assign" class="flex items-center gap-2 w-full">
+          <input type="hidden" name="next" value="/web/tasks/{{ task.id }}">
+          <select name="assignee_id" aria-label="Add a person to this task" class="flex-1 min-w-0 w-full text-sm rounded border border-slate-300 px-2 py-1.5">
+            {% for u in addable %}
+            <option value="{{ u.id }}">{{ u.shown_name or u.username }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="flex-shrink-0 text-xs px-3 py-1.5 rounded bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100">
+            <i class="fas fa-plus mr-1"></i>Add
+          </button>
+        </form>
+        {% endif %}
+      </div>
+      {% endif %}
+
       {% if task.status.value != 'done' and not task.is_archived %}
       <!-- Resolves and closes in one step, via the SLA / Billable choice -->
       <button type="button" onclick="openCompleteTaskModal()"
@@ -244,6 +284,18 @@
             <label>Due Date <input type="date" name="due_date_value" value="{{ task.due_date.strftime('%Y-%m-%d') if task.due_date else '' }}" /></label>
             <label>Due Time <input type="time" name="due_time_value" value="{{ task.due_time.strftime('%H:%M') if task.due_time else '' }}" /></label>
           </div>
+
+          <fieldset class="space-y-3" style="border-top: 1px solid #e2e8f0; padding-top: 0.75rem;">
+            <legend style="font-weight: 600;">Customer</legend>
+            <div class="grid grid-cols-2 gap-3">
+              <label>First Name <input name="customer_name" maxlength="200" value="{{ task.customer_name or '' }}" /></label>
+              <label>Last Name <input name="customer_surname" maxlength="200" value="{{ task.customer_surname or '' }}" /></label>
+              <label>Email <input type="email" name="customer_email" maxlength="200" value="{{ task.customer_email or '' }}" /></label>
+              <label>Phone <input type="tel" name="customer_phone" maxlength="200" value="{{ task.customer_phone or '' }}" /></label>
+              <label>Branch <input name="customer_branch" maxlength="200" value="{{ task.customer_branch or '' }}" /></label>
+              <label>Office Number <input name="customer_office_number" maxlength="200" value="{{ task.customer_office_number or '' }}" /></label>
+            </div>
+          </fieldset>
 
           <button type="submit" id="saveTaskBtn">💾 Save Changes</button>
         </form>

@@ -96,6 +96,7 @@ async def init_models() -> None:
                 ("ticketsignature", "signer_role", "VARCHAR"),
                 ("ticket", "job_client_branch", "VARCHAR"),
                 ("task", "customer_branch", "VARCHAR"),
+                ("ticket", "due_date", "TIMESTAMP"),
                 ("task", "close_type", "VARCHAR"),
             ):
                 try:

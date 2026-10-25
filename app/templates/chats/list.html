@@ -81,6 +81,8 @@
     {% if chats %}
     <div class="divide-y divide-slate-100">
       {% for chat in chats %}
+      {% set people = chat_people.get(chat.id, []) %}
+      {% set other = people[0] if people|length == 1 else None %}
       <a href="/web/chats/{{ chat.id }}" class="flex items-center gap-4 p-4 hover:bg-slate-50 transition-colors group">
         <!-- Avatar -->
         <div class="relative flex-shrink-0">
@@ -90,9 +92,11 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/>
             </svg>
           </div>
+          {% elif other and other.profile_picture %}
+          <img src="/web{{ other.profile_picture }}" alt="" class="w-12 h-12 rounded-full object-cover shadow-md">
           {% else %}
           <div class="w-12 h-12 bg-gradient-to-br from-slate-400 to-slate-600 rounded-full flex items-center justify-center text-white font-bold text-lg shadow-md">
-            {{ chat.name[:1] if chat.name else 'DM' }}
+            {{ (chat_titles[chat.id] or '?')[:1] | upper }}
           </div>
           {% endif %}
         </div>
@@ -101,11 +105,7 @@
         <div class="flex-1 min-w-0">
           <div class="flex items-center justify-between gap-2">
             <h3 class="font-semibold text-gray-900 truncate group-hover:text-blue-600 transition-colors">
-              {% if chat.name %}
-                {{ chat.name }}
-              {% else %}
-                Direct Message
-              {% endif %}
+              {{ chat_titles[chat.id] }}
             </h3>
             <span class="text-xs text-slate-400 whitespace-nowrap">
               {{ chat.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y') }}
@@ -126,7 +126,16 @@
                 1-on-1
               {% endif %}
             </span>
-            <span class="text-xs text-slate-500">Click to view messages</span>
+            {# Who the chat is with #}
+            <span class="text-xs text-slate-500 truncate min-w-0">
+              {% if other %}
+                {{ other.email or other.username }}
+              {% elif people %}
+                With {{ people | map(attribute='shown_name') | map('default', '', true) | select | join(', ') or (people|length ~ ' people') }}
+              {% else %}
+                No one else is in this chat
+              {% endif %}
+            </span>
           </div>
         </div>
         

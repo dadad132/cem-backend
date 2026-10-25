@@ -8429,6 +8429,21 @@ async def web_task_update(
         changes.append(('due_time', str(task.due_time) if task.due_time else '', str(new_due_time) if new_due_time else ''))
         task.due_time = new_due_time
     
+    if task.start_date and task.due_date and task.due_date < task.start_date:
+        # Nothing is committed, so nothing changes
+        request.session['error_message'] = 'The task was not saved: the due date is before the start date.'
+        return RedirectResponse(f'/web/tasks/{task_id}', status_code=303)
+    
+    # Customer details: the edit form sends them; other callers leave them as they are
+    form = await request.form()
+    for field in ('customer_name', 'customer_surname', 'customer_email', 'customer_phone',
+                  'customer_branch', 'customer_office_number'):
+        if field in form:
+            value = (form.get(field) or '').strip()[:200] or None
+            if getattr(task, field) != value:
+                changes.append((field, getattr(task, field) or '', value or ''))
+                setattr(task, field, value)
+    
     # Save history
     for field, old_value, new_value in changes:
         history_entry = TaskHistory(
@@ -9403,8 +9418,16 @@ async def web_task_update_status(request: Request, task_id: int, status_value: s
     return RedirectResponse(f'/web/projects/{task.project_id}', status_code=303)
 
 
+def _safe_next(next_page: Optional[str], fallback: str) -> str:
+    """Where to go after a form: one of our own pages if asked for, else the fallback."""
+    if next_page and next_page.startswith('/web/') and '//' not in next_page and '\\' not in next_page:
+        return next_page
+    return fallback
+
+
 @router.post('/tasks/{task_id}/assign')
-async def web_task_assign(request: Request, task_id: int, assignee_id: int = Form(...), db: AsyncSession = Depends(get_session)):
+async def web_task_assign(request: Request, task_id: int, assignee_id: int = Form(...),
+                        next_page: Optional[str] = Form(None, alias='next'), db: AsyncSession = Depends(get_session)):
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
@@ -9464,11 +9487,12 @@ async def web_task_assign(request: Request, task_id: int, assignee_id: int = For
             )
         except Exception:
             pass
-    return RedirectResponse(f'/web/projects/{task.project_id}', status_code=303)
+    return RedirectResponse(_safe_next(next_page, f'/web/projects/{task.project_id}'), status_code=303)
 
 
 @router.post('/tasks/{task_id}/unassign')
-async def web_task_unassign(request: Request, task_id: int, assignee_id: int = Form(...), db: AsyncSession = Depends(get_session)):
+async def web_task_unassign(request: Request, task_id: int, assignee_id: int = Form(...),
+                        next_page: Optional[str] = Form(None, alias='next'), db: AsyncSession = Depends(get_session)):
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
@@ -9491,7 +9515,7 @@ async def web_task_unassign(request: Request, task_id: int, assignee_id: int = F
     from sqlalchemy import delete as sa_delete
     await db.execute(sa_delete(Assignment).where(Assignment.task_id == task_id, Assignment.assignee_id == assignee_id))
     await db.commit()
-    return RedirectResponse(f'/web/projects/{task.project_id}', status_code=303)
+    return RedirectResponse(_safe_next(next_page, f'/web/projects/{task.project_id}'), status_code=303)
 
 
 @router.post('/tasks/{task_id}/delete')
@@ -9902,7 +9926,13 @@ async def web_calendar(
     year = year or today.year
     month = month or today.month
     day = day or today.day
-    
+    # A date that does not exist (month 13, 31 June) falls back to a real one
+    if not (1 <= month <= 12 and 1 <= year <= 9998):
+        year, month, day = today.year, today.month, today.day
+    day = min(max(day, 1), pycalendar.monthrange(year, month)[1])
+    if view not in ('day', 'week', 'month'):
+        view = 'month'
+
     # Calculate prev/next month for navigation
     if month == 1:
         prev_month, prev_year = 12, year - 1
@@ -9938,134 +9968,137 @@ async def web_calendar(
         first_day = weeks[0][0]
         last_day = weeks[-1][-1]
     
-    # Admin sees all tasks, regular users see only their assigned tasks
-    # Fetch tasks that overlap with the calendar view period (either by start_date or due_date)
-    if user.is_admin:
-        stmt = (
-            select(Task)
-            .join(Project, Task.project_id == Project.id)
-            .where(
-                Project.workspace_id == user.workspace_id,
-                # Task has at least a due_date or start_date
-                (Task.due_date.isnot(None)) | (Task.start_date.isnot(None)),
-                # Task overlaps with calendar period
-                (
-                    # Tasks with both start and due dates - check if they overlap calendar period
-                    ((Task.start_date.isnot(None)) & (Task.due_date.isnot(None)) & 
-                     (Task.start_date <= last_day) & (Task.due_date >= first_day)) |
-                    # Tasks with only due_date - check if in period
-                    ((Task.start_date.is_(None)) & (Task.due_date.isnot(None)) & 
-                     (Task.due_date >= first_day) & (Task.due_date <= last_day)) |
-                    # Tasks with only start_date - check if in period
-                    ((Task.start_date.isnot(None)) & (Task.due_date.is_(None)) & 
-                     (Task.start_date >= first_day) & (Task.start_date <= last_day))
-                )
-            )
-            .order_by(Task.start_date, Task.due_date, Task.due_time)
-        )
-    else:
-        stmt = (
-            select(Task)
-            .join(Project, Task.project_id == Project.id)
-            .join(Assignment, Task.id == Assignment.task_id)
-            .where(
-                Project.workspace_id == user.workspace_id,
-                Assignment.assignee_id == user.id,
-                # Task has at least a due_date or start_date
-                (Task.due_date.isnot(None)) | (Task.start_date.isnot(None)),
-                # Task overlaps with calendar period
-                (
-                    # Tasks with both start and due dates - check if they overlap calendar period
-                    ((Task.start_date.isnot(None)) & (Task.due_date.isnot(None)) & 
-                     (Task.start_date <= last_day) & (Task.due_date >= first_day)) |
-                    # Tasks with only due_date - check if in period
-                    ((Task.start_date.is_(None)) & (Task.due_date.isnot(None)) & 
-                     (Task.due_date >= first_day) & (Task.due_date <= last_day)) |
-                    # Tasks with only start_date - check if in period
-                    ((Task.start_date.isnot(None)) & (Task.due_date.is_(None)) & 
-                     (Task.start_date >= first_day) & (Task.start_date <= last_day))
-                )
-            )
-            .order_by(Task.start_date, Task.due_date, Task.due_time)
-        )
-    tasks = (await db.execute(stmt)).scalars().all()
-    
+    # Every day the view shows; each item is placed on the days it belongs to
+    days = [first_day + timedelta(days=n) for n in range((last_day - first_day).days + 1)]
+    period_start = datetime.combine(first_day, time.min)
+    period_end = datetime.combine(last_day + timedelta(days=1), time.min)
+
+    def spread(start, end, working_days):
+        """The view's days from start to end: the working days, plus the first and
+        last day themselves, so an item is never left off the calendar."""
+        if end < start:
+            end = start
+        work = set((working_days or '0,1,2,3,4').split(','))
+        return [d for d in days if start <= d <= end and (str(d.weekday()) in work or d in (start, end))]
+
+    # Tasks: admins see all, others the tasks assigned to them. A task with no
+    # dates shows on the day it was created, so every task is on the calendar.
+    task_in_view = or_(
+        # (a due date before the start counts as a one-day task on the start day)
+        and_(Task.start_date.isnot(None), Task.due_date.isnot(None), Task.start_date <= last_day,
+             or_(Task.due_date >= first_day, Task.start_date >= first_day)),
+        and_(Task.start_date.is_(None), Task.due_date.isnot(None),
+             Task.due_date >= first_day, Task.due_date <= last_day),
+        and_(Task.start_date.isnot(None), Task.due_date.is_(None),
+             Task.start_date >= first_day, Task.start_date <= last_day),
+        and_(Task.start_date.is_(None), Task.due_date.is_(None),
+             Task.created_at >= period_start, Task.created_at < period_end),
+    )
+    stmt = (
+        select(Task)
+        .join(Project, Task.project_id == Project.id)
+        .where(Project.workspace_id == user.workspace_id, task_in_view)
+    )
+    if not user.is_admin:
+        stmt = stmt.join(Assignment, Task.id == Assignment.task_id).where(Assignment.assignee_id == user.id)
+    tasks = (await db.execute(stmt.distinct())).scalars().all()
+
     # Fetch projects with date ranges for calendar display
     # Admin sees all projects, regular users see projects they're assigned to (via tasks or project_member)
     from app.models.project_member import ProjectMember
-    
-    if user.is_admin:
-        projects_stmt = (
-            select(Project)
-            .where(
-                Project.workspace_id == user.workspace_id,
-                Project.start_date.isnot(None),
-                Project.due_date.isnot(None),
-                Project.is_archived == False,
-                # Project overlaps with calendar view period
-                Project.start_date <= last_day,
-                Project.due_date >= first_day
-            )
-            .order_by(Project.start_date)
+
+    projects_stmt = (
+        select(Project)
+        .where(
+            Project.workspace_id == user.workspace_id,
+            Project.start_date.isnot(None),
+            Project.due_date.isnot(None),
+            Project.is_archived == False,
+            # Project overlaps with calendar view period
+            Project.start_date <= last_day,
+            Project.due_date >= first_day
         )
-    else:
-        # Get projects where user is a member or has assigned tasks
-        projects_stmt = (
-            select(Project)
-            .join(ProjectMember, Project.id == ProjectMember.project_id)
-            .where(
-                Project.workspace_id == user.workspace_id,
-                ProjectMember.user_id == user.id,
-                Project.start_date.isnot(None),
-                Project.due_date.isnot(None),
-                Project.is_archived == False,
-                Project.start_date <= last_day,
-                Project.due_date >= first_day
-            )
-            .distinct()
-            .order_by(Project.start_date)
-        )
+        .order_by(Project.start_date)
+    )
+    if not user.is_admin:
+        projects_stmt = (projects_stmt.join(ProjectMember, Project.id == ProjectMember.project_id)
+                         .where(ProjectMember.user_id == user.id).distinct())
     projects = (await db.execute(projects_stmt)).scalars().all()
-    
+
     # Sort tasks by priority (critical, high, medium, low)
     # Use date.max for None due_dates to put them at the end
     priority_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
-    
+
     def task_sort_key(t):
         due = t.due_date if t.due_date else date.max
         priority_val = t.priority.value if t.priority else 'low'
         priority = priority_order.get(priority_val, 4)
         due_time = t.due_time if t.due_time else time.max
         return (due, priority, due_time)
-    
+
     tasks = sorted(tasks, key=task_sort_key)
-    
+
+    # Tickets: from their start to their end date; without dates, on the day they
+    # came in. Each user sees the tickets their ticket list shows them.
+    from sqlalchemy import func
+    from app.models.ticket import Ticket
+    ticket_start = func.coalesce(Ticket.scheduled_date, Ticket.created_at)
+    ticket_end = func.coalesce(Ticket.due_date, Ticket.scheduled_date, Ticket.created_at)
+    tickets_stmt = select(Ticket).where(
+        Ticket.workspace_id == user.workspace_id,
+        ticket_start < period_end,
+        or_(ticket_end >= period_start, ticket_start >= period_start),
+    )
+    if not (user.is_admin or user.can_see_all_tickets):
+        member_projects = select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)
+        tickets_stmt = tickets_stmt.where(or_(
+            Ticket.assigned_to_id == user.id,
+            Ticket.related_project_id.in_(member_projects),
+        ))
+    ticket_priority = {'urgent': 0, 'high': 1, 'medium': 2, 'low': 3}
+    tickets = sorted(
+        (await db.execute(tickets_stmt)).scalars().all(),
+        key=lambda tk: (tk.scheduled_date or tk.created_at, ticket_priority.get(tk.priority, 4)),
+    )
+
     # Get meetings for the calendar period
-    # Admin sees all meetings, regular users see only meetings they're attending
-    if user.is_admin:
-        meetings_stmt = (
-            select(Meeting)
-            .where(
-                Meeting.workspace_id == user.workspace_id,
-                Meeting.date >= first_day,
-                Meeting.date <= last_day
-            )
-            .order_by(Meeting.date, Meeting.start_time)
+    # Admin sees all meetings, regular users the ones they organise or attend
+    meetings_stmt = (
+        select(Meeting)
+        .where(
+            Meeting.workspace_id == user.workspace_id,
+            Meeting.date >= first_day,
+            Meeting.date <= last_day
         )
-    else:
-        meetings_stmt = (
-            select(Meeting)
-            .join(MeetingAttendee, Meeting.id == MeetingAttendee.meeting_id)
-            .where(
-                Meeting.workspace_id == user.workspace_id,
-                MeetingAttendee.user_id == user.id,
-                Meeting.date >= first_day,
-                Meeting.date <= last_day
-            )
-            .order_by(Meeting.date, Meeting.start_time)
-        )
+        .order_by(Meeting.date, Meeting.start_time)
+    )
+    if not user.is_admin:
+        attending = select(MeetingAttendee.meeting_id).where(MeetingAttendee.user_id == user.id)
+        meetings_stmt = meetings_stmt.where(or_(Meeting.organizer_id == user.id, Meeting.id.in_(attending)))
     meetings = (await db.execute(meetings_stmt)).scalars().all()
-    
+
+    # Place everything on its days
+    tasks_by_day, tickets_by_day, projects_by_day, meetings_by_day = {}, {}, {}, {}
+    for t in tasks:
+        if t.start_date and t.due_date:
+            on = spread(t.start_date, t.due_date, t.working_days)
+        else:
+            single = t.due_date or t.start_date or (t.created_at.date() if t.created_at else None)
+            on = [single] if single and first_day <= single <= last_day else []
+        for d in on:
+            tasks_by_day.setdefault(d, []).append(t)
+    for tk in tickets:
+        start = (tk.scheduled_date or tk.created_at).date()
+        end = (tk.due_date or tk.scheduled_date or tk.created_at).date()
+        for d in spread(start, end, tk.working_days):
+            tickets_by_day.setdefault(d, []).append(tk)
+    for p in projects:
+        for d in days:
+            if p.start_date <= d <= p.due_date:
+                projects_by_day.setdefault(d, []).append(p)
+    for m in meetings:
+        meetings_by_day.setdefault(m.date, []).append(m)
+
     # Get all workspace users for color legend (admin view)
     workspace_users = []
     if user.is_admin:
@@ -10078,28 +10111,28 @@ async def web_calendar(
             .order_by(USER_SHOWN_NAME)
         )
         workspace_users = (await db.execute(workspace_users_stmt)).scalars().all()
-    
-    # Build a map of task/project IDs to their assigned users for color coding
+
+    # Who works on each task (for colour coding), in one query
     task_users = {}
-    for task in tasks:
-        # Get all users assigned to this task
-        task_assignments = (await db.execute(
-            select(User)
-            .join(Assignment, User.id == Assignment.assignee_id)
-            .where(Assignment.task_id == task.id)
-        )).scalars().all()
-        if task_assignments:
-            task_users[task.id] = list(task_assignments)  # Store all assigned users
-    
-    project_users = {}
-    for project in projects:
-        # Get project owner for color coding
-        project_owner = (await db.execute(
-            select(User).where(User.id == project.owner_id)
-        )).scalar_one_or_none()
-        if project_owner:
-            project_users[project.id] = project_owner
-    
+    if tasks:
+        rows = (await db.execute(
+            select(Assignment.task_id, User)
+            .join(User, User.id == Assignment.assignee_id)
+            .where(Assignment.task_id.in_([t.id for t in tasks]))
+        )).all()
+        for task_id, assignee in rows:
+            people = task_users.setdefault(task_id, [])
+            if all(u.id != assignee.id for u in people):
+                people.append(assignee)
+
+    # Project owners and ticket technicians (for colour coding)
+    people_ids = {p.owner_id for p in projects} | {tk.assigned_to_id for tk in tickets if tk.assigned_to_id}
+    people = {}
+    if people_ids:
+        people = {u.id: u for u in (await db.execute(select(User).where(User.id.in_(people_ids)))).scalars().all()}
+    project_users = {p.id: people[p.owner_id] for p in projects if p.owner_id in people}
+    ticket_users = {tk.id: people[tk.assigned_to_id] for tk in tickets if tk.assigned_to_id in people}
+
     # Calculate navigation dates based on view
     if view == 'day':
         prev_date = current_date - timedelta(days=1)
@@ -10131,6 +10164,12 @@ async def web_calendar(
         'projects': projects,
         'task_users': task_users,
         'project_users': project_users,
+        'tickets': tickets,
+        'ticket_users': ticket_users,
+        'tasks_by_day': tasks_by_day,
+        'tickets_by_day': tickets_by_day,
+        'projects_by_day': projects_by_day,
+        'meetings_by_day': meetings_by_day,
         'workspace_users': workspace_users,
         'today': today,
         'prev_month': prev_month,
@@ -10574,8 +10613,12 @@ async def web_tickets_report(
             elif action == 'priority_changed':
                 description = f'changed priority to {history.new_value}'
             elif action == 'assigned':
-                assignee = users_dict.get(int(history.new_value)) if history.new_value else None
-                description = f'assigned to {assignee.shown_name or assignee.username}' if assignee else 'assigned'
+                # new_value is a user id, or "Unassigned" when the technician was removed
+                assignee = users_dict.get(int(history.new_value)) if (history.new_value or '').isdigit() else None
+                if assignee:
+                    description = f'assigned to {assignee.shown_name or assignee.username}'
+                else:
+                    description = 'removed the technician' if history.new_value == 'Unassigned' else 'assigned'
             elif action == 'commented':
                 description = 'added a comment'
             
@@ -11689,6 +11732,7 @@ async def web_tickets_create(
     category = form_data.get('category', 'general')
     assigned_to_id = form_data.get('assigned_to_id') or None
     scheduled_date = form_data.get('scheduled_date') or None
+    due_date = form_data.get('due_date') or None
     ticket_working_days_list = form_data.getlist('ticket_working_days')
     # Customer information (optional)
     customer_name = form_data.get('customer_name') or None
@@ -11730,6 +11774,14 @@ async def web_tickets_create(
             scheduled_datetime = datetime.fromisoformat(scheduled_date)
         except ValueError:
             pass
+    due_datetime = None
+    if due_date:
+        try:
+            due_datetime = datetime.fromisoformat(due_date)
+        except ValueError:
+            pass
+    if scheduled_datetime and due_datetime and due_datetime < scheduled_datetime:
+        due_datetime = scheduled_datetime  # an end before the start makes no sense
     
     # Parse working days (default to Mon-Fri if not provided)
     working_days_str = ','.join(ticket_working_days_list) if ticket_working_days_list else '0,1,2,3,4'
@@ -11766,6 +11818,7 @@ async def web_tickets_create(
         created_by_id=user_id,
         workspace_id=user.workspace_id,
         scheduled_date=scheduled_datetime,
+        due_date=due_datetime,
         working_days=working_days_str,
         # Customer information - use guest_* fields
         guest_name=customer_name,
@@ -11797,31 +11850,8 @@ async def web_tickets_create(
     except Exception:
         pass
     
-    # Create calendar event if scheduled date is set and ticket is assigned
-    if scheduled_datetime and assigned_to_user_id:
-        # Create a meeting/calendar event for the ticket
-        # Split datetime into date and time components for Meeting model
-        meeting = Meeting(
-            title=f"Ticket: {subject}",
-            description=f"Ticket #{ticket_number}\n\n{description or 'No description provided'}",
-            date=scheduled_datetime.date(),
-            start_time=scheduled_datetime.time(),
-            duration_minutes=30,  # Default 30 minutes
-            platform='other',
-            organizer_id=user_id,
-            workspace_id=user.workspace_id
-        )
-        db.add(meeting)
-        await db.flush()
-        
-        # Add assigned user as attendee
-        from app.models.meeting import MeetingAttendee
-        attendee = MeetingAttendee(
-            meeting_id=meeting.id,
-            user_id=assigned_to_user_id,
-            status='pending'
-        )
-        db.add(attendee)
+    # The ticket shows on the calendar itself, on its scheduled dates (it used to
+    # be copied into a meeting, which then went stale when the ticket changed)
     
     # Create notification if assigned
     if assigned_to_user_id and assigned_to_user_id != user_id:
@@ -16569,6 +16599,132 @@ async def web_tickets_forward(
     return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
 
+TICKET_PRIORITIES = ('low', 'medium', 'high', 'urgent')
+TICKET_CATEGORIES = ('support', 'bug', 'feature', 'billing', 'general')
+
+
+def _parse_datetime_local(value: Optional[str]) -> Optional[datetime]:
+    """A datetime-local form value (or a plain date) as a datetime, else None."""
+    value = (value or '').strip()
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+@router.post('/tickets/{ticket_id}/edit')
+async def web_tickets_edit(request: Request, ticket_id: int, db: AsyncSession = Depends(get_session)):
+    """Admins edit a ticket: subject, description, priority, category, start and
+    end dates, working days, technician and the customer's details."""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        return RedirectResponse('/web/login', status_code=303)
+
+    from app.models.ticket import Ticket, TicketHistory
+
+    ticket = (await db.execute(select(Ticket).where(
+        Ticket.id == ticket_id, Ticket.workspace_id == user.workspace_id
+    ))).scalar_one_or_none()
+    if not ticket:
+        return RedirectResponse('/web/tickets', status_code=303)
+    if not user.is_admin:
+        request.session['error_message'] = 'Only admins can edit a ticket.'
+        return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+
+    form = await request.form()
+
+    def text(name, limit=None):
+        value = (form.get(name) or '').strip()
+        return (value[:limit] if limit else value) or None
+
+    subject = text('subject', 300)
+    if not subject:
+        request.session['error_message'] = 'The ticket was not saved: it needs a subject.'
+        return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+    start = _parse_datetime_local(form.get('scheduled_date'))
+    end = _parse_datetime_local(form.get('due_date'))
+    if start and end and end < start:
+        request.session['error_message'] = 'The ticket was not saved: the end date is before the start date.'
+        return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+
+    assigned_raw = (form.get('assigned_to_id') or '').strip()
+    assigned_to_id = int(assigned_raw) if assigned_raw.isdigit() else None
+    if assigned_to_id:
+        assignee = (await db.execute(select(User).where(
+            User.id == assigned_to_id, User.workspace_id == user.workspace_id
+        ))).scalar_one_or_none()
+        if not assignee:
+            request.session['error_message'] = 'The ticket was not saved: that technician could not be found.'
+            return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+
+    picked = {d for d in form.getlist('working_days') if d in ('0', '1', '2', '3', '4', '5', '6')}
+    working_days = ','.join(sorted(picked)) or ticket.working_days
+
+    def when(dt):
+        return dt.strftime('%Y-%m-%d %H:%M') if dt else 'Not set'
+
+    changes = []  # (history action, old, new)
+    updates = {
+        'subject': subject,
+        'description': text('description'),
+        'priority': form.get('priority') if form.get('priority') in TICKET_PRIORITIES else ticket.priority,
+        'category': form.get('category') if form.get('category') in TICKET_CATEGORIES else ticket.category,
+    }
+    for field, value in updates.items():
+        if getattr(ticket, field) != value:
+            old = getattr(ticket, field)
+            if field == 'description':
+                changes.append(('description_changed', None, 'updated'))
+            else:
+                changes.append((f'{field}_changed', old, value))
+            setattr(ticket, field, value)
+    if ticket.scheduled_date != start:
+        changes.append(('start_date_changed', when(ticket.scheduled_date), when(start)))
+        ticket.scheduled_date = start
+    if ticket.due_date != end:
+        changes.append(('end_date_changed', when(ticket.due_date), when(end)))
+        ticket.due_date = end
+    working_days_changed = (ticket.working_days or '') != working_days
+    if working_days_changed:
+        ticket.working_days = working_days
+    customer_changed = False
+    for field in ('guest_name', 'guest_surname', 'guest_email', 'guest_phone',
+                  'guest_company', 'guest_branch', 'guest_office_number'):
+        value = text(field, 200)
+        if getattr(ticket, field) != value:
+            setattr(ticket, field, value)
+            customer_changed = True
+    if customer_changed:
+        changes.append(('customer_details_changed', None, 'updated'))
+    if ticket.assigned_to_id != assigned_to_id:
+        changes.append(('assigned', str(ticket.assigned_to_id) if ticket.assigned_to_id else 'Unassigned',
+                        str(assigned_to_id) if assigned_to_id else 'Unassigned'))
+        ticket.assigned_to_id = assigned_to_id
+        if assigned_to_id and assigned_to_id != user_id and not getattr(assignee, 'mute_ticket_notifications', False):
+            db.add(Notification(
+                user_id=assigned_to_id,
+                type='ticket',
+                message=f'{user.shown_name or user.username} assigned you ticket #{ticket.ticket_number}: {ticket.subject}',
+                url=f'/web/tickets/{ticket_id}',
+                related_id=ticket_id
+            ))
+
+    if changes or working_days_changed:
+        for action, old, new in changes:
+            db.add(TicketHistory(ticket_id=ticket_id, user_id=user_id, action=action,
+                                 old_value=None if old is None else str(old)[:200],
+                                 new_value=None if new is None else str(new)[:200]))
+        ticket.updated_at = datetime.utcnow()
+        await db.commit()
+        request.session['success_message'] = f'Ticket #{ticket.ticket_number} updated.'
+    return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+
+
 @router.post('/tickets/{ticket_id}/assign')
 async def web_tickets_assign(
     request: Request,
@@ -17047,6 +17203,35 @@ async def web_tickets_process_emails(request: Request, db: AsyncSession = Depend
 
 
 # Chats
+def _chat_title(chat, others) -> str:
+    """What a chat is called: its own name, else the people in it besides you."""
+    if chat.name:
+        return chat.name
+    names = [u.shown_name or u.email or u.username for u in others]
+    if not names:
+        return 'Just you'
+    if len(names) == 1:
+        return names[0]
+    if len(names) <= 3:
+        return ', '.join(names[:-1]) + ' and ' + names[-1]
+    return f"{', '.join(names[:2])} and {len(names) - 2} others"
+
+
+async def _chat_people(db: AsyncSession, chat_ids, user_id: int) -> dict:
+    """The other members of each chat: {chat id: [User, ...]}."""
+    people = {}
+    if chat_ids:
+        rows = (await db.execute(
+            select(ChatMember.chat_id, User)
+            .join(User, User.id == ChatMember.user_id)
+            .where(ChatMember.chat_id.in_(list(chat_ids)), ChatMember.user_id != user_id)
+            .order_by(USER_SHOWN_NAME, User.email)
+        )).all()
+        for chat_id, member in rows:
+            people.setdefault(chat_id, []).append(member)
+    return people
+
+
 @router.get('/chats')
 async def web_chats_list(request: Request, db: AsyncSession = Depends(get_session)):
     user_id = request.session.get('user_id')
@@ -17065,6 +17250,9 @@ async def web_chats_list(request: Request, db: AsyncSession = Depends(get_sessio
         .order_by(Chat.created_at.desc())
     )
     chats = (await db.execute(stmt)).scalars().all()
+    # Who each chat is with, so a chat without a name shows the people in it
+    chat_people = await _chat_people(db, [c.id for c in chats], user_id)
+    chat_titles = {c.id: _chat_title(c, chat_people.get(c.id, [])) for c in chats}
     
     # Get all active workspace users for creating new chats
     users = (await db.execute(
@@ -17076,6 +17264,8 @@ async def web_chats_list(request: Request, db: AsyncSession = Depends(get_sessio
     return templates.TemplateResponse('chats/list.html', {
         'request': request,
         'chats': chats,
+        'chat_people': chat_people,
+        'chat_titles': chat_titles,
         'users': users,
         'user': user
     })
@@ -17187,10 +17377,13 @@ async def web_chat_detail(request: Request, chat_id: int, db: AsyncSession = Dep
         .order_by(USER_SHOWN_NAME, User.email)
     )
     members = (await db.execute(members_stmt)).scalars().all()
+    others = [m for m in members if m.id != user_id]
     
     return templates.TemplateResponse('chats/detail.html', {
         'request': request,
         'chat': chat,
+        'chat_title': _chat_title(chat, others),
+        'others': others,
         'messages': messages_with_sender,
         'members': members,
         'user': user

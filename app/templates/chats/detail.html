@@ -16,16 +16,25 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/>
           </svg>
         </div>
+        {% elif others|length == 1 and others[0].profile_picture %}
+        <img src="/web{{ others[0].profile_picture }}" alt="" class="w-12 h-12 rounded-full object-cover shadow-md">
         {% else %}
         <div class="w-12 h-12 bg-gradient-to-br from-slate-400 to-slate-600 rounded-full flex items-center justify-center text-white font-bold text-lg shadow-md">
-          {{ chat.name[:1] if chat.name else 'DM' }}
+          {{ (chat_title or '?')[:1] | upper }}
         </div>
         {% endif %}
-        <div>
-          <h1 class="text-xl font-bold text-gray-900">
-            {% if chat.name %}{{ chat.name }}{% else %}Direct Message{% endif %}
-          </h1>
-          <p class="text-sm text-slate-500">{{ members|length }} member{{ 's' if members|length != 1 else '' }}</p>
+        <div class="min-w-0">
+          <h1 class="text-xl font-bold text-gray-900 break-words">{{ chat_title }}</h1>
+          {# Who the chat is with #}
+          <p class="text-sm text-slate-500 break-words">
+            {% if not others %}
+              Only you are in this chat
+            {% elif not chat.is_group and others|length == 1 %}
+              Chat with {{ others[0].shown_name or others[0].email or others[0].username }}{% if others[0].email and others[0].shown_name %} &middot; {{ others[0].email }}{% endif %}
+            {% else %}
+              You and {% for m in others %}{{ m.shown_name or m.email or m.username }}{% if not loop.last %}, {% endif %}{% endfor %}
+            {% endif %}
+          </p>
         </div>
       </div>
     </div>
@@ -43,22 +52,22 @@
         <!-- Messages Container -->
         <div id="messagesContainer" class="flex-1 overflow-y-auto p-4 space-y-4 bg-gradient-to-b from-slate-50 to-white">
           {% if messages %}
-            {% set prev_date = None %}
+            {% set day = namespace(last=None) %}
             {% for message, sender_name, attachments in messages %}
               {% set msg_date = message.created_at.strftime('%Y-%m-%d') %}
-              {% if msg_date != prev_date %}
+              {% if msg_date != day.last %}
                 <div class="flex items-center justify-center my-4">
                   <div class="px-3 py-1 bg-slate-200 rounded-full text-xs text-slate-600 font-medium">
                     {{ message.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%B %d, %Y') }}
                   </div>
                 </div>
-                {% set prev_date = msg_date %}
+                {% set day.last = msg_date %}
               {% endif %}
               
-              <div class="flex {% if message.sender_id == user.id %}justify-end{% else %}justify-start{% endif %} group">
-                {% if message.sender_id != user.id %}
+              <div class="flex {% if message.author_id == user.id %}justify-end{% else %}justify-start{% endif %} group">
+                {% if message.author_id != user.id %}
                 <div class="flex-shrink-0 mr-3">
-                  {% set sender_user = members|selectattr('id', 'equalto', message.sender_id)|first %}
+                  {% set sender_user = members|selectattr('id', 'equalto', message.author_id)|first %}
                   {% if sender_user and sender_user.profile_picture %}
                     <img src="/web{{ sender_user.profile_picture }}" alt="{{ sender_name }}" class="w-8 h-8 rounded-full object-cover">
                   {% else %}
@@ -70,11 +79,11 @@
                 {% endif %}
                 
                 <div class="max-w-[70%]">
-                  {% if message.sender_id != user.id %}
+                  {% if message.author_id != user.id %}
                   <div class="text-xs font-medium text-slate-600 mb-1 ml-1">{{ sender_name }}</div>
                   {% endif %}
                   
-                  <div class="{% if message.sender_id == user.id %}bg-gradient-to-br from-blue-500 to-blue-600 text-white{% else %}bg-white border border-slate-200{% endif %} rounded-2xl {% if message.sender_id == user.id %}rounded-tr-sm{% else %}rounded-tl-sm{% endif %} px-4 py-2.5 shadow-sm">
+                  <div class="{% if message.author_id == user.id %}bg-gradient-to-br from-blue-500 to-blue-600 text-white{% else %}bg-white border border-slate-200{% endif %} rounded-2xl {% if message.author_id == user.id %}rounded-tr-sm{% else %}rounded-tl-sm{% endif %} px-4 py-2.5 shadow-sm">
                     {% if message.content %}
                     <div class="text-sm whitespace-pre-wrap break-words">{{ message.content }}</div>
                     {% endif %}
@@ -83,15 +92,15 @@
                     <div class="mt-2 space-y-2">
                       {% for att in attachments %}
                       <a href="/web/chats/attachments/{{ att.id }}/download" 
-                         class="flex items-center gap-2 {% if message.sender_id == user.id %}bg-blue-400/30 hover:bg-blue-400/40{% else %}bg-slate-100 hover:bg-slate-200{% endif %} rounded-lg px-3 py-2 transition-colors">
-                        <div class="{% if message.sender_id == user.id %}bg-blue-400/50{% else %}bg-slate-200{% endif %} p-1.5 rounded">
+                         class="flex items-center gap-2 {% if message.author_id == user.id %}bg-blue-400/30 hover:bg-blue-400/40{% else %}bg-slate-100 hover:bg-slate-200{% endif %} rounded-lg px-3 py-2 transition-colors">
+                        <div class="{% if message.author_id == user.id %}bg-blue-400/50{% else %}bg-slate-200{% endif %} p-1.5 rounded">
                           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                           </svg>
                         </div>
                         <div class="flex-1 min-w-0">
                           <div class="text-xs font-medium truncate">{{ att.filename }}</div>
-                          <div class="text-xs {% if message.sender_id == user.id %}text-blue-100{% else %}text-slate-500{% endif %}">{{ (att.file_size / 1024) | round(1) }} KB</div>
+                          <div class="text-xs {% if message.author_id == user.id %}text-blue-100{% else %}text-slate-500{% endif %}">{{ (att.file_size / 1024) | round(1) }} KB</div>
                         </div>
                         <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
@@ -102,12 +111,12 @@
                     {% endif %}
                   </div>
                   
-                  <div class="text-xs {% if message.sender_id == user.id %}text-right{% endif %} text-slate-400 mt-1 mx-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div class="text-xs {% if message.author_id == user.id %}text-right{% endif %} text-slate-400 mt-1 mx-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     {{ message.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%I:%M %p') }}
                   </div>
                 </div>
                 
-                {% if message.sender_id == user.id %}
+                {% if message.author_id == user.id %}
                 <div class="flex-shrink-0 ml-3">
                   {% if user.profile_picture %}
                     <img src="/web{{ user.profile_picture }}" alt="{{ user.shown_name or user.username }}" class="w-8 h-8 rounded-full object-cover">
