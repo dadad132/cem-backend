@@ -1,0 +1,78 @@
+{# Work Timers panel on the dashboard: which timers are running and which are not.
+   Also sent on its own every 30 seconds (web_dashboard_timers), so timers
+   started or paused elsewhere show up; the clocks tick in between. #}
+{% set tz = workspace.timezone if workspace and workspace.timezone else 'UTC' %}
+<div id="dashboardTimers" class="bg-white rounded-xl border border-slate-200 overflow-hidden"
+     hx-get="/web/dashboard/timers" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="outerHTML">
+  <div class="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
+    <h2 class="font-semibold text-slate-900 flex items-center gap-2">
+      <i class="fas fa-stopwatch text-green-600"></i>
+      {{ 'Team Work Timers' if timers.team else 'My Work Timers' }}
+    </h2>
+    <div class="flex flex-wrap gap-2">
+      <span class="dt-badge dt-badge-running">{% if timers.running %}<span class="dt-dot"></span>{% endif %}{{ timers.running|length }} running</span>
+      <span class="dt-badge dt-badge-paused">{{ timers.paused|length + timers.paused_more }} paused</span>
+      {% if timers.team %}
+      <span class="dt-badge">{{ timers.not_running|length }} with work but no timer</span>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if timers.running %}
+  <div class="divide-y divide-slate-100">
+    {% for t in timers.running %}
+    <a href="{{ t.url }}" class="dt-row">
+      <span class="dt-icon dt-icon-running"><i class="fas fa-play"></i></span>
+      <span class="dt-main">
+        <span class="dt-title"><span class="dt-ref">{{ t.ref }}</span> · {{ t.title }}</span>
+        <span class="dt-meta">
+          {{ t.assigned_names|join(', ') if t.assigned_names else 'Not assigned' }}
+          {% if t.started_by %} · started by {{ t.started_by }}{% endif %}
+          · since {{ t.since | format_datetime_tz(tz, '%d %b %H:%M') }}
+          {% if t.forgotten %}<span class="dt-warn"><i class="fas fa-exclamation-triangle"></i> running over {{ timers.forgotten_hours }}h - forgotten?</span>{% endif %}
+        </span>
+      </span>
+      <span class="dt-clock js-dt-clock" data-seconds="{{ t.total_seconds }}">{{ t.total_seconds | format_clock }}</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="px-5 py-4 text-sm text-slate-500">No timers are running right now.</p>
+  {% endif %}
+
+  {% if timers.paused %}
+  <div class="dt-label px-5 pt-4">Paused</div>
+  <div class="divide-y divide-slate-100">
+    {% for t in timers.paused %}
+    <a href="{{ t.url }}" class="dt-row">
+      <span class="dt-icon dt-icon-paused"><i class="fas fa-pause"></i></span>
+      <span class="dt-main">
+        <span class="dt-title"><span class="dt-ref">{{ t.ref }}</span> · {{ t.title }}</span>
+        <span class="dt-meta">
+          {{ t.assigned_names|join(', ') if t.assigned_names else 'Not assigned' }}
+          {% if t.started_by %} · timed by {{ t.started_by }}{% endif %}
+          · paused {{ t.since | format_datetime_tz(tz, '%d %b %H:%M') }}
+        </span>
+      </span>
+      <span class="dt-total">{{ t.total_seconds | format_duration }}</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% if timers.paused_more %}
+  <p class="px-5 py-2 text-xs text-slate-500">and {{ timers.paused_more }} more paused</p>
+  {% endif %}
+  {% endif %}
+
+  {% if timers.not_running %}
+  <div class="px-5 py-4 border-t border-slate-100">
+    <div class="dt-label mb-2">Open work, no timer running</div>
+    <div class="flex flex-wrap gap-2">
+      {% for idle in timers.not_running %}
+      <span class="dt-person" title="{{ idle.open_items }} open ticket(s)/task(s) assigned">
+        {{ idle.user.shown_name or idle.user.username }} <span class="dt-person-count">{{ idle.open_items }} open</span>
+      </span>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</div>

@@ -1203,7 +1203,152 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
         'selected_user': selected_user,
         'selected_user_stats': selected_user_stats,
         'selected_user_tasks': selected_user_tasks,
-        'selected_user_projects': selected_user_projects
+        'selected_user_projects': selected_user_projects,
+        'timers': await _dashboard_timers(db, user) if view != 'user' else None,
+    })
+
+
+# Tickets and tasks still being worked on (their timers are shown when paused)
+_DONE_TICKET_STATUSES = ('resolved', 'closed')
+DASHBOARD_PAUSED_SHOWN = 10
+DASHBOARD_FORGOTTEN_HOURS = 8
+
+
+async def _dashboard_timers(db: AsyncSession, user, now: Optional[datetime] = None) -> dict:
+    """Which work timers are running and which are not, for the dashboard.
+
+    Admins see the whole company; everyone else only work assigned to them or
+    timed by them. A timer belongs to a ticket or task; its people are the
+    assignees, and whoever pressed Start if that was someone else.
+    """
+    from sqlalchemy import func
+    from app.core.work_timer import worked_seconds
+    from app.models.ticket import Ticket, TicketTimeEntry
+
+    now = now or datetime.utcnow()
+    ws = user.workspace_id
+
+    # Every timed ticket/task that is running, or still open with time on it
+    ticket_rows = (await db.execute(
+        select(TicketTimeEntry, Ticket)
+        .join(Ticket, Ticket.id == TicketTimeEntry.ticket_id)
+        .where(Ticket.workspace_id == ws, or_(
+            Ticket.id.in_(select(TicketTimeEntry.ticket_id).where(TicketTimeEntry.ended_at.is_(None))),
+            and_(Ticket.status.notin_(_DONE_TICKET_STATUSES), Ticket.is_archived == False),
+        ))
+    )).all()
+    task_rows = (await db.execute(
+        select(TaskTimeEntry, Task, Project)
+        .join(Task, Task.id == TaskTimeEntry.task_id)
+        .join(Project, Project.id == Task.project_id)
+        .where(Project.workspace_id == ws, or_(
+            Task.id.in_(select(TaskTimeEntry.task_id).where(TaskTimeEntry.ended_at.is_(None))),
+            and_(Task.status != TaskStatus.done, Task.is_archived == False),
+        ))
+    )).all()
+
+    items = {}
+    for entry, ticket in ticket_rows:
+        item = items.setdefault(('ticket', ticket.id), {
+            'kind': 'ticket', 'url': f'/web/tickets/{ticket.id}', 'ref': f'#{ticket.ticket_number}',
+            'title': ticket.subject, 'assigned': [ticket.assigned_to_id] if ticket.assigned_to_id else [],
+            'entries': [],
+        })
+        item['entries'].append(entry)
+    for entry, task, project in task_rows:
+        item = items.setdefault(('task', task.id), {
+            'kind': 'task', 'url': f'/web/tasks/{task.id}', 'ref': project.name,
+            'title': task.title, 'assigned': [], 'entries': [],
+        })
+        item['entries'].append(entry)
+
+    task_ids = [key[1] for key in items if key[0] == 'task']
+    if task_ids:
+        for task_id, assignee_id in (await db.execute(
+            select(Assignment.task_id, Assignment.assignee_id).where(Assignment.task_id.in_(task_ids))
+        )).all():
+            items[('task', task_id)]['assigned'].append(assignee_id)
+
+    running, paused = [], []
+    for item in items.values():
+        entries = item.pop('entries')
+        live = next((e for e in entries if e.ended_at is None), None)
+        last = live or max(entries, key=lambda e: e.ended_at)
+        item.update(
+            running=live is not None,
+            since=live.started_at if live else last.ended_at,
+            # A stretch this long usually means someone forgot to press Pause
+            forgotten=live is not None and (now - live.started_at).total_seconds() > DASHBOARD_FORGOTTEN_HOURS * 3600,
+            total_seconds=worked_seconds(entries, now),
+            starter_id=last.user_id,
+            people=set(item['assigned']) | ({last.user_id} if last.user_id else set()),
+        )
+        if user.is_admin or user.id in item['people']:
+            (running if live else paused).append(item)
+    running.sort(key=lambda i: i['since'])
+    paused.sort(key=lambda i: i['since'], reverse=True)
+
+    # Admins: who has open work assigned but no timer running
+    not_running = []
+    if user.is_admin:
+        busy = set().union(*(i['people'] for i in running)) if running else set()
+        open_work = {}
+        for assignee_id, count in (await db.execute(
+            select(Ticket.assigned_to_id, func.count())
+            .where(Ticket.workspace_id == ws, Ticket.assigned_to_id.is_not(None),
+                   Ticket.status.notin_(_DONE_TICKET_STATUSES), Ticket.is_archived == False)
+            .group_by(Ticket.assigned_to_id)
+        )).all():
+            open_work[assignee_id] = open_work.get(assignee_id, 0) + count
+        for assignee_id, count in (await db.execute(
+            select(Assignment.assignee_id, func.count())
+            .join(Task, Task.id == Assignment.task_id)
+            .join(Project, Project.id == Task.project_id)
+            .where(Project.workspace_id == ws, Task.status != TaskStatus.done, Task.is_archived == False)
+            .group_by(Assignment.assignee_id)
+        )).all():
+            open_work[assignee_id] = open_work.get(assignee_id, 0) + count
+        idle_ids = [uid for uid in open_work if uid not in busy]
+        if idle_ids:
+            idle_users = (await db.execute(
+                select(User).where(User.id.in_(idle_ids), User.is_active == True).order_by(USER_SHOWN_NAME)
+            )).scalars().all()
+            not_running = [{'user': u, 'open_items': open_work[u.id]} for u in idle_users]
+
+    # Names for everyone shown
+    person_ids = set().union(*(i['people'] for i in running + paused)) if running or paused else set()
+    names = {}
+    if person_ids:
+        names = {u.id: (u.shown_name or u.username) for u in (await db.execute(
+            select(User).where(User.id.in_(person_ids))
+        )).scalars().all()}
+    for item in running + paused:
+        item['assigned_names'] = [names[i] for i in item['assigned'] if i in names]
+        starter = item['starter_id']
+        item['started_by'] = names.get(starter) if starter and starter not in item['assigned'] else None
+
+    return {
+        'team': user.is_admin,
+        'running': running,
+        'paused': paused[:DASHBOARD_PAUSED_SHOWN],
+        'paused_more': max(len(paused) - DASHBOARD_PAUSED_SHOWN, 0),
+        'not_running': not_running,
+        'forgotten_hours': DASHBOARD_FORGOTTEN_HOURS,
+    }
+
+
+@router.get('/dashboard/timers', response_class=HTMLResponse)
+async def web_dashboard_timers(request: Request, db: AsyncSession = Depends(get_session)):
+    """The dashboard's Work Timers panel on its own; it refreshes itself every 30 seconds."""
+    user_id = request.session.get('user_id')
+    user = user_id and (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_active:
+        return _htmx_login_redirect()
+    return templates.TemplateResponse('dashboard/_timers.html', {
+        'request': request,
+        'user': user,
+        'timers': await _dashboard_timers(db, user),
+        'workspace': await get_workspace_for_user(user.id, db),
     })
 
 

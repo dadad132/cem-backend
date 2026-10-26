@@ -367,6 +367,11 @@
     {% endif %}
   </div>
 
+  {# Which work timers are running and which are not (admins: the whole team) #}
+  {% if timers and (timers.team or timers.running or timers.paused) %}
+  {% include 'dashboard/_timers.html' %}
+  {% endif %}
+
   {% if view == 'user' and user.is_admin and selected_user %}
   <!-- USER VIEW CONTENT - Viewing specific user's data -->
   <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1119,5 +1124,66 @@
       }
     }
   }
+</script>
+
+<!-- Work Timers panel (dashboard/_timers.html) -->
+<style>
+  #dashboardTimers .dt-badge {
+    display:inline-flex; align-items:center; gap:.375rem; white-space:nowrap;
+    font-size:.75rem; font-weight:600; padding:.2rem .65rem; border-radius:9999px; background:#f1f5f9; color:#475569;
+  }
+  #dashboardTimers .dt-badge-running { background:#dcfce7; color:#166534; }
+  #dashboardTimers .dt-badge-paused { background:#fef3c7; color:#92400e; }
+  #dashboardTimers .dt-dot {
+    width:.5rem; height:.5rem; border-radius:9999px; background:#16a34a; animation: dt-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes dt-pulse { 0%, 100% { opacity:1; } 50% { opacity:.3; } }
+  #dashboardTimers .dt-row {
+    display:flex; align-items:center; gap:.85rem; padding:.8rem 1.25rem; color:inherit; text-decoration:none;
+  }
+  #dashboardTimers .dt-row:hover { background:#f8fafc; }
+  #dashboardTimers .dt-icon {
+    width:2.25rem; height:2.25rem; border-radius:.65rem; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center; font-size:.8rem;
+  }
+  #dashboardTimers .dt-icon-running { background:#dcfce7; color:#16a34a; }
+  #dashboardTimers .dt-icon-paused { background:#fef3c7; color:#d97706; }
+  #dashboardTimers .dt-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:.1rem; }
+  #dashboardTimers .dt-title {
+    font-weight:600; font-size:.9rem; color:#0f172a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  #dashboardTimers .dt-ref { color:#64748b; font-weight:500; }
+  #dashboardTimers .dt-meta { font-size:.78rem; color:#64748b; }
+  #dashboardTimers .dt-warn { display:inline-flex; align-items:center; gap:.25rem; margin-left:.35rem; color:#b45309; font-weight:600; }
+  #dashboardTimers .dt-clock {
+    flex-shrink:0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums; font-weight:700; font-size:1.05rem; color:#15803d;
+  }
+  #dashboardTimers .dt-total { flex-shrink:0; font-weight:600; font-size:.9rem; color:#475569; }
+  #dashboardTimers .dt-person {
+    display:inline-flex; align-items:center; gap:.4rem; font-size:.8rem; padding:.25rem .65rem;
+    border-radius:9999px; background:#f1f5f9; color:#334155;
+  }
+  #dashboardTimers .dt-person-count { font-size:.7rem; color:#64748b; }
+  #dashboardTimers .dt-label {
+    padding-bottom:.25rem; font-size:.75rem; font-weight:600; text-transform:uppercase; letter-spacing:.05em; color:#94a3b8;
+  }
+</style>
+<script>
+// Work Timers: the running clocks tick between the panel's 30-second refreshes
+(function () {
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function tick() {
+    var now = Date.now();
+    document.querySelectorAll('#dashboardTimers .js-dt-clock').forEach(function (el) {
+      if (!el._shownAt) el._shownAt = now;  // new after each refresh
+      var s = Math.floor((parseInt(el.dataset.seconds, 10) || 0) + (now - el._shownAt) / 1000);
+      el.textContent = pad(Math.floor(s / 3600)) + ':' + pad(Math.floor(s % 3600 / 60)) + ':' + pad(s % 60);
+    });
+  }
+  document.addEventListener('htmx:afterSettle', tick);
+  setInterval(tick, 1000);
+  tick();
+})();
 </script>
 {% endblock %}
