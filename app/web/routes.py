@@ -17285,7 +17285,11 @@ async def web_chat_create(
     if not user:
         request.session.clear()
         return RedirectResponse('/web/login', status_code=303)
-    
+    # A chat belongs to a company; an account without one (the super admin)
+    # has none to put it in, and saving it failed with a server error
+    if not user.workspace_id:
+        return RedirectResponse('/web/chats', status_code=303)
+
     # Create chat
     chat = Chat(
         name=name,
@@ -17295,19 +17299,21 @@ async def web_chat_create(
     )
     db.add(chat)
     await db.flush()
-    
+
     # Add creator as member
     member = ChatMember(chat_id=chat.id, user_id=user_id)
     db.add(member)
-    
-    # Add selected members
+
+    # Add selected members: people in the same company only
     form_data = await request.form()
-    member_ids = form_data.getlist('member_ids')
-    for member_id in member_ids:
-        if int(member_id) != user_id:
-            member = ChatMember(chat_id=chat.id, user_id=int(member_id))
-            db.add(member)
-    
+    wanted = {int(v) for v in form_data.getlist('member_ids') if str(v).isdigit()} - {user_id}
+    if wanted:
+        colleagues = (await db.execute(
+            select(User.id).where(User.id.in_(wanted), User.workspace_id == user.workspace_id)
+        )).scalars().all()
+        for member_id in colleagues:
+            db.add(ChatMember(chat_id=chat.id, user_id=member_id))
+
     await db.commit()
     return RedirectResponse(f'/web/chats/{chat.id}', status_code=303)
 
@@ -19560,6 +19566,14 @@ async def web_superadmin_console(request: Request, db: AsyncSession = Depends(ge
         )).scalar() or 0
         companies.append({'id': ws.id, 'name': ws.name, 'user_count': user_count})
 
+    # Accounts added while signed in as the super admin got no company, and
+    # could not use chats, tickets or projects; the console puts them in one
+    accounts_without_company = (await db.execute(
+        select(User)
+        .where(User.workspace_id.is_(None), User.is_superadmin == False)
+        .order_by(User.username)
+    )).scalars().all()
+
     from app.core import app_download, server_settings
     return templates.TemplateResponse('admin/superadmin.html', {
         'request': request,
@@ -19567,10 +19581,44 @@ async def web_superadmin_console(request: Request, db: AsyncSession = Depends(ge
         'stats': stats,
         'backups': backups,
         'companies': companies,
+        'accounts_without_company': accounts_without_company,
         'download_code': app_download.code_status(),
         'download_code_lengths': (app_download.MIN_LENGTH, app_download.MAX_LENGTH),
         'support_email': server_settings.support_email(),
     })
+
+
+@router.post('/superadmin/users/{user_id}/company')
+async def web_superadmin_assign_company(
+    request: Request,
+    user_id: int,
+    workspace_id: int = Form(...),
+    db: AsyncSession = Depends(get_session),
+):
+    """Put an account that has no company into one, with any projects it made meanwhile."""
+    user, redirect = await _require_superadmin(request, db)
+    if redirect:
+        return redirect
+
+    target = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    workspace = (await db.execute(select(Workspace).where(Workspace.id == workspace_id))).scalar_one_or_none()
+    # Only accounts without a company: moving people between companies is not done here
+    if not target or target.is_superadmin or target.workspace_id is not None or not workspace:
+        return RedirectResponse('/web/superadmin?error=assign_company', status_code=303)
+
+    target.workspace_id = workspace.id
+    projects = (await db.execute(
+        select(Project).where(Project.owner_id == target.id, Project.workspace_id.is_(None))
+    )).scalars().all()
+    for project in projects:
+        project.workspace_id = workspace.id
+    await db.commit()
+
+    logger.warning(
+        f"Super admin '{user.username}' put account '{target.username}' (id {target.id}) "
+        f"into company '{workspace.name}' (id {workspace.id}), with {len(projects)} project(s)"
+    )
+    return RedirectResponse('/web/superadmin?success=assign_company', status_code=303)
 
 
 @router.post('/superadmin/support-email')

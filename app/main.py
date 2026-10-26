@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request
 # restart trigger: updated timestamp
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from starlette.middleware.sessions import SessionMiddleware
@@ -44,6 +44,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Pages an account without a company may still open. The super admin is a
+# server operator and belongs to no company; every other page is company data.
+_NO_COMPANY_PATHS = (
+    '/web/superadmin', '/web/login', '/web/logout', '/web/signup', '/web/set-password',
+    '/web/download', '/web/notifications', '/web/uploads/',
+)
+
+_NO_COMPANY_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>No company</title>
+<style>
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:1rem;
+         font-family:system-ui, sans-serif; background:#f1f5f9; color:#0f172a; }
+  .box { max-width:28rem; background:#fff; border-radius:12px; padding:2rem; box-shadow:0 10px 30px rgba(0,0,0,.08); }
+  h1 { font-size:1.25rem; margin:0 0 .5rem; }
+  button { margin-top:1rem; padding:.6rem 1.2rem; border:0; border-radius:8px; background:#0f172a; color:#fff;
+           font-weight:600; cursor:pointer; }
+</style></head>
+<body><div class="box">
+  <h1>Your account is not part of a company yet</h1>
+  <p>Ask your administrator to add it to your company. Until then you cannot use tickets, tasks or chats.</p>
+  <form method="post" action="/web/logout"><button type="submit">Sign out</button></form>
+</div></body></html>"""
+
+
+def page_for_account_without_company(path: str, user):
+    """Where an account with no company goes instead of a company page; None to carry on.
+
+    Company pages assume a company. Without one they created users with no
+    company (the super admin's Create User) and crashed on save, e.g. a chat
+    with no workspace_id. The super admin goes back to its own console.
+    """
+    if not path.startswith('/web/') or path.startswith(_NO_COMPANY_PATHS):
+        return None
+    if user.is_superadmin:
+        return RedirectResponse('/web/superadmin', status_code=303)
+    return HTMLResponse(_NO_COMPANY_PAGE, status_code=403)
+
+
 # Workspace injection middleware - adds workspace to all requests
 # MUST be added BEFORE SessionMiddleware so it runs AFTER (middleware order is reversed)
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -64,6 +103,7 @@ class WorkspaceMiddleware(BaseHTTPMiddleware):
         except Exception:
             pass
         
+        blocked = None
         if user_id:
             try:
                 from app.core.database import get_session
@@ -72,18 +112,22 @@ class WorkspaceMiddleware(BaseHTTPMiddleware):
                     user = (await db.execute(
                         select(User).where(User.id == user_id)
                     )).scalar_one_or_none()
-                    
+
                     if user and user.workspace_id:
                         workspace = (await db.execute(
                             select(Workspace).where(Workspace.id == user.workspace_id)
                         )).scalar_one_or_none()
-                        
+
                         if workspace:
                             request.state.workspace = workspace
+                    elif user:
+                        blocked = page_for_account_without_company(path, user)
                     break
             except Exception:
                 pass
-        
+        if blocked is not None:
+            return blocked
+
         response = await call_next(request)
         return response
 
