@@ -157,15 +157,20 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers['X-Frame-Options'] = 'SAMEORIGIN'
         # Prevent MIME type sniffing
         response.headers['X-Content-Type-Options'] = 'nosniff'
-        # Enable XSS filter
-        response.headers['X-XSS-Protection'] = '1; mode=block'
+        # The old browser XSS filter is gone from current browsers and could be
+        # abused where it remains; current advice is to switch it off
+        response.headers['X-XSS-Protection'] = '0'
         # Referrer policy
         response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
         # Permissions policy
         response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
-        # HSTS - only in production (when not debug mode)
-        if not settings.debug:
-            response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+        # HSTS ("only ever use HTTPS for this site") only on HTTPS responses:
+        # browsers ignore it over plain HTTP. No includeSubDomains, which would
+        # also force other names under the domain (e.g. a mail server) onto
+        # HTTPS for a year. Behind nginx this needs uvicorn --proxy-headers,
+        # which setup_domain_ssl.sh turns on.
+        if not settings.debug and request.url.scheme == 'https':
+            response.headers['Strict-Transport-Security'] = 'max-age=31536000'
         return response
 
 app.add_middleware(SecurityHeadersMiddleware)
