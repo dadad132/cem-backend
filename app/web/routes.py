@@ -43,7 +43,7 @@ from app.models.comment import Comment
 from app.models.comment_attachment import CommentAttachment
 from app.models.task_history import TaskHistory
 from app.models.task_extensions import TaskTimeEntry
-from app.models.notification import Notification, wants_ticket_notification
+from app.models.notification import Notification, muted_by_default, wants_ticket_notification
 from app.models.chat import Chat, ChatMember, Message
 from app.models.meeting import Meeting, MeetingAttendee
 from app.models.company import Company
@@ -503,8 +503,11 @@ async def web_profile_post(
     if calendar_color:
         user.calendar_color = calendar_color
     
-    # Update mute_ticket_notifications (for all users)
-    user.mute_ticket_notifications = mute_ticket_notifications == 'true'
+    # Mute ticket notifications: the checkbox is only on admins' profile page.
+    # Other users' setting follows their ticket access, and saving their
+    # profile (without the checkbox) used to unmute them.
+    if user.is_admin:
+        user.mute_ticket_notifications = mute_ticket_notifications == 'true'
     
     await db.commit()
     return templates.TemplateResponse('auth/profile.html', {
@@ -2604,6 +2607,7 @@ async def _apply_ticket_access(db: AsyncSession, new_user: User, ticket_access: 
     from app.models.project_member import ProjectMember
 
     new_user.can_see_all_tickets = new_user.is_admin or ticket_access == 'all'
+    new_user.mute_ticket_notifications = muted_by_default(new_user)
     if new_user.can_see_all_tickets or not project_ids:
         return
     await db.flush()  # new_user.id
@@ -4359,8 +4363,9 @@ async def web_admin_toggle_admin(
     if target_user.workspace_id != current_user.workspace_id:
         raise HTTPException(status_code=403, detail="User not in your workspace")
     
-    # Toggle admin status
+    # Toggle admin status; ticket pop-ups follow the new access
     target_user.is_admin = not target_user.is_admin
+    target_user.mute_ticket_notifications = muted_by_default(target_user)
     await db.commit()
     
     return RedirectResponse('/web/admin/users', status_code=303)
@@ -4398,8 +4403,9 @@ async def web_admin_toggle_ticket_visibility(
     if target_user.workspace_id != current_user.workspace_id:
         raise HTTPException(status_code=403, detail="User not in your workspace")
     
-    # Toggle ticket visibility
+    # Toggle ticket visibility; ticket pop-ups follow the new access
     target_user.can_see_all_tickets = not target_user.can_see_all_tickets
+    target_user.mute_ticket_notifications = muted_by_default(target_user)
     await db.commit()
     
     return RedirectResponse('/web/admin/users', status_code=303)

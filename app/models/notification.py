@@ -18,6 +18,12 @@ class Notification(SQLModel, table=True):
     dismissed_at: Optional[datetime] = None  # For popup auto-dismiss tracking
 
 
+def muted_by_default(user) -> bool:
+    """New users, and users whose ticket access changes, start muted unless
+    they can see every ticket (admins and "all tickets" users)."""
+    return not (user.is_admin or user.can_see_all_tickets)
+
+
 def wants_ticket_notification(user, assigned_to_id: Optional[int]) -> bool:
     """Whether to tell this user about something that happened on a ticket.
 

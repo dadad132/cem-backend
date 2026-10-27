@@ -110,6 +110,26 @@ async def init_models() -> None:
                 except Exception:
                     # Best effort; lifespan reports properly on a real startup
                     pass
+            try:
+                await apply_data_changes(conn)
+            except Exception:
+                pass
+
+
+async def apply_data_changes(conn) -> None:
+    """One-time changes to existing data. Each is numbered in the database's
+    own PRAGMA user_version, so it runs once per database (a restored older
+    backup gets it again) and never undoes later choices."""
+    version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar() or 0
+    if version < 1:
+        # Ticket pop-ups muted for everyone without access to all tickets;
+        # admins and "all tickets" users keep theirs (new users: see
+        # muted_by_default in app/models/notification.py)
+        await conn.exec_driver_sql(
+            'UPDATE "user" SET mute_ticket_notifications = 1 '
+            'WHERE is_admin = 0 AND can_see_all_tickets = 0'
+        )
+        await conn.exec_driver_sql("PRAGMA user_version = 1")
 
 
 async def ensure_initialized() -> None:
