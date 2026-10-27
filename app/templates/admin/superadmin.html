@@ -27,6 +27,8 @@
 <div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ The two codes did not match. The download code was not changed.</div>
 {% elif request.query_params.get('error') == 'download_code_length' %}
 <div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ The download code must be {{ download_code_lengths[0] }} to {{ download_code_lengths[1] }} characters long. It was not changed.</div>
+{% elif request.query_params.get('success') == 'notifications_cleared' %}
+<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded text-green-800">✅ Cleared {{ request.query_params.get('count', '0')|int }} notifications. Everyone starts fresh; new notifications arrive as usual.</div>
 {% elif request.query_params.get('success') == 'assign_company' %}
 <div class="mb-4 p-4 bg-green-50 border border-green-200 rounded text-green-800">✅ Account added to the company. It can sign in and use everything now.</div>
 {% elif request.query_params.get('error') == 'assign_company' %}
@@ -176,6 +178,27 @@
       ✉️ Save Support E-mail
     </button>
   </form>
+</div>
+
+<!-- Notifications: clear them all for a fresh start -->
+<div class="mb-6 bg-white rounded-lg border border-slate-200 p-4">
+  <div class="flex flex-wrap items-center justify-between gap-3">
+    <div style="min-width: 16rem; flex: 1;">
+      <h3 class="font-semibold">🔔 Notifications</h3>
+      <p class="text-sm text-slate-600 mt-1">
+        {{ notification_counts.total }} stored for all companies, {{ notification_counts.unread }} of them unread.
+        Clearing removes them all, so nobody gets pop-ups about anything from before now.
+        New notifications arrive as usual, and new users never see ones from before they were created.
+      </p>
+    </div>
+    <form method="post" action="/web/superadmin/notifications/clear"
+          onsubmit="return confirm('Remove all notifications for every company? New ones arrive as usual.');">
+      <button type="submit" class="px-4 py-2 bg-slate-900 text-white rounded hover:bg-slate-800"
+              {% if not notification_counts.total %}disabled{% endif %}>
+        🧹 Clear All Notifications
+      </button>
+    </form>
+  </div>
 </div>
 
 <div class="mb-6 grid grid-cols-1 md:grid-cols-2 gap-4">

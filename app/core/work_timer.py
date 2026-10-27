@@ -3,7 +3,8 @@ Work timer for tickets and tasks.
 
 Start/Resume opens a time entry and Pause ends it, as often as the user needs,
 so time spent away from the work (lunch, waiting for a reply) is not counted.
-Closing a ticket or completing a task stops its timer.
+Resolving or closing a ticket (or archiving it), and completing a task, stops
+its timer.
 
 Each function takes the entry's owner column, e.g. ``TicketTimeEntry.ticket_id``
 or ``TaskTimeEntry.task_id``, and the owner's id.
@@ -13,8 +14,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Iterable, List, Optional
 
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
+
+# A ticket in one of these states is finished: its timer stops and stays stopped
+TICKET_DONE_STATUSES = ('resolved', 'closed')
 
 
 def worked_seconds(entries: Iterable, now: Optional[datetime] = None) -> int:
@@ -92,6 +97,39 @@ async def stop_timer(db: AsyncSession, owner_col, owner_id: int,
     for entry in running:
         entry.ended_at = now
     return bool(running)
+
+
+async def stop_timers_left_running(db: AsyncSession) -> int:
+    """End ticket timers still running on resolved or closed tickets.
+
+    Resolving a ticket used to leave its timer running, so the hours after it
+    were counted. Each such timer is ended when the ticket was finished: the
+    first resolve/close in its history after the timer started, else its
+    resolved/closed time, else (started on a finished ticket) at its start.
+    Returns how many were ended.
+    """
+    from app.models.ticket import Ticket, TicketHistory, TicketTimeEntry
+
+    rows = (await db.execute(
+        select(TicketTimeEntry, Ticket)
+        .join(Ticket, Ticket.id == TicketTimeEntry.ticket_id)
+        .where(TicketTimeEntry.ended_at.is_(None), Ticket.status.in_(TICKET_DONE_STATUSES))
+    )).all()
+    for entry, ticket in rows:
+        finished = (await db.execute(
+            select(func.min(TicketHistory.created_at)).where(
+                TicketHistory.ticket_id == ticket.id,
+                TicketHistory.action == 'status_changed',
+                TicketHistory.new_value.in_(TICKET_DONE_STATUSES),
+                TicketHistory.created_at >= entry.started_at,
+            )
+        )).scalar()
+        if finished is None:
+            marks = [t for t in (ticket.resolved_at, ticket.closed_at) if t and t >= entry.started_at]
+            finished = min(marks) if marks else entry.started_at
+        entry.ended_at = finished
+    await db.commit()
+    return len(rows)
 
 
 async def timer_state(db: AsyncSession, owner_col, owner_id: int,

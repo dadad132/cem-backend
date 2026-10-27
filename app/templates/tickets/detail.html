@@ -81,7 +81,7 @@
     </div>
 
     <!-- Work timer (Start / Pause / Resume) -->
-    {% with timer_url='/web/tickets/%d/timer' % ticket.id, timer_locked=(ticket.status == 'closed'), timer_noun='ticket' %}{% include '_work_timer.html' %}{% endwith %}
+    {% with timer_url='/web/tickets/%d/timer' % ticket.id, timer_locked=(ticket.status in ('resolved', 'closed')), timer_noun='ticket', timer_done_word=ticket.status %}{% include '_work_timer.html' %}{% endwith %}
     {% include '_work_timer_assets.html' %}
 
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">

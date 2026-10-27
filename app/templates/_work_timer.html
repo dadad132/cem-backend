@@ -2,8 +2,9 @@
      timer         state from app/core/work_timer.timer_state (+ user_names)
      timer_url     e.g. /web/tasks/5/timer; POST {timer_url}/start|pause
                    returns this bar on its own so the page swaps it in place
-     timer_locked  true once the ticket is closed / task is done (no buttons)
+     timer_locked  true once the ticket is resolved or closed / task is done (no buttons)
      timer_noun    "ticket" or "task"
+     timer_done_word  optional, e.g. "resolved" for "Stopped - ticket resolved"
    Styles and script: _work_timer_assets.html #}
 {% set tz = workspace.timezone if workspace and workspace.timezone else 'UTC' %}
 {% if not timer_locked or timer.entries %}
@@ -20,7 +21,7 @@
                 {% if timer.running %}
                 <span class="tt-badge tt-badge-running"><span class="tt-dot"></span>Running since {{ timer.running_since | format_datetime_tz(tz, '%b %d, %I:%M %p') }}</span>
                 {% elif timer_locked %}
-                <span class="tt-badge">Stopped &mdash; {{ timer_noun }} {{ 'closed' if timer_noun == 'ticket' else 'completed' }}</span>
+                <span class="tt-badge">Stopped &mdash; {{ timer_noun }} {{ timer_done_word or ('closed' if timer_noun == 'ticket' else 'completed') }}</span>
                 {% elif timer.entries %}
                 <span class="tt-badge tt-badge-paused"><i class="fas fa-pause"></i>Paused</span>
                 {% else %}

@@ -91,6 +91,7 @@ async def init_models() -> None:
             for table, column, ddl in (
                 ("user", "is_superadmin", "BOOLEAN NOT NULL DEFAULT 0"),
                 ("user", "display_name", "VARCHAR"),
+                ("user", "created_at", "TIMESTAMP"),
                 ("incoming_email_account", "imap_uid_state", "VARCHAR"),
                 ("ticket", "close_type", "VARCHAR"),
                 ("ticketsignature", "signer_role", "VARCHAR"),
@@ -451,6 +452,17 @@ async def lifespan(app):  # FastAPI lifespan
             conn.close()
     except Exception as e:
         logger.warning(f"⚠️  Could not check super admin column: {e}")
+
+    # ── Timers left running on resolved/closed tickets ─────────────────
+    # End them when the ticket was finished, so their time is right
+    try:
+        from app.core.work_timer import stop_timers_left_running
+        async with async_session_factory() as db:
+            stopped = await stop_timers_left_running(db)
+        if stopped:
+            logger.info(f"✅ Stopped {stopped} timer(s) left running on resolved/closed tickets")
+    except Exception as e:
+        logger.warning(f"⚠️  Could not stop timers on finished tickets: {e}")
 
     # ─── Background schedulers ──────────────────────────────────────
     # Start these AFTER all schema fixes are done, so they don't read

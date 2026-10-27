@@ -29,7 +29,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.models.ticket import Ticket, TicketHistory, TicketComment, TicketAttachment
-from app.models.notification import Notification
+from app.models.notification import Notification, wants_ticket_notification
 from app.models.email_settings import EmailSettings
 from app.models.processed_mail import ProcessedMail
 from app.models.project import Project
@@ -878,8 +878,8 @@ class EmailToTicketService:
             notification_message = f'New ticket for {project.name} from email #{ticket_number}: {subject[:100]}'
         
         for admin in admin_users:
-            # Check if admin has muted ticket notifications
-            if getattr(admin, 'mute_ticket_notifications', False):
+            # Muted admins hear only about tickets assigned to them
+            if not wants_ticket_notification(admin, ticket.assigned_to_id):
                 continue
             notification = Notification(
                 user_id=admin.id,
@@ -951,8 +951,8 @@ class EmailToTicketService:
         
         # Create notification for each non-admin user (if they haven't muted)
         for user in non_admin_users:
-            # Check if user has muted ticket notifications
-            if getattr(user, 'mute_ticket_notifications', False):
+            # Muted users hear only about tickets assigned to them
+            if not wants_ticket_notification(user, ticket.assigned_to_id):
                 continue
             notification = Notification(
                 user_id=user.id,
@@ -1511,8 +1511,8 @@ async def add_comment_from_email_for_account(
     
     # Create notification for each non-admin user (if they haven't muted)
     for user in non_admin_users:
-        # Check if user has muted ticket notifications
-        if getattr(user, 'mute_ticket_notifications', False):
+        # Muted users hear only about tickets assigned to them
+        if not wants_ticket_notification(user, ticket.assigned_to_id):
             continue
         notification = Notification(
             user_id=user.id,
@@ -2335,8 +2335,8 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                     notify_users = result.scalars().all()
                     
                     for user in notify_users:
-                        # Check if user has muted ticket notifications
-                        if getattr(user, 'mute_ticket_notifications', False):
+                        # Muted users hear only about tickets assigned to them
+                        if not wants_ticket_notification(user, new_ticket.assigned_to_id):
                             continue
                         notification = Notification(
                             user_id=user.id,

@@ -43,7 +43,7 @@ from app.models.comment import Comment
 from app.models.comment_attachment import CommentAttachment
 from app.models.task_history import TaskHistory
 from app.models.task_extensions import TaskTimeEntry
-from app.models.notification import Notification
+from app.models.notification import Notification, wants_ticket_notification
 from app.models.chat import Chat, ChatMember, Message
 from app.models.meeting import Meeting, MeetingAttendee
 from app.models.company import Company
@@ -2350,13 +2350,27 @@ async def web_task_get_time_logs(
 # --------------------------
 # Notifications (minimal for layout)
 # --------------------------
+async def _own_notifications(db: AsyncSession, user_id: int) -> list:
+    """Conditions selecting a user's notifications: theirs, and none from
+    before the account was made (a new account must not see older ones, e.g.
+    left behind by a deleted user whose id it was given)."""
+    created_at = (await db.execute(select(User.created_at).where(User.id == user_id))).scalar_one_or_none()
+    conditions = [Notification.user_id == user_id]
+    if created_at:
+        conditions.append(Notification.created_at >= created_at)
+    return conditions
+
+
 @router.get('/notifications/count', response_class=HTMLResponse)
 async def web_notifications_count(request: Request, db: AsyncSession = Depends(get_session)):
     user_id = request.session.get('user_id')
     if not user_id:
         return HTMLResponse('0')
-    result = await db.execute(select(Notification).where(Notification.user_id == user_id, Notification.read_at.is_(None)))
-    count = len(result.scalars().all())
+    from sqlalchemy import func
+    count = (await db.execute(
+        select(func.count()).select_from(Notification)
+        .where(*await _own_notifications(db, user_id), Notification.read_at.is_(None))
+    )).scalar() or 0
     return HTMLResponse(str(count))
 
 
@@ -2383,7 +2397,7 @@ async def web_notifications(request: Request, db: AsyncSession = Depends(get_ses
     # Get all notifications for the user, ordered by newest first
     notifications = (await db.execute(
         select(Notification)
-        .where(Notification.user_id == user_id)
+        .where(*await _own_notifications(db, user_id))
         .order_by(Notification.created_at.desc())
         .limit(50)
     )).scalars().all()
@@ -2485,7 +2499,7 @@ async def web_notifications_unread(request: Request, db: AsyncSession = Depends(
     notifications = (await db.execute(
         select(Notification)
         .where(
-            Notification.user_id == user_id,
+            *await _own_notifications(db, user_id),
             Notification.read_at.is_(None),
             Notification.dismissed_at.is_(None)
         )
@@ -4465,7 +4479,10 @@ async def web_admin_delete_user(
     if target_user.workspace_id != current_user.workspace_id:
         raise HTTPException(status_code=403, detail="User not in your workspace")
     
-    # Hard delete: Remove user from database
+    # Hard delete: Remove user from database. Their notifications go too, or
+    # the next account given the same id would see them.
+    from sqlalchemy import delete as sa_delete
+    await db.execute(sa_delete(Notification).where(Notification.user_id == target_user.id))
     await db.delete(target_user)
     await db.commit()
     
@@ -12000,9 +12017,9 @@ async def web_tickets_create(
     
     # Create notification if assigned
     if assigned_to_user_id and assigned_to_user_id != user_id:
-        # Check if assignee has muted ticket notifications
+        # Their own ticket: told even with ticket notifications muted
         assignee_user = (await db.execute(select(User).where(User.id == assigned_to_user_id))).scalar_one_or_none()
-        if assignee_user and not getattr(assignee_user, 'mute_ticket_notifications', False):
+        if assignee_user:
             calendar_info = ""
             if scheduled_datetime:
                 calendar_info = f" scheduled for {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}"
@@ -12023,10 +12040,10 @@ async def web_tickets_create(
     
     for admin in admin_users:
         if admin.id != user_id:  # Don't notify the creator if they're admin
-            # Check if this admin has muted ticket notifications
-            if getattr(admin, 'mute_ticket_notifications', False):
-                continue  # Skip this admin
-            
+            # The assignee was told above; muted admins hear only about their own tickets
+            if admin.id == assigned_to_user_id or not wants_ticket_notification(admin, assigned_to_user_id):
+                continue
+
             calendar_info = ""
             if scheduled_datetime and assigned_to_user_id:
                 assigned_user = (await db.execute(select(User).where(User.id == assigned_to_user_id))).scalar_one_or_none()
@@ -12248,9 +12265,9 @@ async def web_tickets_guest_submit(
         )).scalars().all()
         
         for admin in admin_users:
-            # Check if this admin has muted ticket notifications
-            if getattr(admin, 'mute_ticket_notifications', False):
-                continue  # Skip this admin
+            # Muted admins hear only about tickets assigned to them
+            if not wants_ticket_notification(admin, ticket.assigned_to_id):
+                continue
             
             notification = Notification(
                 user_id=admin.id,
@@ -14936,7 +14953,8 @@ async def web_tickets_track_reply(
     )).scalars().all()
     
     for user in admin_users:
-        if getattr(user, 'mute_ticket_notifications', False):
+        # Muted admins hear only about tickets assigned to them
+        if not wants_ticket_notification(user, ticket.assigned_to_id):
             continue
         notification = Notification(
             user_id=user.id,
@@ -15632,8 +15650,9 @@ async def web_tickets_timer(
             return JSONResponse({'error': 'Ticket not found'}, status_code=404)
         return RedirectResponse('/web/tickets', status_code=303)
 
-    # A closed ticket's timer stays stopped; the card re-renders without buttons
-    if action == 'start' and ticket.status != 'closed':
+    # A resolved or closed ticket's timer stays stopped; the card re-renders without buttons
+    from app.core.work_timer import TICKET_DONE_STATUSES
+    if action == 'start' and ticket.status not in TICKET_DONE_STATUSES:
         await start_timer(db, TicketTimeEntry.ticket_id, ticket_id, user_id)
     elif action == 'pause':
         await stop_timer(db, TicketTimeEntry.ticket_id, ticket_id)
@@ -15648,8 +15667,9 @@ async def web_tickets_timer(
             'workspace': workspace,
             'timer': await _work_timer_context(db, TicketTimeEntry.ticket_id, ticket_id),
             'timer_url': f'/web/tickets/{ticket_id}/timer',
-            'timer_locked': ticket.status == 'closed',
+            'timer_locked': ticket.status in TICKET_DONE_STATUSES,
             'timer_noun': 'ticket',
+            'timer_done_word': ticket.status,
         })
     return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
@@ -16147,9 +16167,11 @@ async def web_tickets_update_status(
         # Auto-archive when closed
         ticket.is_archived = True
         ticket.archived_at = datetime.utcnow()
-        # No more work is timed on a closed ticket
+
+    # No more work is timed on a resolved or closed ticket
+    from app.core.work_timer import TICKET_DONE_STATUSES, stop_timer
+    if status in TICKET_DONE_STATUSES:
         from app.models.ticket import TicketTimeEntry
-        from app.core.work_timer import stop_timer
         await stop_timer(db, TicketTimeEntry.ticket_id, ticket_id)
 
     # Log ticket status change for diagnostics
@@ -16172,10 +16194,10 @@ async def web_tickets_update_status(
     )
     db.add(history)
     
-    # Notify assigned user (only if they haven't muted ticket notifications)
+    # Notify assigned user: their own ticket, so even with ticket notifications muted
     if ticket.assigned_to_id and ticket.assigned_to_id != user_id:
         assigned_user = (await db.execute(select(User).where(User.id == ticket.assigned_to_id))).scalar_one_or_none()
-        if assigned_user and not getattr(assigned_user, 'mute_ticket_notifications', False):
+        if assigned_user:
             notification = Notification(
                 user_id=ticket.assigned_to_id,
                 type='ticket',
@@ -16352,10 +16374,10 @@ async def web_tickets_close_with_details(
         new_value='SLA' if is_sla else 'Billable'
     ))
 
-    # Notify assigned user
+    # Notify assigned user: their own ticket, so even with ticket notifications muted
     if ticket.assigned_to_id and ticket.assigned_to_id != user_id:
         assigned_user = (await db.execute(select(User).where(User.id == ticket.assigned_to_id))).scalar_one_or_none()
-        if assigned_user and not getattr(assigned_user, 'mute_ticket_notifications', False):
+        if assigned_user:
             notification = Notification(
                 user_id=ticket.assigned_to_id,
                 type='ticket',
@@ -16479,10 +16501,13 @@ async def web_tickets_archive(
     if not ticket:
         return RedirectResponse('/web/tickets', status_code=303)
     
-    # Archive the ticket
+    # Archive the ticket; work on it is no longer timed
     ticket.is_archived = True
     ticket.archived_at = datetime.utcnow()
     ticket.updated_at = datetime.utcnow()
+    from app.models.ticket import TicketTimeEntry
+    from app.core.work_timer import stop_timer
+    await stop_timer(db, TicketTimeEntry.ticket_id, ticket_id)
     
     # Add history entry
     history = TicketHistory(
@@ -16850,7 +16875,7 @@ async def web_tickets_edit(request: Request, ticket_id: int, db: AsyncSession = 
         changes.append(('assigned', str(ticket.assigned_to_id) if ticket.assigned_to_id else 'Unassigned',
                         str(assigned_to_id) if assigned_to_id else 'Unassigned'))
         ticket.assigned_to_id = assigned_to_id
-        if assigned_to_id and assigned_to_id != user_id and not getattr(assignee, 'mute_ticket_notifications', False):
+        if assigned_to_id and assigned_to_id != user_id:  # told even with ticket notifications muted
             db.add(Notification(
                 user_id=assigned_to_id,
                 type='ticket',
@@ -16932,10 +16957,10 @@ async def web_tickets_assign(
     )
     db.add(history)
     
-    # Notify assigned user (only if they haven't muted ticket notifications)
+    # Notify assigned user: their own ticket, so even with ticket notifications muted
     if assigned_to_id and assigned_to_id != user_id:
         assigned_user = (await db.execute(select(User).where(User.id == assigned_to_id))).scalar_one_or_none()
-        if assigned_user and not getattr(assigned_user, 'mute_ticket_notifications', False):
+        if assigned_user:
             notification = Notification(
                 user_id=assigned_to_id,
                 type='ticket',
@@ -19719,6 +19744,13 @@ async def web_superadmin_console(request: Request, db: AsyncSession = Depends(ge
         .order_by(User.username)
     )).scalars().all()
 
+    notification_counts = {
+        'total': (await db.execute(select(sa_func.count()).select_from(Notification))).scalar() or 0,
+        'unread': (await db.execute(
+            select(sa_func.count()).select_from(Notification).where(Notification.read_at.is_(None))
+        )).scalar() or 0,
+    }
+
     from app.core import app_download, server_settings
     return templates.TemplateResponse('admin/superadmin.html', {
         'request': request,
@@ -19727,10 +19759,27 @@ async def web_superadmin_console(request: Request, db: AsyncSession = Depends(ge
         'backups': backups,
         'companies': companies,
         'accounts_without_company': accounts_without_company,
+        'notification_counts': notification_counts,
         'download_code': app_download.code_status(),
         'download_code_lengths': (app_download.MIN_LENGTH, app_download.MAX_LENGTH),
         'support_email': server_settings.support_email(),
     })
+
+
+@router.post('/superadmin/notifications/clear')
+async def web_superadmin_clear_notifications(request: Request, db: AsyncSession = Depends(get_session)):
+    """Remove every notification on the server, for a fresh start: nobody then
+    gets pop-ups about anything from before now. New ones arrive as usual."""
+    user, redirect = await _require_superadmin(request, db)
+    if redirect:
+        return redirect
+
+    from sqlalchemy import delete as sa_delete
+    removed = (await db.execute(sa_delete(Notification))).rowcount or 0
+    await db.commit()
+
+    logger.warning(f"Super admin '{user.username}' cleared all notifications ({removed})")
+    return RedirectResponse(f'/web/superadmin?success=notifications_cleared&count={removed}', status_code=303)
 
 
 @router.post('/superadmin/users/{user_id}/company')

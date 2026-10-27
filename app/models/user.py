@@ -62,6 +62,9 @@ class User(UserBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     hashed_password: str
     workspace_id: Optional[int] = Field(default=None, foreign_key="workspace.id", index=True)
+    # When the account was made; it sees no notifications from before then.
+    # Empty for accounts made before this was recorded.
+    created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
     # Server operator, above the per-company admins. The only role allowed to
     # back up and restore the whole server (every company at once). Deliberately
     # kept off UserBase so it can never be set through UserCreate/UserUpdate —

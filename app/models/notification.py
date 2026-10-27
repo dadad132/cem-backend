@@ -16,3 +16,12 @@ class Notification(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     read_at: Optional[datetime] = Field(default=None, index=True)
     dismissed_at: Optional[datetime] = None  # For popup auto-dismiss tracking
+
+
+def wants_ticket_notification(user, assigned_to_id: Optional[int]) -> bool:
+    """Whether to tell this user about something that happened on a ticket.
+
+    "Mute ticket notifications" (on the profile) stops the ones about other
+    people's tickets; a ticket assigned to the user still notifies them.
+    """
+    return not getattr(user, 'mute_ticket_notifications', False) or user.id == assigned_to_id
