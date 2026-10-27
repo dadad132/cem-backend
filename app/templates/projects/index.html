@@ -10,6 +10,9 @@
       Archive
     </a>
     <button onclick="document.getElementById('newProject').showModal()" class="px-3 py-2 rounded bg-slate-900 text-white text-sm">New project</button>
+    {% with pdf_url='/web/projects/export/pdf', excel_url='/web/projects/export/excel' %}
+    {% include '_export_menu.html' %}
+    {% endwith %}
   </div>
   <dialog id="newProject" class="rounded-xl p-0">
     <form method="dialog">

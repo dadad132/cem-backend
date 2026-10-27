@@ -39,6 +39,10 @@
         Calendar View
       </a>
     </div>
+    {# Outside the scrolling row above, which would clip the menu. Same filters as the page. #}
+    {% with pdf_url='/web/tasks/list/export/pdf?' ~ request.url.query, excel_url='/web/tasks/list/export/excel?' ~ request.url.query %}
+    {% include '_export_menu.html' %}
+    {% endwith %}
   </div>
 </div>
 

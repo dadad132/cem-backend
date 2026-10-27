@@ -6996,6 +6996,22 @@ async def web_projects(request: Request, db: AsyncSession = Depends(get_session)
         request.session.clear()
         return RedirectResponse('/web/login', status_code=303)
     
+    projects = await _board_projects(db, user)
+
+    # Get workspace for branding
+    workspace = await get_workspace_for_user(user_id, db)
+
+    return templates.TemplateResponse('projects/index.html', {
+        'request': request,
+        'user': user,
+        'projects': projects,
+        'workspace': workspace
+    })
+
+
+async def _board_projects(db: AsyncSession, user: User) -> list:
+    """The projects on the Board View, newest first, not archived: all of the
+    company's for admins, the ones they are a member of for everyone else."""
     # Admin: see all projects in workspace (excluding archived)
     # Regular user: only see projects they're assigned to (excluding archived)
     if user.is_admin:
@@ -7004,30 +7020,112 @@ async def web_projects(request: Request, db: AsyncSession = Depends(get_session)
             .where(Project.workspace_id == user.workspace_id, Project.is_archived == False)
             .order_by(Project.created_at.desc())
         )
-        projects = result.scalars().all()
     else:
         from app.models.project_member import ProjectMember
         result = await db.execute(
             select(Project)
             .join(ProjectMember, Project.id == ProjectMember.project_id)
             .where(
-                ProjectMember.user_id == user_id,
+                ProjectMember.user_id == user.id,
                 Project.workspace_id == user.workspace_id,
                 Project.is_archived == False
             )
             .order_by(Project.created_at.desc())
         )
-        projects = result.scalars().all()
-    
-    # Get workspace for branding
-    workspace = await get_workspace_for_user(user_id, db)
-    
-    return templates.TemplateResponse('projects/index.html', {
-        'request': request, 
-        'user': user,
-        'projects': projects,
-        'workspace': workspace
-    })
+    return result.scalars().all()
+
+
+async def _task_assignee_names(db: AsyncSession, task_ids) -> dict:
+    """{task id: [assignee names]} in one query."""
+    names = {}
+    if task_ids:
+        for task_id, shown_name, email, username in (await db.execute(
+            select(Assignment.task_id, USER_SHOWN_NAME, User.email, User.username)
+            .join(User, Assignment.assignee_id == User.id)
+            .where(Assignment.task_id.in_(list(task_ids)))
+        )).all():
+            names.setdefault(task_id, []).append((shown_name or '').strip() or email or username)
+    return names
+
+
+def _status_counts(tasks) -> dict:
+    """{status: number of tasks} for todo/in_progress/blocked/done."""
+    counts = dict.fromkeys(TASK_STATUS_LABELS, 0)
+    for t in tasks:
+        status = _value(t.status)
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
+def _board_order(task):
+    """Board column order (To do ... Done), then due date (none last)."""
+    order = list(TASK_STATUS_LABELS)
+    status = _value(task.status)
+    return (order.index(status) if status in order else len(order), task.due_date or date.max, task.title or '')
+
+
+@router.get('/projects/export/{fmt}')
+async def web_projects_export(request: Request, fmt: str, db: AsyncSession = Depends(get_session)):
+    """The Board View as PDF or Excel: how far along each project is, and its tasks."""
+    from sqlalchemy import func
+    from app.core.exports import FORMATS, Export, ExportTable, export_response
+    from app.core.work_timer import format_duration
+    from app.models.project_member import ProjectMember
+    if fmt not in FORMATS:
+        raise HTTPException(status_code=404, detail='Unknown export format')
+    user = await _export_user(request, db)
+    if not user:
+        return RedirectResponse('/web/login', status_code=303)
+
+    projects = await _board_projects(db, user)
+    project_ids = [p.id for p in projects]
+    names = {p.id: p.name for p in projects}
+    tasks = (await db.execute(
+        select(Task).where(Task.project_id.in_(project_ids))
+    )).scalars().all() if project_ids else []
+    tasks = sorted(tasks, key=lambda t: (names.get(t.project_id, '').lower(), *_board_order(t)))
+    worked = await _tasks_time_worked(db, [t.id for t in tasks])
+    rows = _task_export_rows(tasks, {t.id: names.get(t.project_id, '') for t in tasks},
+                             await _task_assignee_names(db, [t.id for t in tasks]), worked)
+
+    owner_ids = {p.owner_id for p in projects if p.owner_id}
+    owners = {u.id: (u.shown_name or u.username) for u in (await db.execute(
+        select(User).where(User.id.in_(owner_ids)))).scalars().all()} if owner_ids else {}
+    members = dict((await db.execute(
+        select(ProjectMember.project_id, func.count()).where(ProjectMember.project_id.in_(project_ids))
+        .group_by(ProjectMember.project_id))).all()) if project_ids else {}
+    today = date.today()
+    project_rows = []
+    for p in projects:
+        own = [t for t in tasks if t.project_id == p.id]
+        counts = _status_counts(own)
+        total = len(own)
+        project_rows.append([
+            p.name, p.description or '', owners.get(p.owner_id, ''), p.created_at.date() if p.created_at else None,
+            members.get(p.id, 0), counts['todo'], counts['in_progress'], counts['blocked'], counts['done'], total,
+            f"{round(counts['done'] / total * 100)}%" if total else '',
+            sum(1 for t in own if t.due_date and t.due_date < today and _value(t.status) != 'done'),
+            format_duration(sum(worked.get(t.id, 0) for t in own)),
+        ])
+
+    overall = _status_counts(tasks)
+    export = Export(
+        title='Board View - Projects',
+        filename=f'board_view_{today:%Y-%m-%d}',
+        lines=[('All company projects' if user.is_admin else 'Your projects') + ' (archived projects left out)',
+               _exported_by(user)],
+        summary=[('Projects', len(projects)), ('Tasks', len(tasks)),
+                 *[(TASK_STATUS_LABELS[s], n) for s, n in overall.items()],
+                 ('Overdue', sum(1 for r in rows if r[7])), ('Time worked', format_duration(sum(worked.values())))],
+        tables=[
+            ExportTable('Projects', ['Project', 'Description', 'Owner', 'Created', 'Members', 'To do', 'In progress',
+                                     'Blocked', 'Done', 'Tasks', 'Done %', 'Overdue', 'Time worked'],
+                        project_rows, [2.4, 2.4, 1.4, 1.3, 1.25, 0.9, 1.45, 1.2, 0.9, 0.9, 1.1, 1.2, 1.3]),
+            ExportTable('Tasks', TASK_EXPORT_COLUMNS, rows, TASK_EXPORT_WIDTHS),
+        ],
+    )
+    return export_response(export, fmt)
 
 
 @router.post('/projects/create')
@@ -7361,36 +7459,60 @@ async def web_project_members_remove(
 
 
 # Project Report
-@router.get('/projects/{project_id}/report', response_class=HTMLResponse)
-async def web_project_report(
-    request: Request, 
-    project_id: int, 
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None),
-    db: AsyncSession = Depends(get_session)
-):
-    """Project report showing who did what tasks and time spent"""
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-    
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+@router.get('/projects/{project_id}/export/{fmt}')
+async def web_project_export(request: Request, project_id: int, fmt: str, db: AsyncSession = Depends(get_session)):
+    """A project's board as PDF or Excel: its tasks by column, including the
+    completed ones the board hides, with time worked. Same access as the board."""
+    from sqlalchemy import func
+    from app.core.exports import FORMATS, Export, ExportTable, export_response
+    from app.core.work_timer import format_duration
+    from app.models.project_member import ProjectMember
+    if fmt not in FORMATS:
+        raise HTTPException(status_code=404, detail='Unknown export format')
+    user = await _export_user(request, db)
     if not user:
-        request.session.clear()
         return RedirectResponse('/web/login', status_code=303)
-    
-    # Get project
+
     project = (await db.execute(
         select(Project).where(Project.id == project_id, Project.workspace_id == user.workspace_id)
     )).scalar_one_or_none()
-    
     if not project:
         raise HTTPException(status_code=404, detail='Project not found')
-    
-    # Only admins can access reports
-    if not user.is_admin:
-        raise HTTPException(status_code=403, detail='Admin access required')
-    
+    if not user.is_admin and not (await db.execute(select(ProjectMember.id).where(
+            ProjectMember.project_id == project_id, ProjectMember.user_id == user.id))).first():
+        raise HTTPException(status_code=403, detail='You do not have access to this project')
+
+    tasks = sorted((await db.execute(select(Task).where(Task.project_id == project_id))).scalars().all(),
+                   key=_board_order)
+    worked = await _tasks_time_worked(db, [t.id for t in tasks])
+    rows = _task_export_rows(tasks, {}, await _task_assignee_names(db, [t.id for t in tasks]), worked)
+    rows = [row[:1] + row[2:] for row in rows]  # one project: no Project column
+
+    owner = (await db.execute(select(User).where(User.id == project.owner_id))).scalar_one_or_none()
+    members = (await db.execute(
+        select(func.count()).select_from(ProjectMember).where(ProjectMember.project_id == project_id)
+    )).scalar() or 0
+    counts = _status_counts(tasks)
+    lines = [project.description] if project.description else []
+    if project.start_date or project.due_date:
+        lines.append(f"Runs {project.start_date or '?'} to {project.due_date or '?'}")
+    export = Export(
+        title=f'Project: {project.name}',
+        filename=f'project_{project.name}_{date.today():%Y-%m-%d}',
+        lines=lines + [_exported_by(user)],
+        summary=[('Owner', (owner.shown_name or owner.username) if owner else ''), ('Members', members),
+                 ('Tasks', len(tasks)), *[(TASK_STATUS_LABELS[s], n) for s, n in counts.items()],
+                 ('Done', f"{round(counts['done'] / len(tasks) * 100)}%" if tasks else ''),
+                 ('Overdue', sum(1 for r in rows if r[6])), ('Time worked', format_duration(sum(worked.values())))],
+        tables=[ExportTable('Tasks', [c for c in TASK_EXPORT_COLUMNS if c != 'Project'], rows,
+                            [w for c, w in zip(TASK_EXPORT_COLUMNS, TASK_EXPORT_WIDTHS) if c != 'Project'])],
+    )
+    return export_response(export, fmt)
+
+
+async def _project_report_data(db: AsyncSession, project, start_date: Optional[str], end_date: Optional[str]) -> dict:
+    """Who did what on a project, and the time spent: the project report page
+    and its Excel export. start_date/end_date are YYYY-MM-DD (last 30 days if not given)."""
     # Parse date range (default to last 30 days)
     if start_date:
         start_dt = datetime.strptime(start_date, '%Y-%m-%d')
@@ -7406,13 +7528,13 @@ async def web_project_report(
     
     # Get all tasks for the project
     all_tasks = (await db.execute(
-        select(Task).where(Task.project_id == project_id)
+        select(Task).where(Task.project_id == project.id)
     )).scalars().all()
     
     # Get tasks in date range
     tasks_in_range = (await db.execute(
         select(Task).where(
-            Task.project_id == project_id,
+            Task.project_id == project.id,
             Task.created_at >= start_dt,
             Task.created_at < end_dt
         ).order_by(Task.created_at.desc())
@@ -7581,6 +7703,48 @@ async def web_project_report(
         'active_contributors': active_contributors
     }
     
+    return {
+        'start_date': start_date,
+        'end_date': end_date,
+        'summary': summary,
+        'contributors': contributors,
+        'tasks_detail': tasks_detail,
+        'activities': activities,
+    }
+
+
+@router.get('/projects/{project_id}/report', response_class=HTMLResponse)
+async def web_project_report(
+    request: Request, 
+    project_id: int, 
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_session)
+):
+    """Project report showing who did what tasks and time spent"""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+    
+    # Get project
+    project = (await db.execute(
+        select(Project).where(Project.id == project_id, Project.workspace_id == user.workspace_id)
+    )).scalar_one_or_none()
+    
+    if not project:
+        raise HTTPException(status_code=404, detail='Project not found')
+    
+    # Only admins can access reports
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail='Admin access required')
+    
+    report = await _project_report_data(db, project, start_date, end_date)
+    
     # Get workspace for timezone
     workspace = (await db.execute(
         select(Workspace).where(Workspace.id == user.workspace_id)
@@ -7591,13 +7755,57 @@ async def web_project_report(
         'user': user,
         'project': project,
         'workspace': workspace,
-        'start_date': start_date,
-        'end_date': end_date,
-        'summary': summary,
-        'contributors': contributors,
-        'tasks_detail': tasks_detail,
-        'activities': activities
+        **report,
     })
+
+
+@router.get('/projects/{project_id}/report/excel')
+async def web_project_report_excel(
+    request: Request,
+    project_id: int,
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_session),
+):
+    """The project report as Excel, next to its PDF (admins only, like the report)."""
+    from app.core.exports import Export, ExportTable, export_response
+    user = await _export_user(request, db)
+    if not user:
+        return RedirectResponse('/web/login', status_code=303)
+    project = (await db.execute(
+        select(Project).where(Project.id == project_id, Project.workspace_id == user.workspace_id)
+    )).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail='Project not found')
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail='Admin access required')
+
+    report = await _project_report_data(db, project, start_date, end_date)
+    summary = report['summary']
+    export = Export(
+        title=f'Project Report: {project.name}',
+        filename=f"project_report_{project.name}_{report['start_date']}_{report['end_date']}",
+        lines=[f"Period: {report['start_date']} to {report['end_date']}", _exported_by(user)],
+        summary=[('Total tasks', summary['total_tasks']), ('Completed tasks', summary['completed_tasks']),
+                 ('Completion rate', f"{summary['completion_rate']}%"), ('Hours logged', summary['total_hours']),
+                 ('Active contributors', summary['active_contributors'])],
+        tables=[
+            ExportTable('Contributors', ['Name', 'Email', 'Tasks assigned', 'Tasks completed', 'Completion %',
+                                         'Hours logged', 'Avg hours per task'],
+                        [[c['name'], c['email'], c['tasks_assigned'], c['tasks_completed'], f"{c['completion_rate']}%",
+                          c['hours_logged'], c['avg_hours_per_task']] for c in report['contributors']]),
+            ExportTable('Tasks', ['Task', 'Status', 'Priority', 'Assigned to', 'Created', 'Completed',
+                                  'Days to complete', 'Hours'],
+                        [[t['title'], TASK_STATUS_LABELS.get(t['status'], t['status']), (t['priority'] or '').title(),
+                          ', '.join(t['assignees']), t['created_at'], t['completed_at'], t['duration_days'],
+                          t['time_spent_hours']] for t in report['tasks_detail']],
+                        [4, 1.3, 1.1, 2.6, 1.6, 1.6, 1.2, 0.9]),
+            ExportTable('Recent activity', ['When', 'Who', 'Task', 'What'],
+                        [[a['created_at'], a['user_name'], a['task_title'], a['description']]
+                         for a in report['activities']], [1.5, 1.8, 3, 3.5]),
+        ],
+    )
+    return export_response(export, 'excel')
 
 
 @router.get('/projects/{project_id}/report/pdf')
@@ -8107,26 +8315,12 @@ async def web_task_create(request: Request, db: AsyncSession = Depends(get_sessi
     return RedirectResponse(f'/web/projects/{project_id}', status_code=303)
 
 
-@router.get('/tasks/list')
-async def web_tasks_list(
-    request: Request,
-    tab: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
-    priority: Optional[str] = Query(None),
-    assignee_id: Optional[str] = Query(None),
-    project_id: Optional[str] = Query(None),
-    db: AsyncSession = Depends(get_session)
-):
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user or not user.is_active:
-        request.session.clear()
-        return RedirectResponse('/web/login', status_code=303)
-    
-    from datetime import date
-    
+async def _task_list_data(db: AsyncSession, user: User, tab, status, priority, assignee_id, project_id):
+    """The All Tasks list for these filters: (tasks, project names, assignee names).
+
+    Shared by the page and its exports, so a file has exactly what the page shows.
+    """
+    user_id = user.id
     # Convert empty strings to None for integer filters
     assignee_id_int = int(assignee_id) if assignee_id and assignee_id.strip() else None
     project_id_int = int(project_id) if project_id and project_id.strip() else None
@@ -8188,15 +8382,149 @@ async def web_tasks_list(
     # Get assignees for all tasks
     task_ids = [t.id for t in tasks]
     assocs = (await db.execute(
-        select(Assignment.task_id, USER_SHOWN_NAME, User.email)
+        select(Assignment.task_id, USER_SHOWN_NAME, User.email, User.username)
         .join(User, Assignment.assignee_id == User.id)
         .where(Assignment.task_id.in_(task_ids) if task_ids else False)
     )).all()
     
     assignees_map: dict[int, list[str]] = {}
-    for task_id_val, shown_name, email in assocs:
-        label = (shown_name or '').strip() or email
+    for task_id_val, shown_name, email, username in assocs:
+        # A user without name or e-mail used to break the page ({{ assignee[:1] }})
+        label = (shown_name or '').strip() or email or username
         assignees_map.setdefault(task_id_val, []).append(label)
+    
+    return tasks, project_names, assignees_map
+
+
+# --- Exports (PDF / Excel) of tasks, the Board View and projects ---------------------
+TASK_STATUS_LABELS = {'todo': 'To do', 'in_progress': 'In progress', 'blocked': 'Blocked', 'done': 'Done'}
+TASK_EXPORT_COLUMNS = ['Task', 'Project', 'Status', 'Priority', 'Assigned to', 'Start', 'Due', 'Overdue', 'Time worked']
+TASK_EXPORT_WIDTHS = [4, 2.4, 1.3, 1.1, 2.6, 1.3, 1.3, 1, 1.3]
+
+
+def _value(enum_or_str):
+    return enum_or_str.value if hasattr(enum_or_str, 'value') else enum_or_str
+
+
+async def _tasks_time_worked(db: AsyncSession, task_ids) -> dict:
+    """Seconds on each task's work timer: {task id: seconds}."""
+    from app.core.work_timer import worked_seconds
+    entries = {}
+    if task_ids:
+        for entry in (await db.execute(
+            select(TaskTimeEntry).where(TaskTimeEntry.task_id.in_(list(task_ids)))
+        )).scalars().all():
+            entries.setdefault(entry.task_id, []).append(entry)
+    return {task_id: worked_seconds(task_entries) for task_id, task_entries in entries.items()}
+
+
+def _task_export_rows(tasks, project_names: dict, assignees_map: dict, worked: dict) -> list:
+    """One row per task (TASK_EXPORT_COLUMNS), as the task list and boards show them.
+    worked: seconds on each task's timer, from _tasks_time_worked."""
+    from app.core.work_timer import format_duration
+    today = date.today()
+    rows = []
+    for t in tasks:
+        status = _value(t.status)
+        rows.append([
+            t.title,
+            project_names.get(t.id, ''),
+            TASK_STATUS_LABELS.get(status, status),
+            (_value(t.priority) or '').title(),
+            ', '.join(name for name in assignees_map.get(t.id, []) if name),
+            t.start_date,
+            t.due_date,
+            'Yes' if t.due_date and t.due_date < today and status != 'done' else '',
+            format_duration(worked[t.id]) if worked.get(t.id) else '',
+        ])
+    return rows
+
+
+def _exported_by(user) -> str:
+    return f"Exported by {user.shown_name or user.username} on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+
+async def _export_user(request: Request, db: AsyncSession):
+    """The signed-in, active user for an export, or None."""
+    user_id = request.session.get('user_id')
+    user = user_id and (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    return user if user and user.is_active else None
+
+
+@router.get('/tasks/list/export/{fmt}')
+async def web_tasks_list_export(
+    request: Request,
+    fmt: str,
+    tab: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    priority: Optional[str] = Query(None),
+    assignee_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_session),
+):
+    """The All Tasks list as PDF or Excel, with the same filters as the page."""
+    from app.core.exports import FORMATS, Export, ExportTable, export_response
+    from app.core.work_timer import format_duration
+    if fmt not in FORMATS:
+        raise HTTPException(status_code=404, detail='Unknown export format')
+    user = await _export_user(request, db)
+    if not user:
+        return RedirectResponse('/web/login', status_code=303)
+
+    tasks, project_names, assignees_map = await _task_list_data(db, user, tab, status, priority, assignee_id, project_id)
+    worked = await _tasks_time_worked(db, [t.id for t in tasks])
+    rows = _task_export_rows(tasks, project_names, assignees_map, worked)
+
+    # Say which filters the file was made with
+    shown = [TASK_STATUS_LABELS.get(status, status) + ' tasks' if status and status.strip()
+             else ('Completed tasks' if tab == 'done' else 'Active tasks')]
+    if priority and priority.strip():
+        shown.append(f'priority {priority}')
+    if project_id and project_id.strip().isdigit():
+        name = (await db.execute(select(Project.name).where(
+            Project.id == int(project_id), Project.workspace_id == user.workspace_id))).scalar_one_or_none()
+        shown.append(f'project {name or "?"}')
+    if assignee_id and assignee_id.strip().isdigit():
+        person = (await db.execute(select(User).where(
+            User.id == int(assignee_id), User.workspace_id == user.workspace_id))).scalar_one_or_none()
+        shown.append(f'assigned to {(person.shown_name or person.username) if person else "?"}')
+
+    by_status = {label: sum(1 for r in rows if r[2] == label) for label in TASK_STATUS_LABELS.values()}
+    total_worked = sum(worked.values())
+    export = Export(
+        title='All Tasks',
+        filename=f'tasks_{date.today():%Y-%m-%d}',
+        lines=['Showing: ' + ', '.join(shown), _exported_by(user)],
+        summary=[('Tasks', len(rows)), *[(label, n) for label, n in by_status.items() if n],
+                 ('Overdue', sum(1 for r in rows if r[7])), ('Time worked', format_duration(total_worked))],
+        tables=[ExportTable('Tasks', TASK_EXPORT_COLUMNS, rows, TASK_EXPORT_WIDTHS)],
+    )
+    return export_response(export, fmt)
+
+
+@router.get('/tasks/list')
+async def web_tasks_list(
+    request: Request,
+    tab: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    priority: Optional[str] = Query(None),
+    assignee_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_session)
+):
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_active:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+    
+    from datetime import date
+    
+    tasks, project_names, assignees_map = await _task_list_data(
+        db, user, tab, status, priority, assignee_id, project_id
+    )
     
     # Get all users and projects for filters
     users = (await db.execute(
