@@ -1,10 +1,14 @@
 """Accounts with no company (the super admin, and users it added) cannot break company pages.
 
-Starting a chat as such an account crashed: chat.workspace_id is required.
+Starting a chat as such an account crashed: chat.workspace_id is required. The
+super admin opens the Dashboard and tabs by choosing a company to work in.
 """
 from __future__ import annotations
 
 from types import SimpleNamespace
+
+import json
+import zipfile
 
 import pytest
 from fastapi import HTTPException
@@ -12,12 +16,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import SQLModel
 
+from app.core.tenant_backup import WorkspaceBackup
 from app.main import page_for_account_without_company
 from app.models.chat import ChatMember
 from app.models.project import Project
+from app.models.ticket import Ticket
 from app.models.user import User
 from app.models.workspace import Workspace
-from app.web.routes import web_chat_create, web_superadmin_assign_company
+from app.web.routes import web_chat_create, web_superadmin_assign_company, web_superadmin_work_in_company
 
 
 # --- which pages they can open ----------------------------------------------------------
@@ -25,7 +31,7 @@ from app.web.routes import web_chat_create, web_superadmin_assign_company
 @pytest.mark.parametrize('path', ['/web/chats', '/web/admin/users/create', '/web/dashboard', '/web/tickets/5'])
 def test_company_pages_send_the_super_admin_to_its_console(path):
     response = page_for_account_without_company(path, SimpleNamespace(is_superadmin=True))
-    assert (response.status_code, response.headers['location']) == (303, '/web/superadmin')
+    assert (response.status_code, response.headers['location']) == (303, '/web/superadmin?choose_company=1')
 
 
 @pytest.mark.parametrize('path', ['/web/chats', '/web/admin/users/create'])
@@ -147,3 +153,70 @@ async def test_only_accounts_without_a_company_and_only_by_the_super_admin(tmp_p
     finally:
         await db.close()
         await engine.dispose()
+
+
+# --- the super admin works in a company it chooses -----------------------------------------
+
+async def _work_in(db, actor, workspace_id):
+    request = SimpleNamespace(session={'user_id': actor.id})
+    response = await web_superadmin_work_in_company(request, workspace_id=workspace_id, db=db)
+    return response.headers['location'], request.session.get('workspace_id')
+
+
+@pytest.mark.asyncio
+async def test_super_admin_chooses_switches_and_leaves_a_company(tmp_path):
+    engine, db, acme, p = await _seed(tmp_path / 'c.db')
+    try:
+        assert await _work_in(db, p['root'], str(acme.id)) == ('/web/dashboard', acme.id)
+        await db.refresh(p['root'])
+        assert p['root'].workspace_id == acme.id and p['root'].is_superadmin, 'company pages open now'
+
+        other = p['olive'].workspace_id
+        assert await _work_in(db, p['root'], str(other)) == ('/web/dashboard', other)
+        assert await _work_in(db, p['root'], '') == ('/web/superadmin?success=left_company', None)
+        await db.refresh(p['root'])
+        assert p['root'].workspace_id is None
+
+        for unknown in ('9999', 'abc'):
+            assert (await _work_in(db, p['root'], unknown))[0] == '/web/superadmin?error=work_in_company'
+        with pytest.raises(HTTPException) as not_super:
+            await _work_in(db, p['ada'], str(other))
+        assert not_super.value.status_code == 404, 'company admins cannot move themselves'
+        await db.refresh(p['ada'])
+        assert p['ada'].workspace_id == acme.id
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_company_backup_and_restore_leave_the_super_admin_alone(tmp_path):
+    """Working in a company must not put the super admin's account (and password
+    hash) in that company's backups, or let its restore delete the account."""
+    engine, db, acme, p = await _seed(tmp_path / 'data.db')
+    try:
+        await _work_in(db, p['root'], str(acme.id))
+        db.add(Ticket(ticket_number='TKT-1', subject='Logged by the super admin', workspace_id=acme.id,
+                      created_by_id=p['root'].id))
+        await db.commit()
+    finally:
+        await db.close()
+        await engine.dispose()
+
+    wb = WorkspaceBackup(db_path=str(tmp_path / 'data.db'), backup_root=str(tmp_path / 'backups'))
+    archive = wb.create_backup(acme.id, 'Acme', is_manual=True)
+    with zipfile.ZipFile(archive) as zf:
+        usernames = sorted(u['username'] for u in json.loads(zf.read('data/user.json')))
+    assert usernames == ['ada', 'bob'], 'not the super admin'
+
+    ok, message = wb.restore_backup(acme.id, archive.name)
+    assert ok, message
+    import sqlite3
+    conn = sqlite3.connect(str(tmp_path / 'data.db'))
+    try:
+        root = conn.execute("SELECT id, workspace_id, is_superadmin FROM user WHERE username = 'root'").fetchone()
+        assert root == (p['root'].id, acme.id, 1), 'still there, unchanged'
+        assert conn.execute("SELECT created_by_id FROM ticket WHERE ticket_number = 'TKT-1'").fetchone() == (root[0],)
+        assert conn.execute("SELECT COUNT(*) FROM user WHERE username IN ('ada', 'bob')").fetchone() == (2,)
+    finally:
+        conn.close()

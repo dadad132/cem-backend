@@ -20027,6 +20027,7 @@ async def web_superadmin_console(request: Request, db: AsyncSession = Depends(ge
         'stats': stats,
         'backups': backups,
         'companies': companies,
+        'current_company': next((c for c in companies if c['id'] == user.workspace_id), None),
         'accounts_without_company': accounts_without_company,
         'notification_counts': notification_counts,
         'download_code': app_download.code_status(),
@@ -20049,6 +20050,37 @@ async def web_superadmin_clear_notifications(request: Request, db: AsyncSession 
 
     logger.warning(f"Super admin '{user.username}' cleared all notifications ({removed})")
     return RedirectResponse(f'/web/superadmin?success=notifications_cleared&count={removed}', status_code=303)
+
+
+@router.post('/superadmin/company')
+async def web_superadmin_work_in_company(
+    request: Request,
+    workspace_id: str = Form(''),
+    db: AsyncSession = Depends(get_session),
+):
+    """The company the super admin works in: the Dashboard and the other tabs
+    are that company's, as one of its admins. Empty: none, the console only.
+    (Company backups and restores leave the super admin out: tenant_backup.py.)"""
+    user, redirect = await _require_superadmin(request, db)
+    if redirect:
+        return redirect
+
+    workspace = None
+    if workspace_id:
+        workspace = await db.get(Workspace, int(workspace_id)) if workspace_id.isdigit() else None
+        if not workspace:
+            return RedirectResponse('/web/superadmin?error=work_in_company', status_code=303)
+
+    user.workspace_id = workspace.id if workspace else None
+    await db.commit()
+    request.session['workspace_id'] = user.workspace_id
+    logger.warning(
+        f"Super admin '{user.username}' "
+        + (f"now works in company '{workspace.name}' (id {workspace.id})" if workspace else 'left its company')
+    )
+    if workspace:
+        return RedirectResponse('/web/dashboard', status_code=303)
+    return RedirectResponse('/web/superadmin?success=left_company', status_code=303)
 
 
 @router.post('/superadmin/users/{user_id}/company')

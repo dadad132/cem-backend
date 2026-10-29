@@ -387,8 +387,13 @@ class WorkspaceBackup:
             if rule[0] == 'root':
                 cur.execute(f'SELECT id FROM "{table}" WHERE id = ?', (workspace_id,))
             elif rule[0] == 'direct':
+                # The super admin runs the whole server, even while it works in
+                # a company: never in that company's backup (with its password
+                # hash), and never removed by that company's restore
+                not_superadmin = (' AND COALESCE(is_superadmin, 0) = 0'
+                                  if table == 'user' and 'is_superadmin' in _table_columns(cur, table) else '')
                 cur.execute(
-                    f'SELECT {pk or "rowid"} FROM "{table}" WHERE workspace_id = ?',
+                    f'SELECT {pk or "rowid"} FROM "{table}" WHERE workspace_id = ?{not_superadmin}',
                     (workspace_id,),
                 )
             else:  # ('via', parent, fk)
@@ -733,6 +738,11 @@ class WorkspaceBackup:
 
             workspace_rows = data.get('workspace', [])
             id_maps['workspace'] = {}
+            # (the super admin is left out of the backup, but its tickets,
+            # comments and the like are in it and still point at it)
+            if 'is_superadmin' in _table_columns(cur, 'user'):
+                cur.execute('SELECT id FROM "user" WHERE is_superadmin = 1')
+                id_maps['user'] = {r[0]: r[0] for r in cur.fetchall()}
             if workspace_rows:
                 self._restore_workspace_row(cur, workspace_id, workspace_rows[0])
                 # The archive's workspace id maps onto the live one.
@@ -819,10 +829,12 @@ class WorkspaceBackup:
         column_list = ','.join(f'"{c}"' for c in insert_cols)
         sql = f'INSERT INTO "{table}" ({column_list}) VALUES ({placeholders})'
 
-        table_map: Dict[Any, Any] = {}
+        table_map: Dict[Any, Any] = dict(id_maps.get(table, {}))
         inserted = 0
         skipped = 0
         for row in rows:
+            if table == 'user' and row.get('is_superadmin'):
+                continue  # a company backup never brings in a super admin
             values = []
             unresolved = False
             for col in insert_cols:

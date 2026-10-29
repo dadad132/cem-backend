@@ -74,12 +74,14 @@ def page_for_account_without_company(path: str, user):
 
     Company pages assume a company. Without one they created users with no
     company (the super admin's Create User) and crashed on save, e.g. a chat
-    with no workspace_id. The super admin goes back to its own console.
+    with no workspace_id. The super admin goes back to its own console, where
+    it can choose a company to work in.
     """
     if not path.startswith('/web/') or path.startswith(_NO_COMPANY_PATHS):
         return None
     if user.is_superadmin:
-        return RedirectResponse('/web/superadmin', status_code=303)
+        # The console is where it picks the company to work in
+        return RedirectResponse('/web/superadmin?choose_company=1', status_code=303)
     return HTMLResponse(_NO_COMPANY_PAGE, status_code=403)
 
 
