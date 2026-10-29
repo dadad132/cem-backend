@@ -63,7 +63,7 @@
             </div>
             {% if hook.last_triggered_at %}
             <p class="text-xs text-slate-400 mt-1.5">
-              Last fired {{ hook.last_triggered_at.strftime('%Y-%m-%d %H:%M') }}
+              Last fired {{ hook.last_triggered_at | localtime('%Y-%m-%d %H:%M') }}
               {% if hook.last_status_code %}
                 · HTTP
                 <span class="{{ 'text-green-600' if hook.last_status_code < 300 else 'text-red-600' }} font-semibold">{{ hook.last_status_code }}</span>

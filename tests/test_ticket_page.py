@@ -149,7 +149,7 @@ async def test_long_comment_is_shortened_until_asked_for(tmp_path):
 
         from app.web.routes import templates
         clipped = templates.env.get_template('tickets/_comment.html').render(
-            comment=long_comment, comment_authors={None: None}, comment_tz='UTC', comment_time_fmt='%H:%M')
+            comment=long_comment, comment_authors={None: None}, comment_time_fmt='%H:%M')
         assert 'Show the full message' in clipped
         assert 'https://example.com/end' not in clipped and len(clipped) < 7000
 

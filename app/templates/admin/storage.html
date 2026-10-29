@@ -196,7 +196,7 @@
               <a href="/web/tickets/{{ t.id }}" class="text-blue-600 hover:underline">{{ t.ticket_number }}</a>
             </td>
             <td class="py-2 px-3 max-w-xs truncate">{{ t.subject }}</td>
-            <td class="py-2 px-3 text-slate-500">{{ t.archived_at.strftime('%d/%m/%Y') if t.archived_at else '-' }}</td>
+            <td class="py-2 px-3 text-slate-500">{{ t.archived_at | localtime('%d/%m/%Y') if t.archived_at else '-' }}</td>
             <td class="py-2 px-3 text-right">{{ t.attachment_count }}</td>
             <td class="py-2 px-3 text-right font-medium">{{ '%.2f'|format(t.total_size_mb) }} MB</td>
           </tr>

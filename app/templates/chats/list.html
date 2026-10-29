@@ -108,7 +108,7 @@
               {{ chat_titles[chat.id] }}
             </h3>
             <span class="text-xs text-slate-400 whitespace-nowrap">
-              {{ chat.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y') }}
+              {{ chat.created_at | localtime('%b %d, %Y') }}
             </span>
           </div>
           <div class="flex items-center gap-2 mt-1">

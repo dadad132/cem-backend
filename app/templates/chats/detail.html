@@ -54,11 +54,11 @@
           {% if messages %}
             {% set day = namespace(last=None) %}
             {% for message, sender_name, attachments in messages %}
-              {% set msg_date = message.created_at.strftime('%Y-%m-%d') %}
+              {% set msg_date = message.created_at | localtime('%Y-%m-%d') %}
               {% if msg_date != day.last %}
                 <div class="flex items-center justify-center my-4">
                   <div class="px-3 py-1 bg-slate-200 rounded-full text-xs text-slate-600 font-medium">
-                    {{ message.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%B %d, %Y') }}
+                    {{ message.created_at | localtime('%B %d, %Y') }}
                   </div>
                 </div>
                 {% set day.last = msg_date %}
@@ -112,7 +112,7 @@
                   </div>
                   
                   <div class="text-xs {% if message.author_id == user.id %}text-right{% endif %} text-slate-400 mt-1 mx-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    {{ message.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%I:%M %p') }}
+                    {{ message.created_at | localtime('%I:%M %p') }}
                   </div>
                 </div>
                 

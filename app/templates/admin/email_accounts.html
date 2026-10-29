@@ -79,7 +79,7 @@
                 <div><i class="fas fa-server w-5 text-gray-400"></i> {{ account.imap_host }}:{{ account.imap_port }}</div>
                 <div><i class="fas fa-flag w-5 text-gray-400"></i> Priority: {{ account.default_priority | title }}</div>
                 {% if account.last_checked_at %}
-                <div><i class="fas fa-clock w-5 text-gray-400"></i> Last check: {{ account.last_checked_at.strftime('%b %d, %H:%M') }}</div>
+                <div><i class="fas fa-clock w-5 text-gray-400"></i> Last check: {{ account.last_checked_at | localtime('%b %d, %H:%M') }}</div>
                 {% endif %}
             </div>
             

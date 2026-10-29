@@ -100,7 +100,7 @@
                     </div>
                     <div class="flex justify-between">
                         <dt class="text-gray-500">Date</dt>
-                        <dd class="text-gray-700">{{ case.created_at.strftime('%d %b %Y %H:%M') }}</dd>
+                        <dd class="text-gray-700">{{ case.created_at | localtime('%d %b %Y %H:%M') }}</dd>
                     </div>
                     {% if case.time_to_resolve %}
                     <div class="flex justify-between">
@@ -139,7 +139,7 @@
                     {% for rel in related_cases %}
                     <a href="/web/knowledge-base/resolved/{{ rel.id }}" class="block p-2 rounded hover:bg-gray-50">
                         <p class="text-sm font-medium text-gray-700">{{ rel.problem_title }}</p>
-                        <p class="text-xs text-gray-400">{{ rel.resolved_by_name or 'Unknown' }} - {{ rel.created_at.strftime('%d %b') }}</p>
+                        <p class="text-xs text-gray-400">{{ rel.resolved_by_name or 'Unknown' }} - {{ rel.created_at | localtime('%d %b') }}</p>
                     </a>
                     {% endfor %}
                 </div>

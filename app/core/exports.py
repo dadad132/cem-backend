@@ -35,6 +35,7 @@ class Export:
     lines: List[str] = field(default_factory=list)              # under the title
     summary: List[Tuple[str, Any]] = field(default_factory=list)  # (figure, value)
     tables: List[ExportTable] = field(default_factory=list)
+    generated_at: Optional[datetime] = None  # the company's local time (clock.local_now); server time if None
 
 
 def _text(value) -> str:
@@ -162,7 +163,7 @@ def to_pdf(export: Export) -> bytes:
         story.append(Paragraph(escape(t.title), heading_style))
         story.append(table(t.columns, t.rows, t.widths) if t.rows else Paragraph('Nothing to show.', line_style))
 
-    generated = datetime.now().strftime('%Y-%m-%d %H:%M')
+    generated = (export.generated_at or datetime.now()).strftime('%Y-%m-%d %H:%M')
 
     def footer(canvas, doc):
         canvas.saveState()

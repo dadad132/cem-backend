@@ -133,7 +133,7 @@ async def test_existing_users_are_muted_once(tmp_path):
         await db.commit()
         async with engine.begin() as conn:
             await apply_data_changes(conn)
-            assert (await conn.exec_driver_sql('PRAGMA user_version')).scalar() == 1
+            assert (await conn.exec_driver_sql('PRAGMA user_version')).scalar() >= 1
         assert (await db.execute(text('SELECT mute_ticket_notifications FROM "user" WHERE username = \'restricted\''))).scalar() == 0
     finally:
         await db.close()

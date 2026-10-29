@@ -3,7 +3,7 @@
 {% for entry in history %}
 <div class="flex gap-3 text-sm">
     <div class="text-gray-500">
-        {{ entry.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %I:%M %p') }}
+        {{ entry.created_at | localtime('%b %d, %I:%M %p') }}
     </div>
     <div class="flex-1">
         <span class="font-medium text-gray-700">{{ entry.action|replace('_', ' ')|title }}</span>

@@ -93,7 +93,7 @@
                   </a>
                   <div class="text-xs text-slate-500">
                     Due: {{ task.due_date.strftime('%d/%m/%Y') }} | 
-                    Completed: {{ task.updated_at.strftime('%d/%m/%Y') if task.updated_at else 'N/A' }}
+                    Completed: {{ task.updated_at | localtime('%d/%m/%Y') if task.updated_at else 'N/A' }}
                   </div>
                 </div>
               {% endfor %}

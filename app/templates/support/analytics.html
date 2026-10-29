@@ -220,7 +220,7 @@
                             <div class="flex-1 min-w-0">
                                 <p class="text-sm text-slate-800 truncate">{{ conv.initial_problem }}</p>
                                 <p class="text-xs text-slate-400 mt-0.5">
-                                    {{ conv.created_at.strftime('%b %d, %H:%M') }}
+                                    {{ conv.created_at | localtime('%b %d, %H:%M') }}
                                     {% if conv.guest_email %} • {{ conv.guest_email }}{% endif %}
                                 </p>
                             </div>

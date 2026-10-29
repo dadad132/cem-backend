@@ -272,11 +272,11 @@
                             {% endif %}
                         </td>
                         <td class="px-6 py-4 text-sm text-gray-600">
-                            {{ task.created_at | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%b %d, %Y') }}
+                            {{ task.created_at | localtime('%b %d, %Y') }}
                         </td>
                         <td class="px-6 py-4 text-sm text-gray-600">
                             {% if task.completed_at %}
-                            {{ task.completed_at | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%b %d, %Y') }}
+                            {{ task.completed_at | localtime('%b %d, %Y') }}
                             {% else %}
                             <span class="text-gray-400">-</span>
                             {% endif %}
@@ -367,7 +367,7 @@
                                         {% endif %}
                                     </div>
                                     <div class="whitespace-nowrap text-right text-xs text-gray-500">
-                                        {{ activity.created_at | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%b %d, %H:%M') }}
+                                        {{ activity.created_at | localtime('%b %d, %H:%M') }}
                                     </div>
                                 </div>
                             </div>

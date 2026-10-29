@@ -1,166 +1,61 @@
-# Workspace Timezone Feature
+# Times and timezones
 
-## Overview
+Every time in the system is shown on one clock: if the server says 10:00,
+tickets, tasks, comments, history, the calendar, the dashboard, reports, PDF and
+Excel exports, job cards and e-mails all say 10:00.
 
-The workspace timezone feature allows administrators to set a default timezone for their workspace. All datetime displays throughout the application will be converted from UTC to the selected timezone.
+## The rule
 
-## Features
+- **Stored:** in UTC (`datetime.utcnow`), as before.
+- **Shown:** in the company's zone, which is **the server's own time** unless
+  an admin picks a zone under **Admin → Site Settings → Timezone**.
+- **Not moved:** dates and times people pick themselves (task start/due dates
+  and times, ticket start/end, meeting date and time) are stored as picked and
+  shown as picked.
 
-1. **Timezone Setting**: Admins can select a timezone from Site Settings
-2. **Automatic Conversion**: All datetime displays are converted to workspace timezone
-3. **Template Filter**: `format_datetime_tz` filter for easy timezone formatting
+The whole rule lives in `app/core/clock.py`. A zone of `None` means the
+server's own time, which Python reads from the operating system, so it needs no
+timezone database. Named zones use `zoneinfo` (Linux has the data built in; on
+Windows `pip install tzdata`). A zone the server does not know falls back to
+server time, and Site Settings says so when it is saved.
 
-## Configuration
+Comments follow the same zone; Site Settings only chooses a 12- or 24-hour
+clock for them. (`workspace.comment_timezone` is no longer used.)
 
-### Setting the Timezone
-
-1. Navigate to **Admin** → **Site Settings**
-2. Find the **Timezone** dropdown under Branding section
-3. Select your desired timezone from the list
-4. Click **Save Settings**
-
-### Available Timezones
-
-- UTC (Default)
-- Africa/Johannesburg (SAST)
-- America/New_York (EST/EDT)
-- America/Chicago (CST/CDT)
-- America/Denver (MST/MDT)
-- America/Los_Angeles (PST/PDT)
-- Europe/London (GMT/BST)
-- Europe/Paris (CET/CEST)
-- Asia/Dubai (GST)
-- Asia/Kolkata (IST)
-- Asia/Shanghai (CST)
-- Asia/Tokyo (JST)
-- Australia/Sydney (AEDT/AEST)
-
-## Usage in Templates
-
-### Using the Filter
-
-The `format_datetime_tz` filter converts UTC datetime to workspace timezone:
+## In templates
 
 ```html
-<!-- Basic usage (uses workspace.timezone) -->
-{{ ticket.created_at | format_datetime_tz(workspace.timezone) }}
-
-<!-- Custom format -->
-{{ ticket.created_at | format_datetime_tz(workspace.timezone, '%b %d, %Y %I:%M %p') }}
-
-<!-- Example outputs -->
-{{ ticket.created_at | format_datetime_tz(workspace.timezone, '%Y-%m-%d %H:%M') }}
-<!-- Output: 2025-01-04 14:30 -->
-
-{{ ticket.created_at | format_datetime_tz(workspace.timezone, '%b %d, %I:%M %p') }}
-<!-- Output: Jan 04, 02:30 PM -->
+{{ ticket.created_at | localtime('%b %d, %Y %I:%M %p') }}
 ```
 
-### Before and After
+`localtime` finds the company from the page's `workspace`. Use it for every
+stored time (`*_at`, `timestamp`). Do not use it on picked dates such as
+`task.due_date` or `ticket.scheduled_date`: print those with `strftime`.
+`format_datetime_tz(dt, zone_name, fmt)` still works for code that has a zone
+name rather than a page.
 
-**Before (hardcoded UTC):**
-```html
-{{ ticket.created_at.strftime('%b %d, %Y %I:%M %p') }}
-<!-- Displays: Jan 04, 2025 12:30 PM (UTC) -->
+## In Python
+
+```python
+from app.core.clock import day_start_utc, days_utc, format_local, local_now, local_today, to_local, to_utc
+
+zone = await _company_zone(db, user.workspace_id)   # routes.py helper
+local_today(zone)                     # "today" for overdue checks and calendars
+format_local(ticket.created_at, zone, '%Y-%m-%d %H:%M')
+first, last, start, end = _report_days(start_date, end_date, zone)  # report periods
 ```
 
-**After (workspace timezone):**
-```html
-{{ ticket.created_at | format_datetime_tz(workspace.timezone, '%b %d, %Y %I:%M %p') }}
-<!-- Displays: Jan 04, 2025 02:30 PM (SAST, UTC+2) -->
-```
+Report periods are the company's days: a ticket that came in at 01:30 local
+time on the 15th is in the report for the 15th, even though it is stored as
+23:30 UTC on the 14th. Business hours are counted on the company's clock.
 
-## Deployment
+## Existing data
 
-### Database Migration
+On the first start after this change, companies still on the old `UTC` default
+move to server time, and the separate comment timezone is cleared (one-time
+change 2 in `apply_data_changes`, `app/core/database.py`). A company that had
+picked a zone keeps it.
 
-Run the migration to add the timezone column:
-
-```bash
-python migrations/add_workspace_timezone.py
-```
-
-### Update Code
-
-1. Pull latest code from repository
-2. Run the migration script
-3. Restart the server
-
-### Files Modified
-
-- `app/models/workspace.py`: Added `timezone` field
-- `app/web/routes.py`: Added timezone parameter to settings route and `format_datetime_tz` filter
-- `app/templates/admin/site_settings.html`: Added timezone dropdown
-- `migrations/add_workspace_timezone.py`: Migration script
-
-## Technical Details
-
-### Timezone Storage
-
-- Timezone is stored in the `workspace` table
-- Default value: `UTC`
-- Type: `TEXT` (timezone name like 'Africa/Johannesburg')
-
-### Timezone Conversion
-
-The `format_datetime_tz` function:
-1. Takes a UTC datetime
-2. Converts it to the specified timezone
-3. Formats it according to the format string
-4. Returns formatted string
-
-### Python Version Support
-
-- **Python 3.9+**: Uses built-in `zoneinfo` module
-- **Python < 3.9**: Falls back to `pytz` library
-
-## Troubleshooting
-
-### "No such column: timezone" Error
-
-Run the migration:
-```bash
-python migrations/add_workspace_timezone.py
-```
-
-### Times Still Showing in UTC
-
-1. Check if timezone is set in Site Settings
-2. Ensure templates are using `format_datetime_tz` filter
-3. Verify workspace object is passed to template context
-
-### Incorrect Time Display
-
-1. Verify timezone name is correct (e.g., 'Africa/Johannesburg')
-2. Check that datetime is stored as UTC in database
-3. Ensure `workspace.timezone` is not None
-
-## Example Implementation
-
-### Ticket List Template
-
-```html
-<!-- OLD -->
-<td>{{ ticket.created_at.strftime('%b %d, %Y %I:%M %p') }}</td>
-
-<!-- NEW -->
-<td>{{ ticket.created_at | format_datetime_tz(workspace.timezone, '%b %d, %Y %I:%M %p') }}</td>
-```
-
-### Task Detail Template
-
-```html
-<!-- OLD -->
-<span>Due: {{ task.due_date.strftime('%d/%m/%Y') }}</span>
-
-<!-- NEW -->
-<span>Due: {{ task.due_date | format_datetime_tz(workspace.timezone, '%d/%m/%Y') }}</span>
-```
-
-## Future Enhancements
-
-Potential improvements:
-- Per-user timezone preferences
-- Automatic timezone detection based on browser
-- Timezone abbreviation display (e.g., "SAST", "EST")
-- Calendar integration with timezone support
+Tickets and e-mail replies that arrived by e-mail before the June 2026 fix
+(commit bca514f) were saved two hours ahead (a hard-coded UTC+2), so those
+older e-mailed items show two hours late.

@@ -1,7 +1,6 @@
 {# Work Timers panel on the dashboard: which timers are running and which are not.
    Also sent on its own every 30 seconds (web_dashboard_timers), so timers
    started or paused elsewhere show up; the clocks tick in between. #}
-{% set tz = workspace.timezone if workspace and workspace.timezone else 'UTC' %}
 <div id="dashboardTimers" class="bg-white rounded-xl border border-slate-200 overflow-hidden"
      hx-get="/web/dashboard/timers" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="outerHTML">
   <div class="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
@@ -28,7 +27,7 @@
         <span class="dt-meta">
           {{ t.assigned_names|join(', ') if t.assigned_names else 'Not assigned' }}
           {% if t.started_by %} · started by {{ t.started_by }}{% endif %}
-          · since {{ t.since | format_datetime_tz(tz, '%d %b %H:%M') }}
+          · since {{ t.since | localtime('%d %b %H:%M') }}
           {% if t.forgotten %}<span class="dt-warn"><i class="fas fa-exclamation-triangle"></i> running over {{ timers.forgotten_hours }}h - forgotten?</span>{% endif %}
         </span>
       </span>
@@ -51,7 +50,7 @@
         <span class="dt-meta">
           {{ t.assigned_names|join(', ') if t.assigned_names else 'Not assigned' }}
           {% if t.started_by %} · timed by {{ t.started_by }}{% endif %}
-          · paused {{ t.since | format_datetime_tz(tz, '%d %b %H:%M') }}
+          · paused {{ t.since | localtime('%d %b %H:%M') }}
         </span>
       </span>
       <span class="dt-total">{{ t.total_seconds | format_duration }}</span>

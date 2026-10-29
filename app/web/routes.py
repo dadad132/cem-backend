@@ -52,6 +52,11 @@ from app.models.lead import Lead
 from app.models.deal import Deal
 from app.models.activity import Activity
 from app.core.bubbles_personality import get_conversational_response
+from app.core.clock import (
+    day_start_utc, days_utc, format_local, get_zone, local_now, local_today, server_zone_name, to_local, to_utc,
+    workspace_zone, zone_label,
+)
+from jinja2 import pass_context
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
@@ -77,66 +82,16 @@ def enhanced_template_response(name: str, context: dict, *args, **kwargs):
 templates.TemplateResponse = enhanced_template_response
 
 def format_datetime_tz(dt, tz_name=None, format_str="%Y-%m-%d %H:%M"):
-    """Convert UTC datetime to specified timezone and format it.
-    
-    The tz_name should come from the workspace timezone setting.
-    If tz_name is None or empty, defaults to UTC (no conversion).
-    """
-    if dt is None:
-        return ""
-    
-    # If no timezone specified, default to UTC (no offset applied)
-    if not tz_name:
-        tz_name = "UTC"
-    
-    from datetime import timezone as dt_timezone
-    
-    # Handle UTC directly without needing pytz/zoneinfo
-    if tz_name == "UTC":
-        if isinstance(dt, datetime):
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=dt_timezone.utc)
-            return dt.strftime(format_str)
-        return dt.strftime(format_str) if isinstance(dt, datetime) else str(dt)
-    
-    try:
-        from zoneinfo import ZoneInfo
-        has_zoneinfo = True
-    except ImportError:
-        has_zoneinfo = False
-    
-    try:
-        # Try pytz first as it's more reliable on Windows
-        import pytz
-        if isinstance(dt, datetime):
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=pytz.UTC)
-            target_tz = pytz.timezone(tz_name)
-            local_dt = dt.astimezone(target_tz)
-            return local_dt.strftime(format_str)
-    except ImportError:
-        pass
-    
-    # Fallback to zoneinfo
-    if has_zoneinfo:
-        try:
-            if isinstance(dt, datetime):
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=dt_timezone.utc)
-                target_tz = ZoneInfo(tz_name)  # type: ignore[possibly-undefined]
-                local_dt = dt.astimezone(target_tz)
-                return local_dt.strftime(format_str)
-        except Exception:
-            pass
-    
-    # Ultimate fallback - treat as UTC (no offset) to avoid wrong times
-    if isinstance(dt, datetime):
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=dt_timezone.utc)
-        return dt.strftime(format_str)
-    
-    # Last resort - just format as-is
-    return dt.strftime(format_str) if isinstance(dt, datetime) else str(dt)
+    """A stored (UTC) time as text in the named zone; with no zone named, in
+    the server's own time (see app/core/clock.py)."""
+    return format_local(dt, get_zone(tz_name), format_str)
+
+
+@pass_context
+def localtime(context, dt, format_str="%Y-%m-%d %H:%M"):
+    """Template filter: a stored (UTC) time as text in the company's time,
+    which is the server's own time unless Site Settings names a timezone."""
+    return format_local(dt, workspace_zone(context.get('workspace')), format_str)
 
 async def get_workspace_for_user(user_id: int, db: AsyncSession) -> Optional[Workspace]:
     """Get workspace with branding for a user"""
@@ -149,11 +104,27 @@ async def get_workspace_for_user(user_id: int, db: AsyncSession) -> Optional[Wor
     except Exception:
         return None
 
+
+def _report_days(start_date: Optional[str], end_date: Optional[str], zone) -> tuple:
+    """A report's days as picked (YYYY-MM-DD; by default the last 30 days up
+    to today) in the company's time: (first day, last day, start, end), where
+    start <= a stored (UTC) time < end falls on those days."""
+    today = local_today(zone)
+    first = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else today - timedelta(days=30)
+    last = datetime.strptime(end_date, '%Y-%m-%d').date() if end_date else today
+    return (first, last, *days_utc(first, last, zone))
+
+
+async def _company_zone(db: AsyncSession, workspace_id) -> Optional[object]:
+    """The zone a company's times are shown in (see app/core/clock.py)."""
+    return workspace_zone(await db.get(Workspace, workspace_id)) if workspace_id else None
+
 # Add helper functions to Jinja2 globals for use in templates
 templates.env.globals['now'] = datetime.utcnow
 
 # Add timezone formatting filter
 templates.env.filters['format_datetime_tz'] = format_datetime_tz
+templates.env.filters['localtime'] = localtime
 
 # Ticket timer durations: "3h 05m" and stopwatch "03:05:09"
 from app.core.work_timer import format_clock as _format_clock, format_duration as _format_duration
@@ -732,7 +703,8 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
     from datetime import timedelta
     from sqlalchemy import func
     
-    today = date.today()
+    zone = await _company_zone(db, user.workspace_id)
+    today = local_today(zone)
     week_ago = today - timedelta(days=7)
     
     # Get user's projects (admin sees all, user sees assigned)
@@ -771,7 +743,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
         .where(
             Assignment.assignee_id == current_user_id,
             Task.status == TaskStatus.done,
-            Task.updated_at >= datetime.combine(week_ago, time.min)
+            Task.updated_at >= day_start_utc(week_ago, zone)
         )
     )
     my_tasks_done = my_done_result.scalar() or 0
@@ -1003,7 +975,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
             .where(
                 TaskHistory.task_id.in_(my_task_ids),
                 TaskHistory.editor_id != current_user_id,  # Done by others
-                TaskHistory.created_at >= datetime.combine(week_ago, time.min)
+                TaskHistory.created_at >= day_start_utc(week_ago, zone)
             )
             .order_by(TaskHistory.created_at.desc())
             .limit(10)
@@ -1046,7 +1018,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
             .where(
                 Task.project_id.in_(project_ids) if project_ids else True,
                 Task.status == TaskStatus.done,
-                Task.updated_at >= datetime.combine(week_ago, time.min)
+                Task.updated_at >= day_start_utc(week_ago, zone)
             )
         )
         team_tasks_completed = team_done_result.scalar() or 0
@@ -1058,7 +1030,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
             .where(
                 Ticket.workspace_id == user.workspace_id,
                 Ticket.status.in_(['resolved', 'closed']),
-                Ticket.resolved_at >= datetime.combine(week_ago, time.min),
+                Ticket.resolved_at >= day_start_utc(week_ago, zone),
                 Ticket.is_archived == False
             )
         )
@@ -1099,7 +1071,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
                         .where(
                             Assignment.assignee_id == user_id,
                             Task.status == TaskStatus.done,
-                            Task.updated_at >= datetime.combine(week_ago, time.min)
+                            Task.updated_at >= day_start_utc(week_ago, zone)
                         )
                     )
                     su_done_tasks = su_done_result.scalar() or 0
@@ -2862,16 +2834,9 @@ async def web_admin_generate_user_activity_pdf(
     if not target_user or target_user.workspace_id != user.workspace_id:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Parse date range
-    if start_date:
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-    else:
-        start_dt = datetime.now() - timedelta(days=30)
-    
-    if end_date:
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
-    else:
-        end_dt = datetime.now() + timedelta(days=1)
+    # The days picked, in the company's time
+    zone = workspace_zone(await db.get(Workspace, user.workspace_id))
+    first_day, last_day, start_dt, end_dt = _report_days(start_date, end_date, zone)
     
     # Gather activity data
     from sqlalchemy import text
@@ -3091,11 +3056,11 @@ async def web_admin_generate_user_activity_pdf(
     elements.append(Paragraph(f"User Activity Report", title_style))
     elements.append(Paragraph(f"{target_user.shown_name or target_user.username}", heading_style))
     elements.append(Paragraph(
-        f"Period: {start_dt.strftime('%B %d, %Y')} - {end_dt.strftime('%B %d, %Y')}",
+        f"Period: {first_day.strftime('%B %d, %Y')} - {last_day.strftime('%B %d, %Y')}",
         subheading_style
     ))
     elements.append(Paragraph(
-        f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}",
+        f"Generated: {local_now(zone).strftime('%B %d, %Y at %I:%M %p')}",
         subheading_style
     ))
     elements.append(Spacer(1, 0.3*inch))
@@ -3131,7 +3096,7 @@ async def web_admin_generate_user_activity_pdf(
     
     # OVERDUE TASKS SECTION (Critical!)
     from datetime import date as date_type
-    now = datetime.now()
+    now = local_now(zone)
     now_date = now.date()
     
     # Helper function to handle both date and datetime
@@ -3189,7 +3154,7 @@ async def web_admin_generate_user_activity_pdf(
             if task.due_date and is_overdue(task.due_date) and task.status.value not in ['done', 'completed', 'archived']:
                 due_str += ' (OVERDUE)'
             task_data.append([
-                task.created_at.strftime('%Y-%m-%d'),
+                format_local(task.created_at, zone, '%Y-%m-%d'),
                 task.title[:35],
                 due_str,
                 task.priority.value.title(),
@@ -3224,7 +3189,7 @@ async def web_admin_generate_user_activity_pdf(
             if task.due_date and is_overdue(task.due_date) and task.status.value not in ['done', 'completed', 'archived']:
                 due_str += ' (LATE)'
             assignment_data.append([
-                task.created_at.strftime('%Y-%m-%d'),
+                format_local(task.created_at, zone, '%Y-%m-%d'),
                 Paragraph(task.title, styles['Normal']),
                 Paragraph(assigner_name, styles['Normal']),
                 due_str,
@@ -3253,7 +3218,7 @@ async def web_admin_generate_user_activity_pdf(
         edit_data = [['Date', 'Task ID', 'Field Changed', 'Old Value', 'New Value']]
         for edit in task_edits:
             edit_data.append([
-                edit.created_at.strftime('%Y-%m-%d %H:%M'),
+                format_local(edit.created_at, zone, '%Y-%m-%d %H:%M'),
                 str(edit.task_id),
                 edit.field.replace('_', ' ').title(),
                 Paragraph(edit.old_value or 'None', styles['Normal']),
@@ -3284,7 +3249,7 @@ async def web_admin_generate_user_activity_pdf(
             # comment is a tuple: (id, task_id, author_id, content, created_at)
             comment_id, task_id, author_id, content, created_at = comment
             comment_data.append([
-                created_at.strftime('%Y-%m-%d %H:%M') if isinstance(created_at, datetime) else str(created_at)[:16],
+                format_local(created_at, zone, '%Y-%m-%d %H:%M'),
                 str(task_id),
                 Paragraph(content or '', styles['Normal']),
             ])
@@ -3315,9 +3280,9 @@ async def web_admin_generate_user_activity_pdf(
                 select(ProjectMember).where(ProjectMember.project_id == project.id)
             )).scalars().all()
             project_data.append([
-                project.created_at.strftime('%Y-%m-%d'),
+                format_local(project.created_at, zone, '%Y-%m-%d'),
                 Paragraph(project.name, styles['Normal']),
-                project.status.value.title(),
+                'Archived' if project.is_archived else 'Active',  # projects have no status of their own
                 str(len(member_count)),
             ])
         
@@ -3350,7 +3315,7 @@ async def web_admin_generate_user_activity_pdf(
                 related = f'Contact ID: {activity.contact_id}'
             
             activity_data.append([
-                activity.created_at.strftime('%Y-%m-%d'),
+                format_local(activity.created_at, zone, '%Y-%m-%d'),
                 activity.activity_type.replace('_', ' ').title(),
                 Paragraph(activity.subject or '', styles['Normal']),
                 Paragraph(related, styles['Normal']),
@@ -3380,7 +3345,7 @@ async def web_admin_generate_user_activity_pdf(
             # tc is a tuple: (id, ticket_id, user_id, content, is_internal, created_at)
             tc_id, ticket_id, user_id, content, is_internal, created_at = tc
             tcomment_data.append([
-                created_at.strftime('%Y-%m-%d') if isinstance(created_at, datetime) else str(created_at)[:10],
+                format_local(created_at, zone, '%Y-%m-%d'),
                 str(ticket_id),
                 Paragraph(content or '', styles['Normal']),
                 'Yes' if is_internal else 'No',
@@ -3408,7 +3373,7 @@ async def web_admin_generate_user_activity_pdf(
         tassigned_data = [['Date Assigned', 'Ticket #', 'Subject', 'Priority', 'Status']]
         for ticket in tickets_assigned:
             tassigned_data.append([
-                ticket.created_at.strftime('%Y-%m-%d'),
+                format_local(ticket.created_at, zone, '%Y-%m-%d'),
                 ticket.ticket_number,
                 Paragraph(ticket.subject, styles['Normal']),
                 ticket.priority.title(),
@@ -3437,7 +3402,7 @@ async def web_admin_generate_user_activity_pdf(
         ticket_data = [['Date Closed', 'Ticket #', 'Subject', 'Priority']]
         for ticket in tickets_closed:
             ticket_data.append([
-                ticket.closed_at.strftime('%Y-%m-%d %H:%M'),
+                format_local(ticket.closed_at, zone, '%Y-%m-%d %H:%M'),
                 ticket.ticket_number,
                 Paragraph(ticket.subject, styles['Normal']),
                 ticket.priority.title(),
@@ -3465,7 +3430,7 @@ async def web_admin_generate_user_activity_pdf(
     
     # Return PDF file
     from fastapi.responses import StreamingResponse
-    filename = f"user_activity_{target_user.username}_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.pdf"
+    filename = f"user_activity_{target_user.username}_{first_day.strftime('%Y%m%d')}_{last_day.strftime('%Y%m%d')}.pdf"
     return StreamingResponse(
         buffer,
         media_type='application/pdf',
@@ -3499,16 +3464,9 @@ async def web_admin_generate_user_activity_excel(
     if not target_user or target_user.workspace_id != user.workspace_id:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Parse date range
-    if start_date:
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-    else:
-        start_dt = datetime.now() - timedelta(days=30)
-    
-    if end_date:
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
-    else:
-        end_dt = datetime.now() + timedelta(days=1)
+    # The days picked, in the company's time
+    zone = workspace_zone(await db.get(Workspace, user.workspace_id))
+    first_day, last_day, start_dt, end_dt = _report_days(start_date, end_date, zone)
     
     from sqlalchemy import text
     
@@ -3690,8 +3648,8 @@ async def web_admin_generate_user_activity_excel(
     ws_summary.title = "Summary"
     ws_summary.append(["User Activity Report"])
     ws_summary.append([f"User: {target_user.shown_name or target_user.username}"])
-    ws_summary.append([f"Period: {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}"])
-    ws_summary.append([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"])
+    ws_summary.append([f"Period: {first_day.strftime('%Y-%m-%d')} to {last_day.strftime('%Y-%m-%d')}"])
+    ws_summary.append([f"Generated: {local_now(zone).strftime('%Y-%m-%d %H:%M')}"])
     ws_summary.append([])
     ws_summary.append(["Activity Type", "Count"])
     style_header_row(ws_summary, 6, 2)
@@ -3712,7 +3670,7 @@ async def web_admin_generate_user_activity_excel(
     style_header_row(ws_tasks, 1, 5)
     for task in tasks_created:
         ws_tasks.append([
-            task.created_at.strftime('%Y-%m-%d'),
+            format_local(task.created_at, zone, '%Y-%m-%d'),
             task.title,
             task.due_date.strftime('%Y-%m-%d') if task.due_date else '',
             task.priority.value,
@@ -3726,7 +3684,7 @@ async def web_admin_generate_user_activity_excel(
     style_header_row(ws_assignments, 1, 4)
     for task, assignment in task_assignments:
         ws_assignments.append([
-            task.created_at.strftime('%Y-%m-%d'),
+            format_local(task.created_at, zone, '%Y-%m-%d'),
             task.title,
             task.due_date.strftime('%Y-%m-%d') if task.due_date else '',
             task.status.value,
@@ -3739,10 +3697,7 @@ async def web_admin_generate_user_activity_excel(
     style_header_row(ws_edits, 1, 5)
     for edit in task_edits:
         created_at = edit[6] if len(edit) > 6 else ''
-        if isinstance(created_at, str):
-            date_str = created_at[:19] if created_at else ''
-        else:
-            date_str = created_at.strftime('%Y-%m-%d %H:%M') if created_at else ''
+        date_str = format_local(created_at, zone, '%Y-%m-%d %H:%M')
         ws_edits.append([
             date_str,
             edit[1],  # task_id
@@ -3758,10 +3713,7 @@ async def web_admin_generate_user_activity_excel(
     style_header_row(ws_comments, 1, 3)
     for comment in comments:
         created_at = comment[4] if len(comment) > 4 else ''
-        if isinstance(created_at, str):
-            date_str = created_at[:19] if created_at else ''
-        else:
-            date_str = created_at.strftime('%Y-%m-%d %H:%M') if created_at else ''
+        date_str = format_local(created_at, zone, '%Y-%m-%d %H:%M')
         ws_comments.append([
             date_str,
             comment[1],  # task_id
@@ -3775,9 +3727,9 @@ async def web_admin_generate_user_activity_excel(
     style_header_row(ws_projects, 1, 3)
     for project in projects_created:
         ws_projects.append([
-            project.created_at.strftime('%Y-%m-%d'),
+            format_local(project.created_at, zone, '%Y-%m-%d'),
             project.name,
-            project.status.value,
+            'Archived' if project.is_archived else 'Active',
         ])
     auto_width(ws_projects)
     
@@ -3787,7 +3739,7 @@ async def web_admin_generate_user_activity_excel(
     style_header_row(ws_activities, 1, 3)
     for activity in activities:
         ws_activities.append([
-            activity.created_at.strftime('%Y-%m-%d'),
+            format_local(activity.created_at, zone, '%Y-%m-%d'),
             activity.activity_type,
             activity.subject or '',
         ])
@@ -3799,7 +3751,7 @@ async def web_admin_generate_user_activity_excel(
     style_header_row(ws_tickets_assigned, 1, 5)
     for ticket in tickets_assigned:
         ws_tickets_assigned.append([
-            ticket.created_at.strftime('%Y-%m-%d'),
+            format_local(ticket.created_at, zone, '%Y-%m-%d'),
             ticket.ticket_number,
             ticket.subject,
             ticket.priority,
@@ -3813,10 +3765,7 @@ async def web_admin_generate_user_activity_excel(
     style_header_row(ws_ticket_comments, 1, 4)
     for tc in ticket_comments:
         created_at = tc[5] if len(tc) > 5 else ''
-        if isinstance(created_at, str):
-            date_str = created_at[:10] if created_at else ''
-        else:
-            date_str = created_at.strftime('%Y-%m-%d') if created_at else ''
+        date_str = format_local(created_at, zone, '%Y-%m-%d')
         ws_ticket_comments.append([
             date_str,
             tc[1],  # ticket_id
@@ -3831,7 +3780,7 @@ async def web_admin_generate_user_activity_excel(
     style_header_row(ws_tickets_closed, 1, 4)
     for ticket in tickets_closed:
         ws_tickets_closed.append([
-            ticket.closed_at.strftime('%Y-%m-%d %H:%M') if ticket.closed_at else '',
+            format_local(ticket.closed_at, zone, '%Y-%m-%d %H:%M') if ticket.closed_at else '',
             ticket.ticket_number,
             ticket.subject,
             ticket.priority,
@@ -3845,7 +3794,7 @@ async def web_admin_generate_user_activity_excel(
     
     # Return Excel file
     from fastapi.responses import StreamingResponse
-    filename = f"user_activity_{target_user.username}_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.xlsx"
+    filename = f"user_activity_{target_user.username}_{first_day.strftime('%Y%m%d')}_{last_day.strftime('%Y%m%d')}.xlsx"
     return StreamingResponse(
         buffer,
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -3884,22 +3833,15 @@ async def web_admin_user_activity_view(
         select(Workspace).where(Workspace.id == user.workspace_id)
     )).scalar_one_or_none()
     
-    # Parse date range
-    if start_date:
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-    else:
-        start_dt = datetime.now() - timedelta(days=30)
-    
-    if end_date:
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
-    else:
-        end_dt = datetime.now() + timedelta(days=1)
+    # The days picked, in the company's time
+    zone = workspace_zone(await db.get(Workspace, user.workspace_id))
+    first_day, last_day, start_dt, end_dt = _report_days(start_date, end_date, zone)
     
     from sqlalchemy import text
     from app.models.ticket import Ticket, TicketComment
     from datetime import date as date_type
     
-    now = datetime.now()
+    now = local_now(zone)
     now_date = now.date()
     
     def is_overdue(due_date):
@@ -4275,8 +4217,8 @@ async def web_admin_user_activity_view(
             'user': user,
             'target_user': target_user,
             'workspace': workspace,
-            'start_date': start_dt.strftime('%Y-%m-%d'),
-            'end_date': (end_dt - timedelta(days=1)).strftime('%Y-%m-%d'),
+            'start_date': first_day.strftime('%Y-%m-%d'),
+            'end_date': last_day.strftime('%Y-%m-%d'),
             'now': datetime.utcnow(),
             'summary': summary,
             'metrics': metrics,
@@ -4874,9 +4816,11 @@ async def web_admin_logs_download(
     to_str = request.query_params.get('to', '')
     level_filter = request.query_params.get('level', '')
 
+    # The form's times are the company's local times; the logs are stored in UTC
+    zone = await _company_zone(db, user.workspace_id)
     try:
-        from_dt = datetime.fromisoformat(from_str) if from_str else datetime.utcnow() - timedelta(days=1)
-        to_dt = datetime.fromisoformat(to_str) if to_str else datetime.utcnow()
+        from_dt = to_utc(datetime.fromisoformat(from_str), zone) if from_str else datetime.utcnow() - timedelta(days=1)
+        to_dt = to_utc(datetime.fromisoformat(to_str), zone) if to_str else datetime.utcnow()
     except ValueError:
         from_dt = datetime.utcnow() - timedelta(days=1)
         to_dt = datetime.utcnow()
@@ -4910,8 +4854,8 @@ async def web_admin_logs_download(
     lines = [
         f"=== System Diagnostic Report ===",
         f"Company: {workspace.name if workspace else user.workspace_id}",
-        f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC",
-        f"Range: {from_dt.strftime('%Y-%m-%d %H:%M')} to {to_dt.strftime('%Y-%m-%d %H:%M')}",
+        f"Generated: {local_now(zone):%Y-%m-%d %H:%M:%S} ({zone_label(zone)})",
+        f"Range: {format_local(from_dt, zone)} to {format_local(to_dt, zone)}",
         f"Filter: {level_filter or 'ALL'}",
         f"Entries: {len(logs)}",
         f"{'='*60}",
@@ -4919,14 +4863,14 @@ async def web_admin_logs_download(
     ]
 
     for log in logs:
-        ts = log.timestamp.strftime('%Y-%m-%d %H:%M:%S')
+        ts = format_local(log.timestamp, zone, '%Y-%m-%d %H:%M:%S')
         line = f"[{ts}] [{log.level}] [{log.source}] {log.message}"
         if log.details:
             line += f" | {log.details}"
         lines.append(line)
 
     report_text = "\n".join(lines)
-    filename = f"system_log_{from_dt.strftime('%Y%m%d')}_{to_dt.strftime('%Y%m%d')}.txt"
+    filename = f"system_log_{format_local(from_dt, zone, '%Y%m%d')}_{format_local(to_dt, zone, '%Y%m%d')}.txt"
 
     return Response(
         content=report_text,
@@ -5216,6 +5160,7 @@ Best regards,
 This is an automated notification from your CRM system."""
         
         body_template = settings.completion_email_body or default_body
+        zone = await _company_zone(db, workspace_id)
         body = body_template.format(
             type=type_display,
             type_id=item_id,
@@ -5224,9 +5169,9 @@ This is an automated notification from your CRM system."""
             status=status,
             priority=priority,
             completed_by=completed_by_name,
-            completed_at=completed_at.strftime('%Y-%m-%d %H:%M'),
+            completed_at=format_local(completed_at, zone),
             time_to_complete=time_to_complete,
-            created_at=created_at.strftime('%Y-%m-%d %H:%M'),
+            created_at=format_local(created_at, zone),
             additional_details=additional_details,
             company_name=settings.company_name or "Support Team"
         )
@@ -5809,7 +5754,8 @@ async def web_admin_debug_settings(request: Request, db: AsyncSession = Depends(
         .order_by(ProcessedMail.processed_at.desc())
         .limit(10)
     )).scalars().all()
-    
+    zone = await _company_zone(db, user.workspace_id)
+
     return JSONResponse({
         'success': True,
         'settings': {
@@ -5828,7 +5774,7 @@ async def web_admin_debug_settings(request: Request, db: AsyncSession = Depends(
             'email_from': p.email_from,
             'subject': p.subject,
             'ticket_id': p.ticket_id,
-            'processed_at': p.processed_at.isoformat() if p.processed_at else None
+            'processed_at': format_local(p.processed_at, zone) if p.processed_at else None
         } for p in processed_emails]
     })
 
@@ -6616,6 +6562,8 @@ async def web_admin_site_settings(
         'request': request,
         'user': user,
         'workspace': workspace,
+        'server_zone': server_zone_name(),
+        'server_now': local_now(),
         'success_message': success_message,
         'error_message': error_message
     })
@@ -6626,13 +6574,12 @@ async def web_admin_site_settings_save(
     request: Request,
     site_title: str = Form(None),
     primary_color: str = Form("#2563eb"),
-    timezone: str = Form("UTC"),
+    timezone: str = Form(""),
     business_hours_start: str = Form("07:30"),
     business_hours_end: str = Form("16:00"),
     business_hours_exclude_weekends: str = Form(None),
     gui_theme: str = Form("crimson"),
     comment_time_format: str = Form("12hr"),
-    comment_timezone: str = Form(None),
     db: AsyncSession = Depends(get_session)
 ):
     """Save site branding settings"""
@@ -6653,7 +6600,11 @@ async def web_admin_site_settings_save(
         if workspace:
             workspace.site_title = site_title if site_title else None
             workspace.primary_color = primary_color
-            workspace.timezone = timezone
+            # Empty: the server's own time. A zone this server does not know
+            # would be shown as server time anyway, so say so instead.
+            timezone = (timezone or '').strip()
+            unknown_zone = bool(timezone) and get_zone(timezone) is None
+            workspace.timezone = None if unknown_zone else (timezone or None)
             
             # Business hours settings
             workspace.business_hours_start = business_hours_start or "07:30"
@@ -6661,10 +6612,17 @@ async def web_admin_site_settings_save(
             workspace.business_hours_exclude_weekends = business_hours_exclude_weekends == "1"
             workspace.gui_theme = gui_theme or "crimson"
             workspace.comment_time_format = comment_time_format if comment_time_format in ("12hr", "24hr") else "12hr"
-            workspace.comment_timezone = comment_timezone if comment_timezone else None
+            # Comments are shown in the same time as everything else now
+            workspace.comment_timezone = None
 
             await db.commit()
-            request.session['success_message'] = 'Site settings saved successfully!'
+            if unknown_zone:
+                request.session['error_message'] = (
+                    f'Settings saved, but this server does not know the timezone "{timezone}", '
+                    'so times are shown in server time.'
+                )
+            else:
+                request.session['success_message'] = 'Site settings saved successfully!'
         else:
             request.session['error_message'] = 'Workspace not found'
             
@@ -7077,6 +7035,8 @@ async def web_projects_export(request: Request, fmt: str, db: AsyncSession = Dep
     user = await _export_user(request, db)
     if not user:
         return RedirectResponse('/web/login', status_code=303)
+    zone = await _company_zone(db, user.workspace_id)
+    now = local_now(zone)
 
     projects = await _board_projects(db, user)
     project_ids = [p.id for p in projects]
@@ -7087,7 +7047,7 @@ async def web_projects_export(request: Request, fmt: str, db: AsyncSession = Dep
     tasks = sorted(tasks, key=lambda t: (names.get(t.project_id, '').lower(), *_board_order(t)))
     worked = await _tasks_time_worked(db, [t.id for t in tasks])
     rows = _task_export_rows(tasks, {t.id: names.get(t.project_id, '') for t in tasks},
-                             await _task_assignee_names(db, [t.id for t in tasks]), worked)
+                             await _task_assignee_names(db, [t.id for t in tasks]), worked, now.date())
 
     owner_ids = {p.owner_id for p in projects if p.owner_id}
     owners = {u.id: (u.shown_name or u.username) for u in (await db.execute(
@@ -7095,14 +7055,14 @@ async def web_projects_export(request: Request, fmt: str, db: AsyncSession = Dep
     members = dict((await db.execute(
         select(ProjectMember.project_id, func.count()).where(ProjectMember.project_id.in_(project_ids))
         .group_by(ProjectMember.project_id))).all()) if project_ids else {}
-    today = date.today()
+    today = now.date()
     project_rows = []
     for p in projects:
         own = [t for t in tasks if t.project_id == p.id]
         counts = _status_counts(own)
         total = len(own)
         project_rows.append([
-            p.name, p.description or '', owners.get(p.owner_id, ''), p.created_at.date() if p.created_at else None,
+            p.name, p.description or '', owners.get(p.owner_id, ''), to_local(p.created_at, zone).date() if p.created_at else None,
             members.get(p.id, 0), counts['todo'], counts['in_progress'], counts['blocked'], counts['done'], total,
             f"{round(counts['done'] / total * 100)}%" if total else '',
             sum(1 for t in own if t.due_date and t.due_date < today and _value(t.status) != 'done'),
@@ -7114,7 +7074,8 @@ async def web_projects_export(request: Request, fmt: str, db: AsyncSession = Dep
         title='Board View - Projects',
         filename=f'board_view_{today:%Y-%m-%d}',
         lines=[('All company projects' if user.is_admin else 'Your projects') + ' (archived projects left out)',
-               _exported_by(user)],
+               _exported_by(user, now)],
+        generated_at=now,
         summary=[('Projects', len(projects)), ('Tasks', len(tasks)),
                  *[(TASK_STATUS_LABELS[s], n) for s, n in overall.items()],
                  ('Overdue', sum(1 for r in rows if r[7])), ('Time worked', format_duration(sum(worked.values())))],
@@ -7472,6 +7433,8 @@ async def web_project_export(request: Request, project_id: int, fmt: str, db: As
     user = await _export_user(request, db)
     if not user:
         return RedirectResponse('/web/login', status_code=303)
+    zone = await _company_zone(db, user.workspace_id)
+    now = local_now(zone)
 
     project = (await db.execute(
         select(Project).where(Project.id == project_id, Project.workspace_id == user.workspace_id)
@@ -7485,7 +7448,7 @@ async def web_project_export(request: Request, project_id: int, fmt: str, db: As
     tasks = sorted((await db.execute(select(Task).where(Task.project_id == project_id))).scalars().all(),
                    key=_board_order)
     worked = await _tasks_time_worked(db, [t.id for t in tasks])
-    rows = _task_export_rows(tasks, {}, await _task_assignee_names(db, [t.id for t in tasks]), worked)
+    rows = _task_export_rows(tasks, {}, await _task_assignee_names(db, [t.id for t in tasks]), worked, now.date())
     rows = [row[:1] + row[2:] for row in rows]  # one project: no Project column
 
     owner = (await db.execute(select(User).where(User.id == project.owner_id))).scalar_one_or_none()
@@ -7498,8 +7461,9 @@ async def web_project_export(request: Request, project_id: int, fmt: str, db: As
         lines.append(f"Runs {project.start_date or '?'} to {project.due_date or '?'}")
     export = Export(
         title=f'Project: {project.name}',
-        filename=f'project_{project.name}_{date.today():%Y-%m-%d}',
-        lines=lines + [_exported_by(user)],
+        filename=f'project_{project.name}_{now:%Y-%m-%d}',
+        lines=lines + [_exported_by(user, now)],
+        generated_at=now,
         summary=[('Owner', (owner.shown_name or owner.username) if owner else ''), ('Members', members),
                  ('Tasks', len(tasks)), *[(TASK_STATUS_LABELS[s], n) for s, n in counts.items()],
                  ('Done', f"{round(counts['done'] / len(tasks) * 100)}%" if tasks else ''),
@@ -7513,18 +7477,10 @@ async def web_project_export(request: Request, project_id: int, fmt: str, db: As
 async def _project_report_data(db: AsyncSession, project, start_date: Optional[str], end_date: Optional[str]) -> dict:
     """Who did what on a project, and the time spent: the project report page
     and its Excel export. start_date/end_date are YYYY-MM-DD (last 30 days if not given)."""
-    # Parse date range (default to last 30 days)
-    if start_date:
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-    else:
-        start_dt = datetime.now() - timedelta(days=30)
-        start_date = start_dt.strftime('%Y-%m-%d')
-    
-    if end_date:
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
-    else:
-        end_dt = datetime.now() + timedelta(days=1)
-        end_date = (end_dt - timedelta(days=1)).strftime('%Y-%m-%d')
+    # The days picked, in the company's time
+    zone = workspace_zone(await db.get(Workspace, project.workspace_id))
+    first_day, last_day, start_dt, end_dt = _report_days(start_date, end_date, zone)
+    start_date, end_date = f'{first_day:%Y-%m-%d}', f'{last_day:%Y-%m-%d}'
     
     # Get all tasks for the project
     all_tasks = (await db.execute(
@@ -7772,6 +7728,8 @@ async def web_project_report_excel(
     user = await _export_user(request, db)
     if not user:
         return RedirectResponse('/web/login', status_code=303)
+    zone = await _company_zone(db, user.workspace_id)
+    now = local_now(zone)
     project = (await db.execute(
         select(Project).where(Project.id == project_id, Project.workspace_id == user.workspace_id)
     )).scalar_one_or_none()
@@ -7785,7 +7743,8 @@ async def web_project_report_excel(
     export = Export(
         title=f'Project Report: {project.name}',
         filename=f"project_report_{project.name}_{report['start_date']}_{report['end_date']}",
-        lines=[f"Period: {report['start_date']} to {report['end_date']}", _exported_by(user)],
+        lines=[f"Period: {report['start_date']} to {report['end_date']}", _exported_by(user, now)],
+        generated_at=now,
         summary=[('Total tasks', summary['total_tasks']), ('Completed tasks', summary['completed_tasks']),
                  ('Completion rate', f"{summary['completion_rate']}%"), ('Hours logged', summary['total_hours']),
                  ('Active contributors', summary['active_contributors'])],
@@ -7797,11 +7756,11 @@ async def web_project_report_excel(
             ExportTable('Tasks', ['Task', 'Status', 'Priority', 'Assigned to', 'Created', 'Completed',
                                   'Days to complete', 'Hours'],
                         [[t['title'], TASK_STATUS_LABELS.get(t['status'], t['status']), (t['priority'] or '').title(),
-                          ', '.join(t['assignees']), t['created_at'], t['completed_at'], t['duration_days'],
+                          ', '.join(t['assignees']), to_local(t['created_at'], zone), to_local(t['completed_at'], zone), t['duration_days'],
                           t['time_spent_hours']] for t in report['tasks_detail']],
                         [4, 1.3, 1.1, 2.6, 1.6, 1.6, 1.2, 0.9]),
             ExportTable('Recent activity', ['When', 'Who', 'Task', 'What'],
-                        [[a['created_at'], a['user_name'], a['task_title'], a['description']]
+                        [[to_local(a['created_at'], zone), a['user_name'], a['task_title'], a['description']]
                          for a in report['activities']], [1.5, 1.8, 3, 3.5]),
         ],
     )
@@ -7838,16 +7797,9 @@ async def web_project_report_pdf(
     if not project:
         raise HTTPException(status_code=404, detail='Project not found')
     
-    # Parse date range
-    if start_date:
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-    else:
-        start_dt = datetime.now() - timedelta(days=30)
-    
-    if end_date:
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
-    else:
-        end_dt = datetime.now() + timedelta(days=1)
+    # The days picked, in the company's time
+    zone = workspace_zone(await db.get(Workspace, user.workspace_id))
+    first_day, last_day, start_dt, end_dt = _report_days(start_date, end_date, zone)
     
     # Get all tasks for the project
     all_tasks = (await db.execute(
@@ -7945,11 +7897,11 @@ async def web_project_report_pdf(
     # Title
     elements.append(Paragraph(f"Project Report: {project.name}", title_style))
     elements.append(Paragraph(
-        f"Period: {start_dt.strftime('%B %d, %Y')} - {(end_dt - timedelta(days=1)).strftime('%B %d, %Y')}",
+        f"Period: {first_day.strftime('%B %d, %Y')} - {last_day.strftime('%B %d, %Y')}",
         styles['Normal']
     ))
     elements.append(Paragraph(
-        f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}",
+        f"Generated: {local_now(zone).strftime('%B %d, %Y at %I:%M %p')}",
         styles['Normal']
     ))
     elements.append(Spacer(1, 0.3*inch))
@@ -8065,7 +8017,7 @@ async def web_project_report_pdf(
     
     # Return PDF
     from fastapi.responses import StreamingResponse
-    filename = f"project_report_{project.name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.pdf"
+    filename = f"project_report_{project.name.replace(' ', '_')}_{local_now(zone).strftime('%Y%m%d')}.pdf"
     
     return StreamingResponse(
         buffer,
@@ -8418,11 +8370,10 @@ async def _tasks_time_worked(db: AsyncSession, task_ids) -> dict:
     return {task_id: worked_seconds(task_entries) for task_id, task_entries in entries.items()}
 
 
-def _task_export_rows(tasks, project_names: dict, assignees_map: dict, worked: dict) -> list:
+def _task_export_rows(tasks, project_names: dict, assignees_map: dict, worked: dict, today: date) -> list:
     """One row per task (TASK_EXPORT_COLUMNS), as the task list and boards show them.
     worked: seconds on each task's timer, from _tasks_time_worked."""
     from app.core.work_timer import format_duration
-    today = date.today()
     rows = []
     for t in tasks:
         status = _value(t.status)
@@ -8440,8 +8391,9 @@ def _task_export_rows(tasks, project_names: dict, assignees_map: dict, worked: d
     return rows
 
 
-def _exported_by(user) -> str:
-    return f"Exported by {user.shown_name or user.username} on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+def _exported_by(user, now: datetime) -> str:
+    """now: the company's local time (local_now)."""
+    return f"Exported by {user.shown_name or user.username} on {now:%Y-%m-%d %H:%M}"
 
 
 async def _export_user(request: Request, db: AsyncSession):
@@ -8470,10 +8422,12 @@ async def web_tasks_list_export(
     user = await _export_user(request, db)
     if not user:
         return RedirectResponse('/web/login', status_code=303)
+    zone = await _company_zone(db, user.workspace_id)
+    now = local_now(zone)
 
     tasks, project_names, assignees_map = await _task_list_data(db, user, tab, status, priority, assignee_id, project_id)
     worked = await _tasks_time_worked(db, [t.id for t in tasks])
-    rows = _task_export_rows(tasks, project_names, assignees_map, worked)
+    rows = _task_export_rows(tasks, project_names, assignees_map, worked, now.date())
 
     # Say which filters the file was made with
     shown = [TASK_STATUS_LABELS.get(status, status) + ' tasks' if status and status.strip()
@@ -8493,8 +8447,9 @@ async def web_tasks_list_export(
     total_worked = sum(worked.values())
     export = Export(
         title='All Tasks',
-        filename=f'tasks_{date.today():%Y-%m-%d}',
-        lines=['Showing: ' + ', '.join(shown), _exported_by(user)],
+        filename=f'tasks_{now:%Y-%m-%d}',
+        lines=['Showing: ' + ', '.join(shown), _exported_by(user, now)],
+        generated_at=now,
         summary=[('Tasks', len(rows)), *[(label, n) for label, n in by_status.items() if n],
                  ('Overdue', sum(1 for r in rows if r[7])), ('Time worked', format_duration(total_worked))],
         tables=[ExportTable('Tasks', TASK_EXPORT_COLUMNS, rows, TASK_EXPORT_WIDTHS)],
@@ -8567,7 +8522,7 @@ async def web_tasks_list(
             'assignee_id': assignee_id,
             'project_id': project_id,
         },
-        'today': date.today(),
+        'today': local_today(await _company_zone(db, user.workspace_id)),
     })
 
 
@@ -8690,10 +8645,7 @@ async def web_task_detail(request: Request, task_id: int, db: AsyncSession = Dep
         select(Workspace).where(Workspace.id == user.workspace_id)
     )).scalar_one_or_none()
 
-    comment_time_fmt = '%b %d, %Y %H:%M'
-    if workspace and workspace.comment_time_format != '24hr':
-        comment_time_fmt = '%b %d, %Y %I:%M %p'
-    comment_tz = (workspace.comment_timezone or workspace.timezone or 'UTC') if workspace else 'UTC'
+    comment_time_fmt = _comment_time_format(workspace)
 
     return templates.TemplateResponse('tasks/detail.html', {
         'request': request,
@@ -8720,7 +8672,6 @@ async def web_task_detail(request: Request, task_id: int, db: AsyncSession = Dep
         'TaskPriority': TaskPriority,
         'workspace': workspace,
         'comment_time_fmt': comment_time_fmt,
-        'comment_tz': comment_tz,
         'timer': await _work_timer_context(db, TaskTimeEntry.task_id, task_id),
     })
 
@@ -10392,7 +10343,7 @@ async def web_meeting_details(
             for attendee_obj, user_obj in attendees_data
         ],
         'is_cancelled': meeting.is_cancelled,
-        'cancelled_at': meeting.cancelled_at.strftime('%d/%m/%Y at %I:%M %p') if meeting.cancelled_at else None,
+        'cancelled_at': format_local(meeting.cancelled_at, await _company_zone(db, user.workspace_id), '%d/%m/%Y at %I:%M %p') if meeting.cancelled_at else None,
         'cancelled_by': cancelled_by_user.shown_name if cancelled_by_user else None,
         'is_organizer': is_organizer,
         'is_admin': user.is_admin
@@ -10418,7 +10369,8 @@ async def web_calendar(
         return RedirectResponse('/web/login', status_code=303)
     
     # Default to current date if not specified
-    today = date.today()
+    zone = await _company_zone(db, user.workspace_id)
+    today = local_today(zone)
     year = year or today.year
     month = month or today.month
     day = day or today.day
@@ -10466,8 +10418,11 @@ async def web_calendar(
     
     # Every day the view shows; each item is placed on the days it belongs to
     days = [first_day + timedelta(days=n) for n in range((last_day - first_day).days + 1)]
+    # The view's days as wall-clock times (planned dates are stored as picked)
+    # and as stored UTC times (when something came in)
     period_start = datetime.combine(first_day, time.min)
     period_end = datetime.combine(last_day + timedelta(days=1), time.min)
+    came_in_start, came_in_end = days_utc(first_day, last_day, zone)
 
     def spread(start, end, working_days):
         """The view's days from start to end: the working days, plus the first and
@@ -10488,7 +10443,7 @@ async def web_calendar(
         and_(Task.start_date.isnot(None), Task.due_date.is_(None),
              Task.start_date >= first_day, Task.start_date <= last_day),
         and_(Task.start_date.is_(None), Task.due_date.is_(None),
-             Task.created_at >= period_start, Task.created_at < period_end),
+             Task.created_at >= came_in_start, Task.created_at < came_in_end),
     )
     stmt = (
         select(Task)
@@ -10540,10 +10495,12 @@ async def web_calendar(
     from app.models.ticket import Ticket
     ticket_start = func.coalesce(Ticket.scheduled_date, Ticket.created_at)
     ticket_end = func.coalesce(Ticket.due_date, Ticket.scheduled_date, Ticket.created_at)
+    # (planned and came-in times mix here, so fetch wide and place by local day below)
+    fetch_start, fetch_end = min(period_start, came_in_start), max(period_end, came_in_end)
     tickets_stmt = select(Ticket).where(
         Ticket.workspace_id == user.workspace_id,
-        ticket_start < period_end,
-        or_(ticket_end >= period_start, ticket_start >= period_start),
+        ticket_start < fetch_end,
+        or_(ticket_end >= fetch_start, ticket_start >= fetch_start),
     )
     if not (user.is_admin or user.can_see_all_tickets):
         member_projects = select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)
@@ -10554,7 +10511,7 @@ async def web_calendar(
     ticket_priority = {'urgent': 0, 'high': 1, 'medium': 2, 'low': 3}
     tickets = sorted(
         (await db.execute(tickets_stmt)).scalars().all(),
-        key=lambda tk: (tk.scheduled_date or tk.created_at, ticket_priority.get(tk.priority, 4)),
+        key=lambda tk: (tk.scheduled_date or to_local(tk.created_at, zone), ticket_priority.get(tk.priority, 4)),
     )
 
     # Get meetings for the calendar period
@@ -10579,15 +10536,18 @@ async def web_calendar(
         if t.start_date and t.due_date:
             on = spread(t.start_date, t.due_date, t.working_days)
         else:
-            single = t.due_date or t.start_date or (t.created_at.date() if t.created_at else None)
+            single = t.due_date or t.start_date or (to_local(t.created_at, zone).date() if t.created_at else None)
             on = [single] if single and first_day <= single <= last_day else []
         for d in on:
             tasks_by_day.setdefault(d, []).append(t)
     for tk in tickets:
-        start = (tk.scheduled_date or tk.created_at).date()
-        end = (tk.due_date or tk.scheduled_date or tk.created_at).date()
+        came_in = to_local(tk.created_at, zone)
+        start = (tk.scheduled_date or came_in).date()
+        end = (tk.due_date or tk.scheduled_date or came_in).date()
         for d in spread(start, end, tk.working_days):
             tickets_by_day.setdefault(d, []).append(tk)
+    shown = {tk.id for on_day in tickets_by_day.values() for tk in on_day}
+    tickets = [tk for tk in tickets if tk.id in shown]
     for p in projects:
         for d in days:
             if p.start_date <= d <= p.due_date:
@@ -10727,16 +10687,9 @@ async def web_tickets_report(
         select(Workspace).where(Workspace.id == user.workspace_id)
     )).scalar_one_or_none()
     
-    # Parse date range
-    if start_date:
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-    else:
-        start_dt = datetime.now() - timedelta(days=30)
-    
-    if end_date:
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
-    else:
-        end_dt = datetime.now() + timedelta(days=1)
+    # The days picked, in the company's time
+    zone = workspace_zone(workspace)
+    first_day, last_day, start_dt, end_dt = _report_days(start_date, end_date, zone)
     
     # Get all users for dropdown and lookups
     users_result = (await db.execute(
@@ -10930,7 +10883,7 @@ async def web_tickets_report(
             # Calculate resolution time using business hours
             if ticket.closed_at:
                 resolution_hours = calculate_business_hours(
-                    ticket.created_at, ticket.closed_at,
+                    to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
                     biz_start, biz_end, biz_exclude_weekends
                 )
                 agent_stats[closer_id]['resolution_times'].append(resolution_hours)
@@ -11013,7 +10966,7 @@ async def web_tickets_report(
             closed_by = users_dict.get(ticket.closed_by_id)
             # Use business hours for resolution time
             resolution_hours = calculate_business_hours(
-                ticket.created_at, ticket.closed_at,
+                to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
                 biz_start, biz_end, biz_exclude_weekends
             )
             closed_tickets.append({
@@ -11140,7 +11093,7 @@ async def web_tickets_report(
     for ticket in all_tickets:
         if ticket.status == 'closed' and ticket.closed_at:
             hours = calculate_business_hours(
-                ticket.created_at, ticket.closed_at,
+                to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
                 biz_start, biz_end, biz_exclude_weekends
             )
             resolution_times.append(hours)
@@ -11186,7 +11139,7 @@ async def web_tickets_report(
         project = projects_dict.get(ticket.related_project_id) if ticket.related_project_id else None
         # Calculate time open in hours using business hours
         time_open = calculate_business_hours(
-            ticket.created_at, datetime.now(),
+            to_local(ticket.created_at, zone), local_now(zone),
             biz_start, biz_end, biz_exclude_weekends
         )
         open_tickets_list.append({
@@ -11229,8 +11182,8 @@ async def web_tickets_report(
             'request': request,
             'user': user,
             'workspace': workspace,
-            'start_date': start_dt.strftime('%Y-%m-%d'),
-            'end_date': (end_dt - timedelta(days=1)).strftime('%Y-%m-%d'),
+            'start_date': first_day.strftime('%Y-%m-%d'),
+            'end_date': last_day.strftime('%Y-%m-%d'),
             'now': datetime.utcnow(),
             'summary': summary,
             'agents': agents,
@@ -11298,16 +11251,9 @@ async def web_tickets_report_pdf(
     # Get workspace for business hours settings
     workspace = await get_workspace_for_user(current_user_id, db)
     
-    # Parse date range
-    if start_date:
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-    else:
-        start_dt = datetime.now() - timedelta(days=30)
-    
-    if end_date:
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
-    else:
-        end_dt = datetime.now() + timedelta(days=1)
+    # The days picked, in the company's time
+    zone = workspace_zone(workspace)
+    first_day, last_day, start_dt, end_dt = _report_days(start_date, end_date, zone)
     
     # Build ticket query with filters
     ticket_query = select(Ticket).where(
@@ -11390,7 +11336,7 @@ async def web_tickets_report_pdf(
             if ticket.closed_at:
                 # Use business hours calculation
                 resolution_hours = calculate_business_hours(
-                    ticket.created_at, ticket.closed_at,
+                    to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
                     biz_start, biz_end, biz_exclude_weekends
                 )
                 agent_stats[ticket.closed_by_id]['resolution_times'].append(resolution_hours)
@@ -11420,8 +11366,8 @@ async def web_tickets_report_pdf(
     
     # Title
     elements.append(Paragraph("Ticket Report", title_style))
-    elements.append(Paragraph(f"Period: {start_dt.strftime('%B %d, %Y')} - {(end_dt - timedelta(days=1)).strftime('%B %d, %Y')}", subheading_style))
-    elements.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", subheading_style))
+    elements.append(Paragraph(f"Period: {first_day.strftime('%B %d, %Y')} - {last_day.strftime('%B %d, %Y')}", subheading_style))
+    elements.append(Paragraph(f"Generated: {local_now(zone).strftime('%B %d, %Y at %I:%M %p')}", subheading_style))
     elements.append(Spacer(1, 0.3*inch))
     
     # Summary
@@ -11493,7 +11439,7 @@ async def web_tickets_report_pdf(
             closed_by = users_dict.get(ticket.closed_by_id)
             # Use business hours calculation
             resolution_hours = calculate_business_hours(
-                ticket.created_at, ticket.closed_at,
+                to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
                 biz_start, biz_end, biz_exclude_weekends
             )
             closed_data.append([
@@ -11564,7 +11510,7 @@ async def web_tickets_report_pdf(
     open_data = [['Ticket #', 'Subject', 'Assigned To', 'Priority', 'Status', 'Days Open']]
     for ticket in all_current_open_tickets:
         assigned_to = users_dict.get(ticket.assigned_to_id)
-        days_open = (datetime.now() - ticket.created_at).days
+        days_open = (datetime.utcnow() - ticket.created_at).days
         open_data.append([
             ticket.ticket_number,
             Paragraph(ticket.subject[:50] + ('...' if len(ticket.subject) > 50 else ''), styles['Normal']),
@@ -11600,7 +11546,7 @@ async def web_tickets_report_pdf(
         ticket = tickets_dict.get(comment.ticket_id)
         comment_text = comment.content[:80] + ('...' if len(comment.content) > 80 else '')
         comment_data.append([
-            comment.created_at.strftime('%m/%d %H:%M'),
+            format_local(comment.created_at, zone, '%m/%d %H:%M'),
             ticket.ticket_number if ticket else 'N/A',
             Paragraph((author.shown_name or author.username) if author else 'Guest', styles['Normal']),
             Paragraph(comment_text, styles['Normal']),
@@ -11627,7 +11573,7 @@ async def web_tickets_report_pdf(
     buffer.seek(0)
     
     from fastapi.responses import StreamingResponse
-    filename = f"ticket_report_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.pdf"
+    filename = f"ticket_report_{first_day.strftime('%Y%m%d')}_{last_day.strftime('%Y%m%d')}.pdf"
     return StreamingResponse(
         buffer,
         media_type='application/pdf',
@@ -11677,16 +11623,9 @@ async def web_tickets_report_excel(
     # Get workspace for business hours settings
     workspace = await get_workspace_for_user(current_user_id, db)
     
-    # Parse date range
-    if start_date:
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-    else:
-        start_dt = datetime.now() - timedelta(days=30)
-    
-    if end_date:
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
-    else:
-        end_dt = datetime.now() + timedelta(days=1)
+    # The days picked, in the company's time
+    zone = workspace_zone(workspace)
+    first_day, last_day, start_dt, end_dt = _report_days(start_date, end_date, zone)
     
     # Build ticket query with filters
     ticket_query = select(Ticket).where(
@@ -11793,7 +11732,7 @@ async def web_tickets_report_excel(
             agent_stats[ticket.closed_by_id]['tickets_closed'] += 1
             if ticket.closed_at:
                 resolution_hours = calculate_business_hours(
-                    ticket.created_at, ticket.closed_at,
+                    to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
                     biz_start, biz_end, biz_exclude_weekends
                 )
                 agent_stats[ticket.closed_by_id]['resolution_times'].append(resolution_hours)
@@ -11855,8 +11794,8 @@ async def web_tickets_report_excel(
     ws_summary = wb.active
     ws_summary.title = "Summary"
     ws_summary.append(["Ticket Report"])
-    ws_summary.append([f"Period: {start_dt.strftime('%Y-%m-%d')} to {(end_dt - timedelta(days=1)).strftime('%Y-%m-%d')}"])
-    ws_summary.append([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"])
+    ws_summary.append([f"Period: {first_day.strftime('%Y-%m-%d')} to {last_day.strftime('%Y-%m-%d')}"])
+    ws_summary.append([f"Generated: {local_now(zone).strftime('%Y-%m-%d %H:%M')}"])
     if user_id_int:
         filter_user = users_dict.get(user_id_int)
         append_row(ws_summary, [f"Filtered by User: {filter_user.shown_name or filter_user.username if filter_user else 'Unknown'}"])
@@ -11891,7 +11830,7 @@ async def web_tickets_report_excel(
         resolution_hrs = ''
         if ticket.status == 'closed' and ticket.closed_at:
             resolution_hrs = calculate_business_hours(
-                ticket.created_at, ticket.closed_at,
+                to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
                 biz_start, biz_end, biz_exclude_weekends
             )
         client_name = ' '.join(filter(None, [ticket.guest_name, ticket.guest_surname])) or ticket.guest_company or ''
@@ -11903,8 +11842,8 @@ async def web_tickets_report_excel(
             ticket.priority,
             ticket.category or '',
             (assigned_to.shown_name or assigned_to.username) if assigned_to else '',
-            ticket.created_at.strftime('%Y-%m-%d %H:%M'),
-            ticket.closed_at.strftime('%Y-%m-%d %H:%M') if ticket.closed_at else '',
+            format_local(ticket.created_at, zone, '%Y-%m-%d %H:%M'),
+            format_local(ticket.closed_at, zone, '%Y-%m-%d %H:%M') if ticket.closed_at else '',
             resolution_hrs,
             project.name if project else '',
         ])
@@ -11939,7 +11878,7 @@ async def web_tickets_report_excel(
             closed_by = users_dict.get(ticket.closed_by_id)
             client_name = ' '.join(filter(None, [ticket.guest_name, ticket.guest_surname])) or ticket.guest_company or ''
             resolution_hours = calculate_business_hours(
-                ticket.created_at, ticket.closed_at,
+                to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
                 biz_start, biz_end, biz_exclude_weekends
             )
             append_row(ws_closed, [
@@ -11949,8 +11888,8 @@ async def web_tickets_report_excel(
                 ticket.priority,
                 ticket.category or '',
                 (closed_by.shown_name or closed_by.username) if closed_by else 'Unknown',
-                ticket.created_at.strftime('%Y-%m-%d %H:%M'),
-                ticket.closed_at.strftime('%Y-%m-%d %H:%M'),
+                format_local(ticket.created_at, zone, '%Y-%m-%d %H:%M'),
+                format_local(ticket.closed_at, zone, '%Y-%m-%d %H:%M'),
                 resolution_hours,
                 ticket.billable_traveling or '',
                 ticket.billable_labour_onsite or '',
@@ -11971,7 +11910,7 @@ async def web_tickets_report_excel(
     for ticket in all_current_open_tickets:
         assigned_to = users_dict.get(ticket.assigned_to_id)
         project = projects_dict.get(ticket.related_project_id)
-        days_open = (datetime.now() - ticket.created_at).days
+        days_open = (datetime.utcnow() - ticket.created_at).days
         append_row(ws_open, [
             ticket.ticket_number,
             ticket.subject,
@@ -11979,7 +11918,7 @@ async def web_tickets_report_excel(
             ticket.priority,
             ticket.category or '',
             (assigned_to.shown_name or assigned_to.username) if assigned_to else 'Unassigned',
-            ticket.created_at.strftime('%Y-%m-%d %H:%M'),
+            format_local(ticket.created_at, zone, '%Y-%m-%d %H:%M'),
             days_open,
             project.name if project else '',
         ])
@@ -11994,7 +11933,7 @@ async def web_tickets_report_excel(
         author = users_dict.get(comment.user_id)
         ticket = tickets_dict.get(comment.ticket_id)
         append_row(ws_comments, [
-            comment.created_at.strftime('%Y-%m-%d %H:%M'),
+            format_local(comment.created_at, zone, '%Y-%m-%d %H:%M'),
             ticket.ticket_number if ticket else '',
             (author.shown_name or author.username) if author else 'Guest',
             comment.content,
@@ -12013,7 +11952,7 @@ async def web_tickets_report_excel(
         if history.new_value:
             details = history.new_value
         append_row(ws_history, [
-            history.created_at.strftime('%Y-%m-%d %H:%M'),
+            format_local(history.created_at, zone, '%Y-%m-%d %H:%M'),
             ticket.ticket_number if ticket else '',
             (usr.shown_name or usr.username) if usr else 'System',
             history.action.replace('_', ' ').title(),
@@ -12027,7 +11966,7 @@ async def web_tickets_report_excel(
     buffer.seek(0)
     
     from fastapi.responses import StreamingResponse
-    filename = f"ticket_report_{start_dt.strftime('%Y%m%d')}_{end_dt.strftime('%Y%m%d')}.xlsx"
+    filename = f"ticket_report_{first_day.strftime('%Y%m%d')}_{last_day.strftime('%Y%m%d')}.xlsx"
     return StreamingResponse(
         buffer,
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -15193,10 +15132,7 @@ async def web_tickets_track_detail(
         select(Workspace).where(Workspace.id == ticket.workspace_id)
     )).scalar_one_or_none()
 
-    comment_time_fmt = '%b %d, %Y %H:%M'
-    if workspace and workspace.comment_time_format != '24hr':
-        comment_time_fmt = '%b %d, %Y %I:%M %p'
-    comment_tz = (workspace.comment_timezone or workspace.timezone or 'UTC') if workspace else 'UTC'
+    comment_time_fmt = _comment_time_format(workspace)
 
     return templates.TemplateResponse('tickets/track_detail.html', {
         'request': request,
@@ -15204,7 +15140,6 @@ async def web_tickets_track_detail(
         'comments': comments_with_users,
         'workspace': workspace,
         'comment_time_fmt': comment_time_fmt,
-        'comment_tz': comment_tz,
     })
 
 
@@ -15458,7 +15393,7 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         select(Workspace).where(Workspace.id == user.workspace_id)
     )).scalar_one_or_none()
 
-    comment_time_fmt, comment_tz = _comment_time_settings(workspace)
+    comment_time_fmt = _comment_time_format(workspace)
 
     from app.models.ticket import TicketSignature, TicketTimeEntry
     timer = await _work_timer_context(db, TicketTimeEntry.ticket_id, ticket_id)
@@ -15490,7 +15425,6 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         'closed_by_user': closed_by_user,
         'workspace': workspace,
         'comment_time_fmt': comment_time_fmt,
-        'comment_tz': comment_tz,
         'timer': timer,
         'signatures': signatures,
         'user_names': user_names,
@@ -15530,13 +15464,12 @@ async def _comment_authors(db: AsyncSession, comments) -> dict:
     return authors
 
 
-def _comment_time_settings(workspace) -> tuple:
-    """(strftime format, timezone) for comment times, from the company's settings."""
-    time_fmt = '%b %d, %Y %H:%M'
-    if workspace and workspace.comment_time_format != '24hr':
-        time_fmt = '%b %d, %Y %I:%M %p'
-    tz = (workspace.comment_timezone or workspace.timezone or 'UTC') if workspace else 'UTC'
-    return time_fmt, tz
+def _comment_time_format(workspace) -> str:
+    """strftime format for comment times: the company's 12- or 24-hour clock.
+    (They are shown in the same zone as every other time: see clock.py.)"""
+    if workspace and workspace.comment_time_format == '24hr':
+        return '%b %d, %Y %H:%M'
+    return '%b %d, %Y %I:%M %p'
 
 
 async def _ticket_part_access(request: Request, db: AsyncSession, ticket_id: int):
@@ -15580,15 +15513,15 @@ async def web_ticket_older_comments(
     comments, older_comments = await _ticket_rows_page(
         db, TicketComment, ticket_id, TICKET_COMMENTS_SHOWN, before=anchor
     )
-    comment_time_fmt, comment_tz = _comment_time_settings(workspace)
+    comment_time_fmt = _comment_time_format(workspace)
     return templates.TemplateResponse('tickets/_comments_page.html', {
         'request': request,
+        'workspace': workspace,
         'ticket': ticket,
         'comments': comments,
         'older_comments': older_comments,
         'comment_authors': await _comment_authors(db, comments),
         'comment_time_fmt': comment_time_fmt,
-        'comment_tz': comment_tz,
     })
 
 
@@ -15607,14 +15540,14 @@ async def web_ticket_comment_full(
     if not comment:
         return HTMLResponse('', status_code=404)
 
-    comment_time_fmt, comment_tz = _comment_time_settings(workspace)
+    comment_time_fmt = _comment_time_format(workspace)
     return templates.TemplateResponse('tickets/_comment.html', {
         'request': request,
+        'workspace': workspace,
         'comment': comment,
         'show_full': True,
         'comment_authors': await _comment_authors(db, [comment]),
         'comment_time_fmt': comment_time_fmt,
-        'comment_tz': comment_tz,
     })
 
 
@@ -16983,13 +16916,14 @@ async def web_tickets_forward(
             <p style="margin:0;color:#1e3a5f;font-size:14px;white-space:pre-wrap;">{note.strip()}</p>
         </div>'''
 
+    zone = await _company_zone(db, ticket.workspace_id)
     comments_html = ''
     if comments:
         comment_items = ''
         for c in comments:
             author = authors.get(c.user_id)
             author_name = author.shown_name or author.username if author else 'Guest'
-            ts = c.created_at.strftime('%b %d, %Y %H:%M')
+            ts = format_local(c.created_at, zone, '%b %d, %Y %H:%M')
             comment_items += f'''
             <div style="border-left:3px solid #e2e8f0;padding:12px 16px;margin-bottom:12px;background:#f9fafb;border-radius:0 6px 6px 0;">
                 <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
@@ -17015,7 +16949,7 @@ async def web_tickets_forward(
         submitter_name = (creator.shown_name or creator.username) if creator else 'Unknown'
 
     company_name = email_settings.company_name or email_settings.smtp_from_name or 'Support Team'
-    created_fmt = ticket.created_at.strftime('%B %d, %Y at %H:%M')
+    created_fmt = format_local(ticket.created_at, zone, '%B %d, %Y at %H:%M')
     forwarded_by = user.shown_name or user.username
 
     html_body = f'''<!DOCTYPE html>
@@ -18398,7 +18332,8 @@ async def web_activity_feed(
         })
     
     # Get workspace stats
-    today = datetime.utcnow().date()
+    zone = await _company_zone(db, user.workspace_id)
+    today = local_today(zone)
     week_ago = today - timedelta(days=7)
     month_ago = today - timedelta(days=30)
     
@@ -18414,7 +18349,7 @@ async def web_activity_feed(
         .join(Project, Task.project_id == Project.id)
         .where(Project.workspace_id == user.workspace_id)
         .where(Task.status == TaskStatus.done)
-        .where(Task.updated_at >= datetime.combine(week_ago, datetime.min.time()))
+        .where(Task.updated_at >= day_start_utc(week_ago, zone))
     )).scalars().all()
     
     overdue = (await db.execute(
@@ -18456,12 +18391,12 @@ async def web_activity_feed(
                 completed_month = [t for t in member_tasks 
                                   if t.status == TaskStatus.done 
                                   and t.updated_at 
-                                  and t.updated_at.date() >= month_ago]
+                                  and to_local(t.updated_at, zone).date() >= month_ago]
                 
                 # Tasks completed late (had due date, completed after due date)
                 completed_late = [t for t in completed_month
                                  if t.due_date and t.updated_at 
-                                 and t.updated_at.date() > t.due_date]
+                                 and to_local(t.updated_at, zone).date() > t.due_date]
                 
                 # Currently overdue tasks
                 overdue_tasks = [t for t in member_tasks
@@ -18510,7 +18445,7 @@ async def web_activity_feed(
             completed_month = [t for t in member_tasks 
                               if t.status == TaskStatus.done 
                               and t.updated_at 
-                              and t.updated_at.date() >= month_ago]
+                              and to_local(t.updated_at, zone).date() >= month_ago]
             
             # Separate completed on time vs late
             completed_on_time = []
@@ -18518,7 +18453,7 @@ async def web_activity_feed(
             
             for t in completed_month:
                 if t.due_date and t.updated_at:
-                    if t.updated_at.date() > t.due_date:
+                    if to_local(t.updated_at, zone).date() > t.due_date:
                         completed_late.append(t)
                     else:
                         completed_on_time.append(t)
@@ -18590,7 +18525,7 @@ async def web_workload(
     from app.models.project_member import ProjectMember
     from datetime import timedelta
     
-    today = date.today()
+    today = local_today(await _company_zone(db, user.workspace_id))
     
     # Determine date range
     if time_range == 'week':

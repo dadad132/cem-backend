@@ -230,7 +230,7 @@
                                    title="{{ attachment.filename }}">{{ attachment.filename }}</a>
                                 <p class="text-xs text-gray-500">
                                     {{ (attachment.file_size / 1024)|round(1) }} KB &middot;
-                                    {{ attachment.uploaded_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y') }}
+                                    {{ attachment.uploaded_at | localtime('%b %d, %Y') }}
                                 </p>
                             </div>
                             {% if can_delete %}
@@ -278,7 +278,7 @@
                                     {{ (attachment.file_size / 1024)|round(1) }} KB
                                 </p>
                                 <p class="text-xs text-gray-400">
-                                    {{ attachment.uploaded_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y') }}
+                                    {{ attachment.uploaded_at | localtime('%b %d, %Y') }}
                                 </p>
                             </div>
                             
@@ -417,7 +417,7 @@
                                 {{ sig.signer_name }}
                             </p>
                             <p class="text-gray-500">
-                                Signed {{ sig.signed_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y %I:%M %p') }}
+                                Signed {{ sig.signed_at | localtime('%b %d, %Y %I:%M %p') }}
                                 {% if sig.captured_by_id and user_names.get(sig.captured_by_id) %}
                                 &middot; with {{ user_names[sig.captured_by_id] }}
                                 {% endif %}
@@ -514,7 +514,7 @@
                     <div>
                         <dt class="text-gray-500">Created</dt>
                         <dd class="text-gray-900 font-medium">
-                            {{ ticket.created_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y %I:%M %p') }}
+                            {{ ticket.created_at | localtime('%b %d, %Y %I:%M %p') }}
                         </dd>
                     </div>
                     <div>
@@ -526,7 +526,7 @@
                     <div>
                         <dt class="text-gray-500">Last Updated</dt>
                         <dd class="text-gray-900 font-medium">
-                            {{ ticket.updated_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y %I:%M %p') }}
+                            {{ ticket.updated_at | localtime('%b %d, %Y %I:%M %p') }}
                         </dd>
                     </div>
                     {% if ticket.scheduled_date or ticket.due_date %}
@@ -543,7 +543,7 @@
                     <div>
                         <dt class="text-gray-500">Resolved</dt>
                         <dd class="text-gray-900 font-medium">
-                            {{ ticket.resolved_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y %I:%M %p') }}
+                            {{ ticket.resolved_at | localtime('%b %d, %Y %I:%M %p') }}
                         </dd>
                     </div>
                     {% endif %}
@@ -551,7 +551,7 @@
                     <div>
                         <dt class="text-gray-500">Closed</dt>
                         <dd class="text-gray-900 font-medium">
-                            {{ ticket.closed_at | format_datetime_tz(workspace.timezone if workspace and workspace.timezone else 'UTC', '%b %d, %Y %I:%M %p') }}
+                            {{ ticket.closed_at | localtime('%b %d, %Y %I:%M %p') }}
                             {% if closed_by_user %}
                             <div class="text-sm text-gray-600 mt-1">
                                 by {{ closed_by_user.shown_name or closed_by_user.username }}

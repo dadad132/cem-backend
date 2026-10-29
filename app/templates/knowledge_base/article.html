@@ -108,7 +108,7 @@
                     {% endif %}
                     <div class="flex justify-between">
                         <dt class="text-gray-500">Added</dt>
-                        <dd class="text-gray-700">{{ article.created_at.strftime('%d %b %Y') }}</dd>
+                        <dd class="text-gray-700">{{ article.created_at | localtime('%d %b %Y') }}</dd>
                     </div>
                 </dl>
             </div>

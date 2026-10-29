@@ -71,8 +71,8 @@
               <p class="font-semibold text-slate-900">{{ key.name }}</p>
               <p class="text-xs text-slate-500 font-mono mt-0.5">{{ key.key_prefix }}••••••••••••••••••••••••••••••••••••••••••••••••••••••••</p>
               <p class="text-xs text-slate-400 mt-0.5">
-                Created {{ key.created_at.strftime('%Y-%m-%d') if key.created_at else 'unknown' }}
-                {% if key.last_used_at %} · Last used {{ key.last_used_at.strftime('%Y-%m-%d %H:%M') }}{% endif %}
+                Created {{ key.created_at | localtime('%Y-%m-%d') if key.created_at else 'unknown' }}
+                {% if key.last_used_at %} · Last used {{ key.last_used_at | localtime('%Y-%m-%d %H:%M') }}{% endif %}
               </p>
             </div>
             <div class="flex items-center gap-2 flex-shrink-0">

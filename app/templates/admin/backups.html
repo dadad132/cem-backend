@@ -166,7 +166,7 @@
           <tbody class="divide-y divide-slate-100">
             {% for log in recent_logs %}
             <tr class="{% if log.level == 'ERROR' %}bg-red-50{% elif log.level in ['WARN', 'WARNING'] %}bg-yellow-50{% endif %}">
-              <td class="px-2 py-1 whitespace-nowrap text-slate-500">{{ log.timestamp.strftime('%d/%m %H:%M:%S') }}</td>
+              <td class="px-2 py-1 whitespace-nowrap text-slate-500">{{ log.timestamp | localtime('%d/%m %H:%M:%S') }}</td>
               <td class="px-2 py-1">
                 {% if log.level == 'ERROR' %}
                 <span class="text-red-600 font-medium">ERROR</span>

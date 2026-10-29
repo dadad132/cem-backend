@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import io
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 from xml.sax.saxutils import escape
 
@@ -25,6 +25,8 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+
+from app.core.clock import get_zone, local_now, to_local, zone_label as clock_zone_label
 
 # Brand colours – subtle blue/slate palette
 BRAND_DARK = colors.HexColor("#1e293b")   # slate-800
@@ -45,25 +47,6 @@ def _text(value) -> str:
     """Plain text for a Paragraph, which otherwise reads <, > and & as markup
     (a subject like "Tom & Jerry <b>" made the whole job card fail)."""
     return escape(str(value)).replace("\n", "<br/>")
-
-
-def _zone(tz_name: Optional[str]):
-    """The company's timezone, or None for UTC (or when it is not known here)."""
-    if not tz_name or tz_name == "UTC":
-        return None
-    try:
-        from zoneinfo import ZoneInfo
-        return ZoneInfo(tz_name)
-    except Exception:
-        return None
-
-
-def _local(dt: Optional[datetime], zone) -> Optional[datetime]:
-    """A stored (UTC) time as the company's local time."""
-    if dt is None or zone is None:
-        return dt
-    aware = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    return aware.astimezone(zone).replace(tzinfo=None)
 
 
 def generate_job_card_pdf(
@@ -106,11 +89,11 @@ def generate_job_card_pdf(
 ) -> bytes:
     """Return a PDF job card as bytes."""
 
-    zone = _zone(tz_name)
+    zone = get_zone(tz_name)  # None: the server's own time
     created_at, closed_at, signed_at, technician_signed_at = (
-        _local(t, zone) for t in (created_at, closed_at, signed_at, technician_signed_at))
-    printed_at = _local(datetime.now(timezone.utc), zone).replace(tzinfo=None)
-    zone_label = tz_name if zone else "UTC"
+        to_local(t, zone) for t in (created_at, closed_at, signed_at, technician_signed_at))
+    printed_at = local_now(zone)
+    zone_label = tz_name if zone else clock_zone_label(None)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(

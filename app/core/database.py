@@ -99,6 +99,8 @@ async def init_models() -> None:
                 ("task", "customer_branch", "VARCHAR"),
                 ("ticket", "due_date", "TIMESTAMP"),
                 ("task", "close_type", "VARCHAR"),
+                ("workspace", "timezone", "VARCHAR"),
+                ("workspace", "comment_timezone", "VARCHAR"),
             ):
                 try:
                     res = await conn.exec_driver_sql(f'PRAGMA table_info("{table}")')
@@ -130,6 +132,16 @@ async def apply_data_changes(conn) -> None:
             'WHERE is_admin = 0 AND can_see_all_tickets = 0'
         )
         await conn.exec_driver_sql("PRAGMA user_version = 1")
+    if version < 2:
+        # Times follow the server's own clock unless a company picked another
+        # zone. UTC was only ever the default, and comments no longer have a
+        # zone of their own (see app/core/clock.py).
+        await conn.exec_driver_sql(
+            "UPDATE workspace SET timezone = NULL "
+            "WHERE timezone IS NULL OR TRIM(timezone) = '' OR UPPER(TRIM(timezone)) = 'UTC'"
+        )
+        await conn.exec_driver_sql("UPDATE workspace SET comment_timezone = NULL")
+        await conn.exec_driver_sql("PRAGMA user_version = 2")
 
 
 async def ensure_initialized() -> None:

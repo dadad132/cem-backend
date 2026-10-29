@@ -316,7 +316,7 @@
                             </a>
                         </td>
                         <td class="px-6 py-4 text-sm text-gray-600">{{ task.project_name or 'N/A' }}</td>
-                        <td class="px-6 py-4 text-sm text-gray-600">{{ task.created_at | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%b %d, %Y') }}</td>
+                        <td class="px-6 py-4 text-sm text-gray-600">{{ task.created_at | localtime('%b %d, %Y') }}</td>
                         <td class="px-6 py-4 text-sm text-gray-600">{{ task.due_date or '-' }}</td>
                         <td class="px-6 py-4">
                             <span class="px-2 py-1 text-xs font-medium rounded 
@@ -450,7 +450,7 @@
                                         {% endif %}
                                     </div>
                                     <div class="whitespace-nowrap text-right text-xs text-gray-500">
-                                        {{ activity.created_at | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%b %d, %H:%M') }}
+                                        {{ activity.created_at | localtime('%b %d, %H:%M') }}
                                     </div>
                                 </div>
                             </div>
@@ -529,7 +529,7 @@
                                 <p class="text-xs text-gray-500 truncate max-w-xs">{{ ticket.subject }}</p>
                             </td>
                             <td class="px-4 py-3 text-sm text-gray-600">
-                                {{ ticket.closed_at | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%b %d, %H:%M') }}
+                                {{ ticket.closed_at | localtime('%b %d, %H:%M') }}
                             </td>
                         </tr>
                         {% else %}
@@ -545,7 +545,7 @@
 
     <!-- Report Footer -->
     <div class="bg-gray-50 rounded-lg p-4 text-center text-sm text-gray-500">
-        Report generated on {{ now | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%B %d, %Y at %I:%M %p') }}
+        Report generated on {{ now | localtime('%B %d, %Y at %I:%M %p') }}
     </div>
 </div>
 {% endblock %}

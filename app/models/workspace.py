@@ -16,7 +16,8 @@ class Workspace(SQLModel, table=True):
     logo_url: Optional[str] = Field(default=None)
     favicon_url: Optional[str] = Field(default=None)
     primary_color: Optional[str] = Field(default="#2563eb")  # Default blue
-    timezone: Optional[str] = Field(default="UTC")  # Default timezone
+    # Zone every time is shown in; None: the server's own time (app/core/clock.py)
+    timezone: Optional[str] = Field(default=None)
     
     # Business hours settings for ticket resolution calculation
     business_hours_start: Optional[str] = Field(default="07:30")  # HH:MM format
@@ -29,7 +30,7 @@ class Workspace(SQLModel, table=True):
     # Comment timestamp display format: "12hr" | "24hr"
     comment_time_format: Optional[str] = Field(default="12hr")
 
-    # Timezone used for comment timestamps; falls back to global `timezone` if None
+    # No longer used: comments are shown in the same zone as everything else
     comment_timezone: Optional[str] = Field(default=None)
 
     # Guest portal branding

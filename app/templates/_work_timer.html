@@ -6,7 +6,6 @@
      timer_noun    "ticket" or "task"
      timer_done_word  optional, e.g. "resolved" for "Stopped - ticket resolved"
    Styles and script: _work_timer_assets.html #}
-{% set tz = workspace.timezone if workspace and workspace.timezone else 'UTC' %}
 {% if not timer_locked or timer.entries %}
 <div id="workTimer" class="mb-6 bg-white rounded-xl shadow-sm border border-gray-200 px-4 sm:px-6 py-4"
      data-seconds="{{ timer.total_seconds }}" data-running="{{ 1 if timer.running else 0 }}">
@@ -19,7 +18,7 @@
             <div class="tt-readout">
                 <span class="tt-clock js-work-timer">{{ timer.total_seconds|format_clock }}</span>
                 {% if timer.running %}
-                <span class="tt-badge tt-badge-running"><span class="tt-dot"></span>Running since {{ timer.running_since | format_datetime_tz(tz, '%b %d, %I:%M %p') }}</span>
+                <span class="tt-badge tt-badge-running"><span class="tt-dot"></span>Running since {{ timer.running_since | localtime('%b %d, %I:%M %p') }}</span>
                 {% elif timer_locked %}
                 <span class="tt-badge">Stopped &mdash; {{ timer_noun }} {{ timer_done_word or ('closed' if timer_noun == 'ticket' else 'completed') }}</span>
                 {% elif timer.entries %}
@@ -63,10 +62,10 @@
                 <div class="min-w-0">
                     <span class="text-gray-900 font-medium">{{ timer.user_names.get(e.user_id, 'Unknown') }}</span>
                     <span class="text-xs text-gray-500 ml-2 whitespace-nowrap">
-                        {{ e.started_at | format_datetime_tz(tz, '%b %d, %I:%M %p') }} &ndash;
+                        {{ e.started_at | localtime('%b %d, %I:%M %p') }} &ndash;
                         {% if not e.ended_at %}now
-                        {% elif (e.ended_at | format_datetime_tz(tz, '%Y%m%d')) == (e.started_at | format_datetime_tz(tz, '%Y%m%d')) %}{{ e.ended_at | format_datetime_tz(tz, '%I:%M %p') }}
-                        {% else %}{{ e.ended_at | format_datetime_tz(tz, '%b %d, %I:%M %p') }}{% endif %}
+                        {% elif (e.ended_at | localtime('%Y%m%d')) == (e.started_at | localtime('%Y%m%d')) %}{{ e.ended_at | localtime('%I:%M %p') }}
+                        {% else %}{{ e.ended_at | localtime('%b %d, %I:%M %p') }}{% endif %}
                     </span>
                 </div>
                 <span class="text-gray-700 font-medium whitespace-nowrap">{{ row.seconds|format_duration }}</span>

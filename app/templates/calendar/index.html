@@ -276,7 +276,7 @@
                   {% if item.scheduled_date %}
                     {{ item.scheduled_date.strftime('%d/%m %H:%M') }}{% if item.due_date %} – {{ item.due_date.strftime('%d/%m %H:%M') }}{% endif %}
                   {% else %}
-                    Came in {{ item.created_at.strftime('%d/%m') }}
+                    Came in {{ item.created_at | localtime('%d/%m') }}
                   {% endif %}
                   - {{ item.status.replace('_', ' ').title() }}
                 </div>

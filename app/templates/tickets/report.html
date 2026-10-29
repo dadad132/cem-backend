@@ -440,8 +440,8 @@
                             </span>
                         </td>
                         <td class="px-6 py-4 text-sm text-gray-600 capitalize">{{ ticket.category }}</td>
-                        <td class="px-6 py-4 text-sm text-gray-600">{{ ticket.created_at | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%b %d, %H:%M') }}</td>
-                        <td class="px-6 py-4 text-sm text-gray-600">{{ ticket.closed_at | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%b %d, %H:%M') if ticket.closed_at else '-' }}</td>
+                        <td class="px-6 py-4 text-sm text-gray-600">{{ ticket.created_at | localtime('%b %d, %H:%M') }}</td>
+                        <td class="px-6 py-4 text-sm text-gray-600">{{ ticket.closed_at | localtime('%b %d, %H:%M') if ticket.closed_at else '-' }}</td>
                         <td class="px-6 py-4">
                             <span class="font-medium {% if ticket.resolution_hours <= 4 %}text-green-600{% elif ticket.resolution_hours <= 24 %}text-yellow-600{% else %}text-red-600{% endif %}">
                                 {{ ticket.resolution_hours }}h
@@ -569,7 +569,7 @@
                             </span>
                         </td>
                         <td class="px-6 py-4 text-sm text-gray-600">{{ ticket.project_name or '-' }}</td>
-                        <td class="px-6 py-4 text-sm text-gray-600">{{ ticket.created_at | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%b %d, %H:%M') }}</td>
+                        <td class="px-6 py-4 text-sm text-gray-600">{{ ticket.created_at | localtime('%b %d, %H:%M') }}</td>
                     </tr>
                     {% else %}
                     <tr>
@@ -635,7 +635,7 @@
                             </span>
                         </td>
                         <td class="px-6 py-4 text-sm text-gray-600">{{ ticket.project_name or '-' }}</td>
-                        <td class="px-6 py-4 text-sm text-gray-600">{{ ticket.created_at | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%b %d, %H:%M') }}</td>
+                        <td class="px-6 py-4 text-sm text-gray-600">{{ ticket.created_at | localtime('%b %d, %H:%M') }}</td>
                         <td class="px-6 py-4">
                             <span class="font-medium {% if ticket.time_open_hours <= 4 %}text-green-600{% elif ticket.time_open_hours <= 24 %}text-yellow-600{% else %}text-red-600{% endif %}">
                                 {{ ticket.time_open_hours }}h
@@ -709,7 +709,7 @@
                             </span>
                         </td>
                         <td class="px-6 py-4 text-sm text-gray-600">{{ ticket.project_name or '-' }}</td>
-                        <td class="px-6 py-4 text-sm text-gray-600">{{ ticket.created_at | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%b %d, %H:%M') }}</td>
+                        <td class="px-6 py-4 text-sm text-gray-600">{{ ticket.created_at | localtime('%b %d, %H:%M') }}</td>
                     </tr>
                     {% else %}
                     <tr>
@@ -792,7 +792,7 @@
                             {% endif %}
                         </div>
                         <p class="text-gray-600 text-sm line-clamp-2">{{ comment.content[:150] }}{% if comment.content|length > 150 %}...{% endif %}</p>
-                        <p class="text-xs text-gray-400 mt-1">{{ comment.created_at | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%b %d, %Y at %H:%M') }}</p>
+                        <p class="text-xs text-gray-400 mt-1">{{ comment.created_at | localtime('%b %d, %Y at %H:%M') }}</p>
                     </div>
                 </div>
             </div>
@@ -868,7 +868,7 @@
                                         </p>
                                     </div>
                                     <div class="whitespace-nowrap text-right text-xs text-gray-500">
-                                        {{ activity.created_at | format_datetime_tz(workspace.timezone if workspace else 'UTC', '%b %d, %H:%M') }}
+                                        {{ activity.created_at | localtime('%b %d, %H:%M') }}
                                     </div>
                                 </div>
                             </div>
@@ -884,7 +884,7 @@
 
     <!-- Report Footer -->
     <div class="bg-gray-50 rounded-lg p-4 text-center text-sm text-gray-500">
-        Report generated on {{ now.strftime('%B %d, %Y at %I:%M %p') }}
+        Report generated on {{ now | localtime('%B %d, %Y at %I:%M %p') }}
     </div>
 </div>
 

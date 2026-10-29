@@ -12,10 +12,10 @@ from __future__ import annotations
 import hmac
 import secrets
 import time
-from datetime import datetime
 from pathlib import Path
 
 from app.core import server_settings
+from app.core.clock import local_now, zone_label
 from app.core.security import get_password_hash, verify_password
 
 # The Android app. Outside app/static, so it is only sent once the code is right.
@@ -61,7 +61,7 @@ def set_code(code: str, changed_by: str) -> None:
     server_settings.update('app_download_code', {
         'hash': get_password_hash(code),
         'version': secrets.token_hex(8),
-        'changed_at': datetime.utcnow().strftime('%d/%m/%Y %H:%M UTC'),
+        'changed_at': f'{local_now():%d/%m/%Y %H:%M} {zone_label()}',  # server time
         'changed_by': changed_by,
     })
 

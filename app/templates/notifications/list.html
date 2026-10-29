@@ -81,7 +81,7 @@
                         {% elif delta < 604800 %}
                           {{ (delta // 86400)|int }}d ago
                         {% else %}
-                          {{ notification.created_at.strftime('%d/%m/%Y') }}
+                          {{ notification.created_at | localtime('%d/%m/%Y') }}
                         {% endif %}
                       </span>
                       {% if not notification.read_at %}

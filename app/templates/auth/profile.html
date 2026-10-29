@@ -204,7 +204,7 @@
           <div class="flex justify-between">
             <span class="text-slate-500">Member Since:</span>
                       <div class="text-sm text-slate-600">
-            <span class="font-medium">{{ user.created_at.strftime('%d/%m/%Y') if user.created_at else 'N/A' }}</span>
+            <span class="font-medium">{{ user.created_at | localtime('%d/%m/%Y') if user.created_at else 'N/A' }}</span>
           </div>
         </div>
           </div>

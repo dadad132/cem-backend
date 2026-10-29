@@ -52,7 +52,7 @@ def test_job_card_contents():
         **{**BASE, 'subject': 'Tom & Jerry <b>'}, closed_at=datetime(2026, 10, 14, 13, 40),
         billable_labour_onsite='2h 30m', billable_sundries='Toner x1', time_worked='3h 05m',
         signature_png=_signature_png(), signer_name='Thandi Mokoena', signed_at=datetime(2026, 10, 14, 13, 35),
-        company_name='Kyotech Connect',
+        company_name='Kyotech Connect', tz_name='UTC',
     )
     text = _pdf_text(pdf)
     assert 'Tom & Jerry <b>' in text, 'shown as typed, not read as markup'
@@ -81,9 +81,11 @@ def test_job_card_times_are_in_the_company_timezone():
     assert '14 Oct 2026 15:35' in text and 'Africa/Johannesburg' in text
 
 
-def test_unknown_timezone_prints_utc_and_says_so():
+def test_unknown_timezone_prints_server_time_and_says_so():
+    from app.core.clock import to_local, zone_label
     text = _pdf_text(generate_job_card_pdf(**BASE, closed_at=datetime(2026, 10, 14, 13, 40), tz_name='Nowhere/Atlantis'))
-    assert 'Opened 14 Oct 2026 07:05' in text and ' UTC' in text
+    opened = to_local(BASE['created_at'], None)
+    assert f"Opened {opened:%d %b %Y %H:%M}" in text and zone_label(None) in text
 
 
 def test_open_and_sla_job_cards_say_so():

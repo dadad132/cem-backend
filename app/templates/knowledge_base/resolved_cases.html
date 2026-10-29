@@ -119,7 +119,7 @@
                         
                         <div class="flex items-center gap-4 text-xs text-gray-400 mt-3">
                             <span><i class="fas fa-user mr-1"></i>{{ case.resolved_by_name or 'Unknown' }}</span>
-                            <span><i class="fas fa-calendar mr-1"></i>{{ case.created_at.strftime('%d %b %Y') }}</span>
+                            <span><i class="fas fa-calendar mr-1"></i>{{ case.created_at | localtime('%d %b %Y') }}</span>
                             {% if case.time_to_resolve %}
                             <span><i class="fas fa-clock mr-1"></i>{{ case.time_to_resolve }} min</span>
                             {% endif %}

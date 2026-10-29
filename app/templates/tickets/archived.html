@@ -80,7 +80,7 @@
                         </span>
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {{ ticket.archived_at.strftime('%Y-%m-%d %H:%M') if ticket.archived_at else 'N/A' }}
+                        {{ ticket.archived_at | localtime('%Y-%m-%d %H:%M') if ticket.archived_at else 'N/A' }}
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
                         <a href="/web/tickets/{{ ticket.id }}" class="text-blue-600 hover:text-blue-900 mr-3">

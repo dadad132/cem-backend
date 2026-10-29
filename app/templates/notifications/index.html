@@ -64,7 +64,7 @@
                   <div>
                     <p class="text-sm font-medium text-gray-900">{{ n.message }}</p>
                     <p class="text-xs text-gray-500 mt-1">
-                      {{ n.created_at.strftime('%d/%m/%Y %H:%M') if n.created_at else '' }}
+                      {{ n.created_at | localtime('%d/%m/%Y %H:%M') if n.created_at else '' }}
                       {% if not n.read_at %}
                         <span class="ml-2 inline-block text-[10px] px-2 py-0.5 rounded-full bg-red-100 text-red-800 font-medium">Unread</span>
                       {% endif %}

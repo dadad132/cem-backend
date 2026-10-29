@@ -70,7 +70,7 @@
                             <span class="text-gray-500 dark:text-gray-400">{{ activity.action_type }} {{ activity.entity_type }}</span>
                             {% endif %}
                         </div>
-                        <span class="text-xs text-gray-400">{{ activity.created_at.strftime('%b %d, %H:%M') }}</span>
+                        <span class="text-xs text-gray-400">{{ activity.created_at | localtime('%b %d, %H:%M') }}</span>
                     </div>
                     
                     {% if activity.details %}

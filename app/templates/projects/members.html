@@ -61,7 +61,7 @@
                     {{ member.shown_name or member.email }}
                   </div>
                   <div class="text-xs text-slate-500">
-                    Assigned {{ assigned_at.strftime('%d/%m/%Y') }}
+                    Assigned {{ assigned_at | localtime('%d/%m/%Y') }}
                   </div>
                 </div>
               </div>

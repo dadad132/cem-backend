@@ -24,6 +24,8 @@ from app.models.task_extensions import TaskTimeEntry  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.models.workspace import Workspace  # noqa: E402
 from app.web.routes import (  # noqa: E402
+    web_admin_generate_user_activity_excel,
+    web_admin_generate_user_activity_pdf,
     web_project_export,
     web_project_report,
     web_project_report_excel,
@@ -213,6 +215,29 @@ async def test_project_report_excel(tmp_path):
         with pytest.raises(HTTPException) as not_admin:
             await web_project_report_excel(_request(u['bob']), p['move'].id, db=db, **dates)
         assert not_admin.value.status_code == 403
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+async def _streamed(response) -> bytes:
+    return b''.join([chunk async for chunk in response.body_iterator])
+
+
+@pytest.mark.asyncio
+async def test_user_activity_report_with_projects(tmp_path):
+    """Ada created projects in the period: both report files still build
+    (they used to fail on a project status that projects do not have)."""
+    engine, db, u, p, t = await _seed(tmp_path / 'e.db')
+    try:
+        dates = dict(start_date=(TODAY - timedelta(days=30)).isoformat(), end_date=TODAY.isoformat())
+        wb = _workbook(await _streamed(await web_admin_generate_user_activity_excel(
+            _request(u['ada']), u['ada'].id, db=db, **dates)))
+        projects = _rows(wb, 'Projects Created')
+        assert sorted(r[1:] for r in projects[1:]) == [['New site', 'Active'], ['Office move', 'Active'],
+                                                      ['Old stuff', 'Archived']]
+        pdf = await web_admin_generate_user_activity_pdf(_request(u['ada']), u['ada'].id, db=db, **dates)
+        assert (await _streamed(pdf)).startswith(b'%PDF')
     finally:
         await db.close()
         await engine.dispose()
