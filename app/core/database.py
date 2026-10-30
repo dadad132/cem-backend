@@ -152,6 +152,13 @@ async def apply_data_changes(conn) -> None:
             '(SELECT id FROM "user" WHERE is_superadmin = 1 AND workspace_id IS NOT NULL)'
         )
         await conn.exec_driver_sql("PRAGMA user_version = 3")
+    if version < 4:
+        # Finished work is now dated by archived_at. Tasks finished before that
+        # column existed have none, so give them the date the old counts used.
+        await conn.exec_driver_sql(
+            "UPDATE task SET archived_at = updated_at WHERE status = 'done' AND archived_at IS NULL"
+        )
+        await conn.exec_driver_sql("PRAGMA user_version = 4")
 
 
 async def ensure_initialized() -> None:

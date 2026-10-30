@@ -185,8 +185,9 @@
         <div class="bg-white rounded-lg shadow-sm p-5">
             <div class="flex items-center justify-between">
                 <div>
-                    <p class="text-sm text-gray-500">Closed</p>
+                    <p class="text-sm text-gray-500">Resolved or closed</p>
                     <p class="text-2xl font-bold text-green-600">{{ summary.closed_tickets }}</p>
+                    <p class="text-xs text-gray-400">of those that came in; {{ summary.finished_in_period }} finished in this period in all</p>
                 </div>
                 <div class="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
                     <svg class="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">

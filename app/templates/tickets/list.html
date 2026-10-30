@@ -59,6 +59,7 @@
     <!-- Filters -->
     <div class="bg-white rounded-lg shadow-sm p-3 sm:p-4 mb-6">
         <form method="get" action="/web/tickets" class="space-y-3">
+            {% if attention_filter %}<input type="hidden" name="attention" value="{{ attention_filter }}">{% endif %}
             <!-- Search Bar -->
             <div class="w-full">
                 <label class="block text-sm font-medium text-gray-700 mb-1">Search</label>
@@ -123,6 +124,13 @@
                     Clear
                 </a>
             </div>
+            </div>
+            <div class="flex flex-wrap items-center gap-2 text-sm">
+                <span class="text-gray-500">Needs attention:</span>
+                {% for key, label, hint in attention_choices %}
+                <a href="/web/tickets{{ '' if attention_filter == key else '?attention=' ~ key }}" title="{{ hint }}"
+                   class="px-3 py-1 rounded-full border {{ 'bg-blue-600 border-blue-600 text-white' if attention_filter == key else 'border-gray-300 text-gray-700 hover:bg-gray-50' }}">{{ label }}</a>
+                {% endfor %}
             </div>
         </form>
     </div>

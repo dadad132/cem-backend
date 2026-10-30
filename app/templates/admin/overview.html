@@ -1,0 +1,39 @@
+{% extends 'base.html' %}
+{% block content %}
+<style>
+  .ov-tiles { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr)); }
+  .ov-tile { display: block; background: #fff; border: 1px solid #e2e8f0; border-radius: .6rem; padding: .85rem 1rem; }
+  a.ov-tile:hover { border-color: #94a3b8; }
+  .ov-tile b { display: block; font-size: 1.75rem; line-height: 1.1; font-weight: 700; color: #0f172a; }
+  .ov-tile span { font-size: .8rem; color: #475569; }
+  .ov-tile.ov-warn { border-color: #fcd34d; background: #fffbeb; }
+  .ov-tile.ov-bad { border-color: #fca5a5; background: #fef2f2; }
+  .ov-card { background: #fff; border: 1px solid #e2e8f0; border-radius: .6rem; padding: 1rem; }
+  .ov-card h2 { font-weight: 600; color: #0f172a; }
+  .ov-hint { font-size: .8rem; color: #64748b; }
+  .ov-row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .1rem .75rem; padding: .4rem 0;
+            border-top: 1px solid #f1f5f9; font-size: .875rem; }
+  .ov-row a { color: #1d4ed8; }
+  .ov-row small { color: #64748b; }
+  .ov-table { width: 100%; font-size: .875rem; border-collapse: collapse; }
+  .ov-table th { text-align: left; font-weight: 600; color: #475569; font-size: .75rem; padding: .35rem .5rem;
+                 border-bottom: 1px solid #e2e8f0; white-space: nowrap; }
+  .ov-table td { padding: .45rem .5rem; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
+  .ov-table .ov-num { text-align: right; font-variant-numeric: tabular-nums; }
+  .ov-bar { height: .5rem; border-radius: 999px; background: #e2e8f0; overflow: hidden; }
+  .ov-bar i { display: block; height: 100%; background: #10b981; }
+  .ov-bar.ov-risk i { background: #f59e0b; }
+  .ov-flag { color: #b91c1c; font-weight: 600; }
+  .ov-live { color: #047857; font-weight: 600; }
+</style>
+
+<div class="mb-4">
+  <h1 class="text-2xl font-semibold">Team Overview</h1>
+  <p class="text-sm text-slate-600">What needs someone now, who is carrying what, and how far along the work is.</p>
+</div>
+
+<div id="overview-panels" hx-get="/web/admin/overview?panels=1"
+     hx-trigger="every 60s [document.visibilityState === 'visible']" hx-swap="innerHTML">
+  {% include 'admin/_overview_panels.html' %}
+</div>
+{% endblock %}

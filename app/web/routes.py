@@ -56,6 +56,17 @@ from app.core.clock import (
     day_start_utc, days_utc, format_local, get_zone, local_now, local_today, server_zone_name, to_local, to_utc,
     workspace_zone, zone_label,
 )
+from app.core.team_overview import (
+    DONE_TICKET_STATUSES as _DONE_TICKET_STATUSES,
+    TICKET_ATTENTION,
+    attention_counts,
+    average_first_reply,
+    build_overview,
+    hours_worked,
+    project_counts,
+    task_attention_filter,
+    ticket_attention_filter,
+)
 from jinja2 import pass_context
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -743,7 +754,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
         .where(
             Assignment.assignee_id == current_user_id,
             Task.status == TaskStatus.done,
-            Task.updated_at >= day_start_utc(week_ago, zone)
+            Task.archived_at >= day_start_utc(week_ago, zone)
         )
     )
     my_tasks_done = my_done_result.scalar() or 0
@@ -1016,9 +1027,9 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
             select(func.count())
             .select_from(Task)
             .where(
-                Task.project_id.in_(project_ids) if project_ids else True,
+                Task.project_id.in_(project_ids),
                 Task.status == TaskStatus.done,
-                Task.updated_at >= day_start_utc(week_ago, zone)
+                Task.archived_at >= day_start_utc(week_ago, zone)
             )
         )
         team_tasks_completed = team_done_result.scalar() or 0
@@ -1035,6 +1046,11 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
             )
         )
         team_tickets_resolved = resolved_result.scalar() or 0
+
+        # First reply customers saw this week, in business hours
+        this_company = await db.get(Workspace, user.workspace_id) if user.workspace_id else None
+        if this_company:
+            avg_response_time = await average_first_reply(db, this_company, 7)
         
         # User view - get all team members for selector
         if view == 'user':
@@ -1071,7 +1087,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
                         .where(
                             Assignment.assignee_id == user_id,
                             Task.status == TaskStatus.done,
-                            Task.updated_at >= day_start_utc(week_ago, zone)
+                            Task.archived_at >= day_start_utc(week_ago, zone)
                         )
                     )
                     su_done_tasks = su_done_result.scalar() or 0
@@ -1180,11 +1196,20 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
         'selected_user_tasks': selected_user_tasks,
         'selected_user_projects': selected_user_projects,
         'timers': await _dashboard_timers(db, user) if view != 'user' else None,
+        'attention': await attention_counts(db, user.workspace_id, zone)
+        if user.is_admin and user.workspace_id and view != 'user' else None,
     })
 
 
 # Tickets and tasks still being worked on (their timers are shown when paused)
-_DONE_TICKET_STATUSES = ('resolved', 'closed')
+def _ticket_finished(ticket) -> bool:
+    return ticket.status in _DONE_TICKET_STATUSES
+
+
+def _ticket_finished_at(ticket):
+    """When a finished ticket was finished: some are resolved and never closed."""
+    return ticket.closed_at or ticket.resolved_at
+
 DASHBOARD_PAUSED_SHOWN = 10
 DASHBOARD_FORGOTTEN_HOURS = 8
 
@@ -2527,6 +2552,23 @@ async def web_notifications_mark_all_read(
 # --------------------------
 # User Management (all users can view, only admins can create)
 # --------------------------
+@router.get('/admin/overview', response_class=HTMLResponse)
+async def web_admin_overview(request: Request, db: AsyncSession = Depends(get_session)):
+    """Team Overview: what needs someone now, who is carrying what, and how far
+    along the work is. ?panels=1 is the part the page reloads by itself."""
+    panels = bool(request.query_params.get('panels'))
+    user, redirect = await _require_workspace_admin(request, db)
+    if redirect:
+        return _htmx_login_redirect() if panels else redirect
+    workspace = await db.get(Workspace, user.workspace_id)
+    return templates.TemplateResponse('admin/_overview_panels.html' if panels else 'admin/overview.html', {
+        'request': request,
+        'user': user,
+        'workspace': workspace,
+        'overview': await build_overview(db, workspace),
+    })
+
+
 @router.get('/admin/users', response_class=HTMLResponse)
 async def web_admin_users_list(
     request: Request,
@@ -3892,21 +3934,13 @@ async def web_admin_user_activity_view(
     )).all()
     
     task_assignments = []
+    worked = await _tasks_time_worked(db, [task.id for task, _ in task_assignments_raw], target_user_id)
+    assigners = {u.id: u for u in (await db.execute(
+        select(User).where(User.id.in_({task.creator_id for task, _ in task_assignments_raw}))
+    )).scalars().all()} if task_assignments_raw else {}
     for task, assignment in task_assignments_raw:
-        assigner = (await db.execute(select(User).where(User.id == task.creator_id))).scalar_one_or_none()
-        # Calculate time spent on task (timeentry table may not exist)
-        time_spent = 0
-        try:
-            time_entries_result = await db.execute(
-                text("""
-                    SELECT SUM(duration_hours) as total FROM timeentry 
-                    WHERE task_id = :task_id AND user_id = :user_id
-                """),
-                {"task_id": task.id, "user_id": target_user_id}
-            )
-            time_spent = time_entries_result.scalar() or 0
-        except Exception:
-            pass  # timeentry table doesn't exist
+        assigner = assigners.get(task.creator_id)
+        time_spent = worked.get(task.id, 0) / 3600
         
         task_assignments.append({
             'id': task.id,
@@ -4088,21 +4122,8 @@ async def web_admin_user_activity_view(
                     'status': task.status.value,
                 })
     
-    # Calculate total time logged (timeentry table may not exist)
-    total_hours = 0
-    try:
-        total_time_result = await db.execute(
-            text("""
-                SELECT SUM(duration_hours) as total FROM timeentry 
-                WHERE user_id = :user_id 
-                AND start_time >= :start_dt 
-                AND start_time < :end_dt
-            """),
-            {"user_id": target_user_id, "start_dt": start_dt, "end_dt": end_dt}
-        )
-        total_hours = total_time_result.scalar() or 0
-    except Exception:
-        pass  # timeentry table doesn't exist
+    # Time worked in the period: ticket and task timers, plus hours typed in
+    total_hours = await hours_worked(db, target_user_id, start_dt, end_dt)
     
     # Calculate completed tasks
     completed_count = sum(1 for t, _ in task_assignments_raw if t.status.value in ['done', 'completed'])
@@ -4117,7 +4138,7 @@ async def web_admin_user_activity_view(
     try:
         active_projects_result = await db.execute(
             text("""
-                SELECT COUNT(DISTINCT project_id) FROM projectmember 
+                SELECT COUNT(DISTINCT project_id) FROM project_member 
                 WHERE user_id = :user_id
             """),
             {"user_id": target_user_id}
@@ -6958,11 +6979,13 @@ async def web_projects(request: Request, db: AsyncSession = Depends(get_session)
 
     # Get workspace for branding
     workspace = await get_workspace_for_user(user_id, db)
+    today = local_today(await _company_zone(db, user.workspace_id))
 
     return templates.TemplateResponse('projects/index.html', {
         'request': request,
         'user': user,
         'projects': projects,
+        'project_progress': await project_counts(db, [p.id for p in projects], today),
         'workspace': workspace
     })
 
@@ -7498,6 +7521,7 @@ async def _project_report_data(db: AsyncSession, project, start_date: Optional[s
     
     # Get all assignments
     task_ids = [t.id for t in all_tasks]
+    worked = await _tasks_time_worked(db, task_ids)
     assignments = []
     if task_ids:
         assignments = (await db.execute(
@@ -7555,8 +7579,7 @@ async def _project_report_data(db: AsyncSession, project, start_date: Optional[s
             contributor_stats[uid]['tasks_assigned'] += 1
             if task.status == TaskStatus.done:
                 contributor_stats[uid]['tasks_completed'] += 1
-            if task.time_spent_hours:
-                contributor_stats[uid]['hours_logged'] += task.time_spent_hours
+            contributor_stats[uid]['hours_logged'] += _task_hours(task, worked)
     
     # Format contributor data
     contributors = []
@@ -7580,7 +7603,8 @@ async def _project_report_data(db: AsyncSession, project, start_date: Optional[s
     # Build task details
     tasks_detail = []
     for task in all_tasks:
-        completed_at = task_completions.get(task.id)
+        # (the last time it was done means nothing if it was reopened since)
+        completed_at = task_completions.get(task.id) if task.status == TaskStatus.done else None
         duration_days = None
         if completed_at:
             duration_days = (completed_at - task.created_at).days
@@ -7594,7 +7618,7 @@ async def _project_report_data(db: AsyncSession, project, start_date: Optional[s
             'assignees': [a[0] for a in assignees_map.get(task.id, [])],
             'created_at': task.created_at,
             'completed_at': completed_at,
-            'time_spent_hours': task.time_spent_hours,
+            'time_spent_hours': _task_hours(task, worked) or None,
             'duration_days': duration_days
         })
     
@@ -7648,7 +7672,7 @@ async def _project_report_data(db: AsyncSession, project, start_date: Optional[s
     total_tasks = len(all_tasks)
     completed_tasks = sum(1 for t in all_tasks if t.status == TaskStatus.done)
     completion_rate = round((completed_tasks / total_tasks * 100) if total_tasks > 0 else 0)
-    total_hours = round(sum(t.time_spent_hours or 0 for t in all_tasks), 1)
+    total_hours = round(sum(_task_hours(t, worked) for t in all_tasks), 1)
     active_contributors = len(contributor_stats)
     
     summary = {
@@ -7808,6 +7832,7 @@ async def web_project_report_pdf(
     
     # Get assignments
     task_ids = [t.id for t in all_tasks]
+    worked = await _tasks_time_worked(db, task_ids)
     assignments = []
     if task_ids:
         assignments = (await db.execute(
@@ -7857,8 +7882,7 @@ async def web_project_report_pdf(
             contributor_stats[uid]['tasks_assigned'] += 1
             if task.status == TaskStatus.done:
                 contributor_stats[uid]['tasks_completed'] += 1
-            if task.time_spent_hours:
-                contributor_stats[uid]['hours_logged'] += task.time_spent_hours
+            contributor_stats[uid]['hours_logged'] += _task_hours(task, worked)
     
     # Generate PDF
     from reportlab.lib.pagesizes import letter, A4
@@ -7910,7 +7934,7 @@ async def web_project_report_pdf(
     total_tasks = len(all_tasks)
     completed_tasks = sum(1 for t in all_tasks if t.status == TaskStatus.done)
     completion_rate = round((completed_tasks / total_tasks * 100) if total_tasks > 0 else 0)
-    total_hours = round(sum(t.time_spent_hours or 0 for t in all_tasks), 1)
+    total_hours = round(sum(_task_hours(t, worked) for t in all_tasks), 1)
     
     elements.append(Paragraph("Summary", heading_style))
     summary_data = [
@@ -7987,7 +8011,8 @@ async def web_project_report_pdf(
         
         status = task.status.value if hasattr(task.status, 'value') else str(task.status)
         priority = task.priority.value if hasattr(task.priority, 'value') else str(task.priority)
-        time_str = f"{task.time_spent_hours}h" if task.time_spent_hours else '-'
+        hours = _task_hours(task, worked)
+        time_str = f"{hours}h" if hours else '-'
         
         task_data.append([title, assignee_names, status.title(), priority.title(), time_str])
     
@@ -8312,6 +8337,10 @@ async def _task_list_data(db: AsyncSession, user: User, tab, status, priority, a
             query = query.where(Task.status == 'done')
         else:  # Active tasks (default when tab is None, empty, or 'active')
             query = query.where(Task.status.in_(['todo', 'in_progress', 'blocked']))
+            if tab in ('overdue', 'blocked', 'unassigned'):
+                today = local_today(await _company_zone(db, user.workspace_id))
+                query = query.where(Task.is_archived == False, Project.is_archived == False,
+                                    task_attention_filter(tab, today))
     
     if status and status.strip():
         query = query.where(Task.status == status)
@@ -8358,16 +8387,24 @@ def _value(enum_or_str):
     return enum_or_str.value if hasattr(enum_or_str, 'value') else enum_or_str
 
 
-async def _tasks_time_worked(db: AsyncSession, task_ids) -> dict:
-    """Seconds on each task's work timer: {task id: seconds}."""
+async def _tasks_time_worked(db: AsyncSession, task_ids, user_id: Optional[int] = None) -> dict:
+    """Seconds on each task's work timer: {task id: seconds}. A running timer
+    counts up to now. With user_id, only the time that person ran."""
     from app.core.work_timer import worked_seconds
     entries = {}
     if task_ids:
-        for entry in (await db.execute(
-            select(TaskTimeEntry).where(TaskTimeEntry.task_id.in_(list(task_ids)))
-        )).scalars().all():
+        query = select(TaskTimeEntry).where(TaskTimeEntry.task_id.in_(list(task_ids)))
+        if user_id:
+            query = query.where(TaskTimeEntry.user_id == user_id)
+        for entry in (await db.execute(query)).scalars().all():
             entries.setdefault(entry.task_id, []).append(entry)
     return {task_id: worked_seconds(task_entries) for task_id, task_entries in entries.items()}
+
+
+def _task_hours(task, worked: dict) -> float:
+    """Hours on a task: its timer, or what was entered by hand if that is more.
+    worked: seconds from _tasks_time_worked."""
+    return round(max(worked.get(task.id, 0) / 3600, task.time_spent_hours or 0), 2)
 
 
 def _task_export_rows(tasks, project_names: dict, assignees_map: dict, worked: dict, today: date) -> list:
@@ -8431,7 +8468,8 @@ async def web_tasks_list_export(
 
     # Say which filters the file was made with
     shown = [TASK_STATUS_LABELS.get(status, status) + ' tasks' if status and status.strip()
-             else ('Completed tasks' if tab == 'done' else 'Active tasks')]
+             else {'done': 'Completed tasks', 'overdue': 'Overdue tasks', 'blocked': 'Blocked tasks',
+                   'unassigned': 'Tasks nobody owns'}.get(tab, 'Active tasks')]
     if priority and priority.strip():
         shown.append(f'priority {priority}')
     if project_id and project_id.strip().isdigit():
@@ -10775,7 +10813,8 @@ async def web_tickets_report(
     # Get ALL currently open tickets (regardless of date range) for the "Tickets Open" section
     current_open_query = select(Ticket).where(
         Ticket.workspace_id == user.workspace_id,
-        Ticket.status.in_(['open', 'in_progress', 'waiting'])
+        Ticket.status.in_(['open', 'in_progress', 'waiting']),
+        Ticket.is_archived == False,
     )
     if selected_user_id:
         current_open_query = current_open_query.where(Ticket.assigned_to_id == selected_user_id)
@@ -10829,7 +10868,7 @@ async def web_tickets_report(
                 Ticket.created_at < end_dt,
                 or_(
                     TicketHistory.action == 'closed',
-                    and_(TicketHistory.action == 'status_changed', TicketHistory.new_value == 'closed')
+                    and_(TicketHistory.action == 'status_changed', TicketHistory.new_value.in_(_DONE_TICKET_STATUSES))
                 )
             )
         )
@@ -10875,15 +10914,15 @@ async def web_tickets_report(
         
         # Determine who closed the ticket: use closed_by_id if set, otherwise check history
         closer_id = ticket.closed_by_id
-        if not closer_id and ticket.status == 'closed':
+        if not closer_id and _ticket_finished(ticket):
             closer_id = ticket_closed_by.get(ticket.id)
         
         if closer_id and closer_id in agent_stats:
             agent_stats[closer_id]['tickets_closed'] += 1
             # Calculate resolution time using business hours
-            if ticket.closed_at:
+            if _ticket_finished_at(ticket):
                 resolution_hours = calculate_business_hours(
-                    to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
+                    to_local(ticket.created_at, zone), to_local(_ticket_finished_at(ticket), zone),
                     biz_start, biz_end, biz_exclude_weekends
                 )
                 agent_stats[closer_id]['resolution_times'].append(resolution_hours)
@@ -10903,7 +10942,8 @@ async def web_tickets_report(
     for ticket in all_tickets:
         ticket_comments = comment_by_ticket.get(ticket.id, [])
         # Find first non-guest comment (staff response)
-        staff_comments = [c for c in ticket_comments if c.user_id and c.user_id in agent_stats]
+        # (a private note is not a reply: the customer never saw it)
+        staff_comments = [c for c in ticket_comments if c.user_id and c.user_id in agent_stats and not c.is_internal]
         if staff_comments:
             first_response = min(staff_comments, key=lambda c: c.created_at)
             response_hours = (first_response.created_at - ticket.created_at).total_seconds() / 3600
@@ -10956,17 +10996,17 @@ async def web_tickets_report(
         if priority not in priority_distribution:
             priority_distribution[priority] = {'count': 0, 'closed': 0}
         priority_distribution[priority]['count'] += 1
-        if ticket.status == 'closed':
+        if _ticket_finished(ticket):
             priority_distribution[priority]['closed'] += 1
     
     # Closed tickets with details
     closed_tickets = []
     for ticket in all_tickets:
-        if ticket.status == 'closed' and ticket.closed_at:
+        if _ticket_finished(ticket) and _ticket_finished_at(ticket):
             closed_by = users_dict.get(ticket.closed_by_id)
             # Use business hours for resolution time
             resolution_hours = calculate_business_hours(
-                to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
+                to_local(ticket.created_at, zone), to_local(_ticket_finished_at(ticket), zone),
                 biz_start, biz_end, biz_exclude_weekends
             )
             closed_tickets.append({
@@ -10976,7 +11016,7 @@ async def web_tickets_report(
                 'priority': ticket.priority,
                 'category': ticket.category,
                 'created_at': ticket.created_at,
-                'closed_at': ticket.closed_at,
+                'closed_at': _ticket_finished_at(ticket),
                 'closed_by_name': (closed_by.shown_name or closed_by.username) if closed_by else 'Unknown',
                 'resolution_hours': resolution_hours,
                 'billable_traveling': ticket.billable_traveling or '',
@@ -11083,17 +11123,30 @@ async def web_tickets_report(
     
     # Summary stats
     total_tickets = len(all_tickets)
-    closed_count = sum(1 for t in all_tickets if t.status == 'closed')
+    closed_count = sum(1 for t in all_tickets if _ticket_finished(t))
     # Use the count from all_current_open_tickets for accurate open ticket count
     current_open_count = len(all_current_open_tickets)
     resolution_rate = round((closed_count / total_tickets * 100) if total_tickets > 0 else 0)
+
+    # Finished in the period whenever they came in: the table above only has
+    # tickets that came in during the period
+    finished_at = func.coalesce(Ticket.closed_at, Ticket.resolved_at)
+    finished_query = select(func.count()).select_from(Ticket).where(
+        Ticket.workspace_id == user.workspace_id, Ticket.status.in_(_DONE_TICKET_STATUSES),
+        finished_at >= start_dt, finished_at < end_dt,
+    )
+    if selected_user_id:
+        finished_query = finished_query.where(Ticket.assigned_to_id == selected_user_id)
+    if selected_project_id:
+        finished_query = finished_query.where(Ticket.related_project_id == selected_project_id)
+    finished_in_period = (await db.execute(finished_query)).scalar() or 0
     
     # Average resolution time using business hours
     resolution_times = []
     for ticket in all_tickets:
-        if ticket.status == 'closed' and ticket.closed_at:
+        if _ticket_finished(ticket) and _ticket_finished_at(ticket):
             hours = calculate_business_hours(
-                to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
+                to_local(ticket.created_at, zone), to_local(_ticket_finished_at(ticket), zone),
                 biz_start, biz_end, biz_exclude_weekends
             )
             resolution_times.append(hours)
@@ -11102,6 +11155,7 @@ async def web_tickets_report(
     summary = {
         'total_tickets': total_tickets,
         'closed_tickets': closed_count,
+        'finished_in_period': finished_in_period,
         'open_tickets': current_open_count,  # All currently open tickets
         'resolution_rate': resolution_rate,
         'avg_resolution_hours': avg_resolution,
@@ -11277,7 +11331,8 @@ async def web_tickets_report_pdf(
     # Query ALL currently open tickets (regardless of date range) - same as HTML report
     current_open_query = select(Ticket).where(
         Ticket.workspace_id == user.workspace_id,
-        Ticket.status.in_(['open', 'in_progress', 'waiting'])
+        Ticket.status.in_(['open', 'in_progress', 'waiting']),
+        Ticket.is_archived == False,
     )
     if user_id_int:
         current_open_query = current_open_query.where(
@@ -11333,10 +11388,10 @@ async def web_tickets_report_pdf(
             agent_stats[ticket.assigned_to_id]['tickets_assigned'] += 1
         if ticket.closed_by_id and ticket.closed_by_id in agent_stats:
             agent_stats[ticket.closed_by_id]['tickets_closed'] += 1
-            if ticket.closed_at:
+            if _ticket_finished_at(ticket):
                 # Use business hours calculation
                 resolution_hours = calculate_business_hours(
-                    to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
+                    to_local(ticket.created_at, zone), to_local(_ticket_finished_at(ticket), zone),
                     biz_start, biz_end, biz_exclude_weekends
                 )
                 agent_stats[ticket.closed_by_id]['resolution_times'].append(resolution_hours)
@@ -11372,7 +11427,7 @@ async def web_tickets_report_pdf(
     
     # Summary
     total_tickets = len(all_tickets)
-    closed_count = sum(1 for t in all_tickets if t.status == 'closed')
+    closed_count = sum(1 for t in all_tickets if _ticket_finished(t))
     # Use all_current_open_tickets count (ALL currently open, regardless of date range)
     current_open_count = len(all_current_open_tickets)
     resolution_rate = round((closed_count / total_tickets * 100) if total_tickets > 0 else 0)
@@ -11381,7 +11436,7 @@ async def web_tickets_report_pdf(
     summary_data = [
         ['Metric', 'Value'],
         ['Total Tickets (in period)', str(total_tickets)],
-        ['Closed Tickets', str(closed_count)],
+        ['Resolved or Closed', str(closed_count)],
         ['Currently Open Tickets', str(current_open_count)],
         ['Resolution Rate', f'{resolution_rate}%'],
         ['Total Comments', str(len(all_comments))],
@@ -11435,11 +11490,11 @@ async def web_tickets_report_pdf(
     closed_data = [['Ticket #', 'Subject', 'Closed By', 'Priority', 'Resolution']]
     closed_tickets_with_billing = []
     for ticket in all_tickets:
-        if ticket.status == 'closed' and ticket.closed_at:
+        if _ticket_finished(ticket) and _ticket_finished_at(ticket):
             closed_by = users_dict.get(ticket.closed_by_id)
             # Use business hours calculation
             resolution_hours = calculate_business_hours(
-                to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
+                to_local(ticket.created_at, zone), to_local(_ticket_finished_at(ticket), zone),
                 biz_start, biz_end, biz_exclude_weekends
             )
             closed_data.append([
@@ -11649,7 +11704,8 @@ async def web_tickets_report_excel(
     # Query ALL currently open tickets (regardless of date range) - same as HTML and PDF report
     current_open_query = select(Ticket).where(
         Ticket.workspace_id == user.workspace_id,
-        Ticket.status.in_(['open', 'in_progress', 'waiting'])
+        Ticket.status.in_(['open', 'in_progress', 'waiting']),
+        Ticket.is_archived == False,
     )
     if user_id_int:
         current_open_query = current_open_query.where(
@@ -11730,9 +11786,9 @@ async def web_tickets_report_excel(
             agent_stats[ticket.assigned_to_id]['tickets_assigned'] += 1
         if ticket.closed_by_id and ticket.closed_by_id in agent_stats:
             agent_stats[ticket.closed_by_id]['tickets_closed'] += 1
-            if ticket.closed_at:
+            if _ticket_finished_at(ticket):
                 resolution_hours = calculate_business_hours(
-                    to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
+                    to_local(ticket.created_at, zone), to_local(_ticket_finished_at(ticket), zone),
                     biz_start, biz_end, biz_exclude_weekends
                 )
                 agent_stats[ticket.closed_by_id]['resolution_times'].append(resolution_hours)
@@ -11805,7 +11861,7 @@ async def web_tickets_report_excel(
     append_row(ws_summary, [])
     
     total_tickets = len(all_tickets)
-    closed_count = sum(1 for t in all_tickets if t.status == 'closed')
+    closed_count = sum(1 for t in all_tickets if _ticket_finished(t))
     # Use all_current_open_tickets count (ALL currently open, regardless of date range)
     current_open_count = len(all_current_open_tickets)
     resolution_rate = round((closed_count / total_tickets * 100) if total_tickets > 0 else 0)
@@ -11813,7 +11869,7 @@ async def web_tickets_report_excel(
     ws_summary.append(["Metric", "Value"])
     style_header_row(ws_summary, ws_summary.max_row, 2)
     ws_summary.append(["Total Tickets (in period)", total_tickets])
-    ws_summary.append(["Closed Tickets", closed_count])
+    ws_summary.append(["Resolved or Closed", closed_count])
     ws_summary.append(["Currently Open Tickets", current_open_count])
     ws_summary.append(["Resolution Rate", f"{resolution_rate}%"])
     ws_summary.append(["Total Comments", len(all_comments)])
@@ -11828,9 +11884,9 @@ async def web_tickets_report_excel(
         assigned_to = users_dict.get(ticket.assigned_to_id)
         project = projects_dict.get(ticket.related_project_id)
         resolution_hrs = ''
-        if ticket.status == 'closed' and ticket.closed_at:
+        if _ticket_finished(ticket) and _ticket_finished_at(ticket):
             resolution_hrs = calculate_business_hours(
-                to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
+                to_local(ticket.created_at, zone), to_local(_ticket_finished_at(ticket), zone),
                 biz_start, biz_end, biz_exclude_weekends
             )
         client_name = ' '.join(filter(None, [ticket.guest_name, ticket.guest_surname])) or ticket.guest_company or ''
@@ -11843,7 +11899,7 @@ async def web_tickets_report_excel(
             ticket.category or '',
             (assigned_to.shown_name or assigned_to.username) if assigned_to else '',
             format_local(ticket.created_at, zone, '%Y-%m-%d %H:%M'),
-            format_local(ticket.closed_at, zone, '%Y-%m-%d %H:%M') if ticket.closed_at else '',
+            format_local(_ticket_finished_at(ticket), zone, '%Y-%m-%d %H:%M') if _ticket_finished_at(ticket) else '',
             resolution_hrs,
             project.name if project else '',
         ])
@@ -11874,11 +11930,11 @@ async def web_tickets_report_excel(
                       "Closing Notes"])
     style_header_row(ws_closed, 1, 18)
     for ticket in all_tickets:
-        if ticket.status == 'closed' and ticket.closed_at:
+        if _ticket_finished(ticket) and _ticket_finished_at(ticket):
             closed_by = users_dict.get(ticket.closed_by_id)
             client_name = ' '.join(filter(None, [ticket.guest_name, ticket.guest_surname])) or ticket.guest_company or ''
             resolution_hours = calculate_business_hours(
-                to_local(ticket.created_at, zone), to_local(ticket.closed_at, zone),
+                to_local(ticket.created_at, zone), to_local(_ticket_finished_at(ticket), zone),
                 biz_start, biz_end, biz_exclude_weekends
             )
             append_row(ws_closed, [
@@ -11889,7 +11945,7 @@ async def web_tickets_report_excel(
                 ticket.category or '',
                 (closed_by.shown_name or closed_by.username) if closed_by else 'Unknown',
                 format_local(ticket.created_at, zone, '%Y-%m-%d %H:%M'),
-                format_local(ticket.closed_at, zone, '%Y-%m-%d %H:%M'),
+                format_local(_ticket_finished_at(ticket), zone, '%Y-%m-%d %H:%M'),
                 resolution_hours,
                 ticket.billable_traveling or '',
                 ticket.billable_labour_onsite or '',
@@ -11998,7 +12054,8 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
     # Base query - exclude closed and resolved (those go to archived tab)
     query = select(Ticket).where(
         Ticket.workspace_id == user.workspace_id,
-        Ticket.status.notin_(['closed', 'resolved'])
+        Ticket.status.notin_(['closed', 'resolved']),
+        Ticket.is_archived == False,
     )
     
     # Project-based visibility based on user permissions
@@ -12041,6 +12098,14 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
         query = query.where(Ticket.assigned_to_id == user_id)
     elif assigned_filter == 'unassigned':
         query = query.where(Ticket.assigned_to_id.is_(None))
+
+    # The Team Overview's lists: the same tickets it counts, oldest first
+    attention_filter = request.query_params.get('attention', '')
+    attention_condition = ticket_attention_filter(attention_filter, await _company_zone(db, user.workspace_id))
+    if attention_condition is None:
+        attention_filter = ''
+    else:
+        query = query.where(attention_condition)
     
     # Search filter
     if search_query:
@@ -12108,7 +12173,7 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
         )
         query = query.order_by(relevance, Ticket.created_at.desc())
     else:
-        query = query.order_by(Ticket.created_at.desc())
+        query = query.order_by(Ticket.created_at.asc() if attention_filter else Ticket.created_at.desc())
     tickets = (await db.execute(query)).scalars().all()
     
     # Get user's projects for filter dropdown
@@ -12144,6 +12209,8 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
         'status_filter': status_filter,
         'priority_filter': priority_filter,
         'assigned_filter': assigned_filter,
+        'attention_filter': attention_filter,
+        'attention_choices': TICKET_ATTENTION,
         'project_filter': project_filter,
         'user_projects': user_projects,
         'projects_dict': projects_dict,
@@ -18295,18 +18362,24 @@ async def web_activity_feed(
     
     # Enhance activity logs with user names and entity titles
     activities = []
+    actors = {u.id: u for u in (await db.execute(
+        select(User).where(User.id.in_({log.user_id for log in logs}))
+    )).scalars().all()} if logs else {}
+    task_ids = {log.entity_id for log in logs if log.entity_type == 'task'}
+    project_ids = {log.entity_id for log in logs if log.entity_type == 'project'}
+    task_titles = dict((await db.execute(
+        select(Task.id, Task.title).where(Task.id.in_(task_ids))
+    )).all()) if task_ids else {}
+    project_names = dict((await db.execute(
+        select(Project.id, Project.name).where(Project.id.in_(project_ids))
+    )).all()) if project_ids else {}
     for log in logs:
-        # Get user who performed action
-        actor = (await db.execute(select(User).where(User.id == log.user_id))).scalar_one_or_none()
-        
-        # Get entity title based on type
+        actor = actors.get(log.user_id)
         entity_title = None
         if log.entity_type == 'task':
-            task = (await db.execute(select(Task).where(Task.id == log.entity_id))).scalar_one_or_none()
-            entity_title = task.title if task else None
+            entity_title = task_titles.get(log.entity_id)
         elif log.entity_type == 'project':
-            project = (await db.execute(select(Project).where(Project.id == log.entity_id))).scalar_one_or_none()
-            entity_title = project.name if project else None
+            entity_title = project_names.get(log.entity_id)
         
         # Calculate time ago
         time_diff = datetime.utcnow() - log.created_at
@@ -18341,7 +18414,7 @@ async def web_activity_feed(
         select(Task)
         .join(Project, Task.project_id == Project.id)
         .where(Project.workspace_id == user.workspace_id)
-        .where(Task.status != TaskStatus.done)
+        .where(Task.status != TaskStatus.done, Task.is_archived == False)
     )).scalars().all()
     
     completed_week = (await db.execute(
@@ -18349,14 +18422,14 @@ async def web_activity_feed(
         .join(Project, Task.project_id == Project.id)
         .where(Project.workspace_id == user.workspace_id)
         .where(Task.status == TaskStatus.done)
-        .where(Task.updated_at >= day_start_utc(week_ago, zone))
+        .where(Task.archived_at >= day_start_utc(week_ago, zone))
     )).scalars().all()
     
     overdue = (await db.execute(
         select(Task)
         .join(Project, Task.project_id == Project.id)
         .where(Project.workspace_id == user.workspace_id)
-        .where(Task.status != TaskStatus.done)
+        .where(Task.status != TaskStatus.done, Task.is_archived == False)
         .where(Task.due_date < today)
     )).scalars().all()
     
@@ -18390,17 +18463,17 @@ async def web_activity_feed(
                 # Tasks completed in the last month
                 completed_month = [t for t in member_tasks 
                                   if t.status == TaskStatus.done 
-                                  and t.updated_at 
-                                  and to_local(t.updated_at, zone).date() >= month_ago]
+                                  and t.archived_at 
+                                  and to_local(t.archived_at, zone).date() >= month_ago]
                 
                 # Tasks completed late (had due date, completed after due date)
                 completed_late = [t for t in completed_month
-                                 if t.due_date and t.updated_at 
-                                 and to_local(t.updated_at, zone).date() > t.due_date]
+                                 if t.due_date and t.archived_at 
+                                 and to_local(t.archived_at, zone).date() > t.due_date]
                 
                 # Currently overdue tasks
                 overdue_tasks = [t for t in member_tasks
-                                if t.status != TaskStatus.done
+                                if t.status != TaskStatus.done and not t.is_archived
                                 and t.due_date
                                 and t.due_date < today]
                 
@@ -18444,16 +18517,16 @@ async def web_activity_feed(
             # Tasks completed in the last month
             completed_month = [t for t in member_tasks 
                               if t.status == TaskStatus.done 
-                              and t.updated_at 
-                              and to_local(t.updated_at, zone).date() >= month_ago]
+                              and t.archived_at 
+                              and to_local(t.archived_at, zone).date() >= month_ago]
             
             # Separate completed on time vs late
             completed_on_time = []
             completed_late = []
             
             for t in completed_month:
-                if t.due_date and t.updated_at:
-                    if to_local(t.updated_at, zone).date() > t.due_date:
+                if t.due_date and t.archived_at:
+                    if to_local(t.archived_at, zone).date() > t.due_date:
                         completed_late.append(t)
                     else:
                         completed_on_time.append(t)
@@ -18463,7 +18536,7 @@ async def web_activity_feed(
             
             # Currently overdue tasks
             overdue_tasks = [t for t in member_tasks
-                            if t.status != TaskStatus.done
+                            if t.status != TaskStatus.done and not t.is_archived
                             and t.due_date
                             and t.due_date < today]
             
@@ -18516,7 +18589,7 @@ async def web_workload(
         return RedirectResponse('/web/login', status_code=303)
     
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user:
+    if not user or not user.is_active:
         return RedirectResponse('/web/login', status_code=303)
     
     from app.models.task import Task
@@ -18566,7 +18639,10 @@ async def web_workload(
     task_query = select(Task).where(
         Task.project_id.in_(project_ids),
         Task.is_archived == False,
-        Task.status != 'done'
+        Task.status != 'done',
+        # Everything that should be finished by the end of the period, overdue
+        # included, plus work with no date; later work waits for a later period
+        or_(Task.due_date.is_(None), Task.due_date <= end_date),
     )
     all_tasks = (await db.execute(task_query)).scalars().all()
     
@@ -18615,7 +18691,9 @@ async def web_workload(
     total_tasks = len(all_tasks)
     in_progress_tasks = len([t for t in all_tasks if t.status.value == 'in_progress'])
     overdue_tasks = len([t for t in all_tasks if t.due_date and t.due_date < today])
-    unassigned_tasks = len([t for t in all_tasks if t.id not in assignments_map or not assignments_map[t.id]])
+    # (a task held only by someone who has left is in nobody's row, so it counts here)
+    active_ids = {m.id for m in team_members}
+    unassigned_tasks = len([t for t in all_tasks if not active_ids & set(assignments_map.get(t.id, []))])
     
     # Priority breakdown
     priority_breakdown = {

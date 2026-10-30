@@ -367,6 +367,16 @@
     {% endif %}
   </div>
 
+  {# Admins: what is waiting on someone, and the way into the Team Overview #}
+  {% if attention and (attention.no_reply or attention.unassigned or attention.overdue or attention.quiet) %}
+  <a href="/web/admin/overview" class="block mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-900 hover:bg-amber-100">
+    <strong>Tickets needing someone:</strong>
+    {{ attention.no_reply }} waiting for a first reply · {{ attention.unassigned }} with nobody assigned ·
+    {{ attention.overdue }} past their end date · {{ attention.quiet }} gone quiet
+    <span class="underline ml-1">Open Team Overview</span>
+  </a>
+  {% endif %}
+
   {# Which work timers are running and which are not (admins: the whole team) #}
   {% if timers and (timers.team or timers.running or timers.paused) %}
   {% include 'dashboard/_timers.html' %}

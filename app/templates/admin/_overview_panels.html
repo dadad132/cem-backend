@@ -1,0 +1,129 @@
+{# The Team Overview's panels: sent on their own when the page refreshes itself. #}
+{% set o = overview %}
+
+<p class="text-xs text-slate-500 mb-3">Updated {{ now() | localtime('%H:%M') }}. Refreshes by itself every minute.</p>
+
+{# Is it healthy? #}
+<div class="ov-tiles mb-4">
+  <a class="ov-tile" href="/web/tickets"><b>{{ o.open_tickets }}</b><span>Open tickets</span></a>
+  <a class="ov-tile {{ 'ov-bad' if o.tickets.no_reply }}" href="/web/tickets?attention=no_reply"><b>{{ o.tickets.no_reply }}</b><span>Waiting for a first reply</span></a>
+  <a class="ov-tile {{ 'ov-warn' if o.tickets.unassigned }}" href="/web/tickets?attention=unassigned"><b>{{ o.tickets.unassigned }}</b><span>Tickets with nobody assigned</span></a>
+  <a class="ov-tile {{ 'ov-bad' if o.tickets.overdue }}" href="/web/tickets?attention=overdue"><b>{{ o.tickets.overdue }}</b><span>Tickets past their end date</span></a>
+  <a class="ov-tile {{ 'ov-bad' if o.tasks.overdue }}" href="/web/tasks/list?tab=overdue"><b>{{ o.tasks.overdue }}</b><span>Overdue tasks</span></a>
+  <a class="ov-tile {{ 'ov-warn' if o.tasks.blocked }}" href="/web/tasks/list?tab=blocked"><b>{{ o.tasks.blocked }}</b><span>Blocked tasks</span></a>
+  <div class="ov-tile"><b>{{ o.timers_running }}</b><span>People on a timer now</span></div>
+  <div class="ov-tile" title="Business hours to the first reply the customer saw, on tickets from the last 30 days">
+    <b>{{ '%sh'|format(o.first_reply_hours) if o.first_reply_hours is not none else '-' }}</b><span>Average first reply</span>
+  </div>
+</div>
+
+{# What needs someone? #}
+<div class="ov-card mb-4">
+  <h2>Needs someone now</h2>
+  {% if not o.needs_someone and not o.tickets.quiet and not o.tasks.unassigned %}
+  <p class="ov-hint mt-1">Nothing is waiting. Every ticket has an owner and a reply, and nothing is overdue or blocked.</p>
+  {% else %}
+  <p class="ov-hint">Oldest first.</p>
+  <div class="grid gap-4 md:grid-cols-2 mt-3">
+    {% for section in o.ticket_lists + o.task_lists if section.count %}
+    <div>
+      <div class="flex items-baseline justify-between gap-2">
+        <h3 class="text-sm font-semibold text-slate-900">{{ section.title }} ({{ section.count }})</h3>
+        {% if section.count > section['items']|length %}<a class="text-xs text-blue-700" href="{{ section.url }}">See all</a>{% endif %}
+      </div>
+      <p class="ov-hint mb-1">{{ section.hint }}</p>
+      {% for item in section['items'] %}
+      <div class="ov-row">
+        <a href="{{ item.url }}">{{ item.title }}</a>
+        <small>{{ item.ref }}{% if item.who %} · {{ item.who }}{% endif %}{% if item.when %} · {{ item.when }}{% endif %}</small>
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+{# Where is the bottleneck? #}
+<div class="ov-card mb-4">
+  <h2>Who is carrying what</h2>
+  <p class="ov-hint mb-2">Open work per person, most overdue first. Time comes from the timers each person ran.</p>
+  <div class="overflow-x-auto">
+    <table class="ov-table">
+      <thead>
+        <tr><th>Person</th><th>Right now</th><th class="ov-num">Tickets</th><th class="ov-num">Tasks</th><th class="ov-num">Overdue</th>
+            <th class="ov-num">Due today</th><th class="ov-num">Blocked</th><th class="ov-num">Today</th><th class="ov-num">This week</th></tr>
+      </thead>
+      <tbody>
+        {% for person in o.team %}
+        <tr>
+          <td><a class="text-blue-700" href="/web/dashboard?view=user&user_id={{ person.id }}">{{ person.name }}</a></td>
+          <td>
+            {% if person.working_on %}
+            <span class="ov-live">On timer</span> <a class="text-blue-700" href="{{ person.working_on.url }}">{{ person.working_on.title|truncate(34) }}</a>
+            <small class="text-slate-500">since {{ person.working_on.since | localtime('%H:%M') }}</small>
+            {% elif person.tickets or person.tasks %}<span class="text-slate-500">No timer running</span>
+            {% else %}<span class="text-slate-400">Nothing assigned</span>{% endif %}
+          </td>
+          <td class="ov-num">{{ person.tickets }}</td>
+          <td class="ov-num">{{ person.tasks }}</td>
+          <td class="ov-num {{ 'ov-flag' if person.overdue }}">{{ person.overdue }}</td>
+          <td class="ov-num">{{ person.due_today }}</td>
+          <td class="ov-num {{ 'ov-flag' if person.blocked }}">{{ person.blocked }}</td>
+          <td class="ov-num">{{ person.today_seconds|format_duration if person.today_seconds else '-' }}</td>
+          <td class="ov-num">{{ person.week_seconds|format_duration if person.week_seconds else '-' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if o.left_behind.tickets or o.left_behind.tasks %}
+  <p class="text-sm ov-flag mt-2">Still assigned to deactivated accounts: {{ o.left_behind.tickets }} ticket{{ '' if o.left_behind.tickets == 1 else 's' }} and {{ o.left_behind.tasks }} task{{ '' if o.left_behind.tasks == 1 else 's' }}. Nobody is working on these until they are reassigned.</p>
+  {% endif %}
+</div>
+
+<div class="grid gap-4 md:grid-cols-2">
+  {# How far along is the work? #}
+  <div class="ov-card">
+    <h2>Project progress</h2>
+    <p class="ov-hint mb-2">Projects that need a look come first.</p>
+    {% for project in o.projects %}
+    <div class="py-2" style="border-top: 1px solid #f1f5f9;">
+      <div class="flex items-baseline justify-between gap-2 text-sm">
+        <a class="text-blue-700" href="/web/projects/{{ project.id }}">{{ project.name }}</a>
+        <span class="text-slate-600">{{ project.done }} of {{ project.total }} done · {{ project.percent }}%</span>
+      </div>
+      <div class="ov-bar {{ 'ov-risk' if project.at_risk }} my-1"><i style="width: {{ project.percent }}%"></i></div>
+      <p class="ov-hint">
+        {% if project.overdue %}<span class="ov-flag">{{ project.overdue }} overdue</span> · {% endif %}
+        {% if project.blocked %}<span class="ov-flag">{{ project.blocked }} blocked</span> · {% endif %}
+        {% if project.late %}<span class="ov-flag">{{ -project.days_left }} day{{ '' if project.days_left == -1 else 's' }} past its end date</span> · {% elif project.days_left is not none and project.open %}{{ project.days_left }} day{{ '' if project.days_left == 1 else 's' }} left · {% endif %}
+        {{ project.worked_seconds|format_duration if project.worked_seconds else 'no time recorded' }}
+      </p>
+    </div>
+    {% else %}
+    <p class="ov-hint">No projects yet.</p>
+    {% endfor %}
+  </div>
+
+  {# What changed? #}
+  <div class="ov-card">
+    <h2>What changed</h2>
+    <p class="ov-hint mb-2">Are we keeping up with what comes in?</p>
+    <table class="ov-table">
+      <thead><tr><th></th><th class="ov-num">Last 24 hours</th><th class="ov-num">Last 7 days</th></tr></thead>
+      <tbody>
+        <tr><td>Tickets in</td><td class="ov-num">{{ o.last_day.tickets_in }}</td><td class="ov-num">{{ o.last_week.tickets_in }}</td></tr>
+        <tr><td>Tickets finished</td><td class="ov-num">{{ o.last_day.tickets_done }}</td><td class="ov-num">{{ o.last_week.tickets_done }}</td></tr>
+        <tr><td>Replies to customers</td><td class="ov-num">{{ o.last_day.replies }}</td><td class="ov-num">{{ o.last_week.replies }}</td></tr>
+        <tr><td>Tasks finished</td><td class="ov-num">{{ o.last_day.tasks_done }}</td><td class="ov-num">{{ o.last_week.tasks_done }}</td></tr>
+      </tbody>
+    </table>
+    <p class="text-sm mt-3">
+      {% set change = o.last_week.backlog_change %}
+      {% if change > 0 %}<span class="ov-flag">The ticket backlog grew by {{ change }} this week.</span>
+      {% elif change < 0 %}<span class="ov-live">The ticket backlog shrank by {{ -change }} this week.</span>
+      {% else %}The ticket backlog held steady this week.{% endif %}
+    </p>
+  </div>
+</div>

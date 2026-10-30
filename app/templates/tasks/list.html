@@ -59,6 +59,12 @@
     </a>
   </nav>
 </div>
+{% if selected.tab in ('overdue', 'blocked', 'unassigned') %}
+<p class="mb-4 text-sm text-slate-600">
+  Showing only {{ {'overdue': 'overdue tasks', 'blocked': 'blocked tasks', 'unassigned': 'tasks nobody owns'}[selected.tab] }}, from the Team Overview.
+  <a href="/web/tasks/list" class="text-blue-600 hover:underline">Show all active tasks</a>
+</p>
+{% endif %}
 
 <!-- Filters -->
 <div class="bg-white rounded-lg border border-slate-200 p-4 mb-4">
