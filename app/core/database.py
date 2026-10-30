@@ -142,6 +142,16 @@ async def apply_data_changes(conn) -> None:
         )
         await conn.exec_driver_sql("UPDATE workspace SET comment_timezone = NULL")
         await conn.exec_driver_sql("PRAGMA user_version = 2")
+    if version < 3:
+        # A super admin that already chose a company left the projects it made
+        # with no company behind, where it could no longer open them
+        await conn.exec_driver_sql(
+            'UPDATE project SET workspace_id = '
+            '(SELECT u.workspace_id FROM "user" u WHERE u.id = project.owner_id) '
+            'WHERE workspace_id IS NULL AND owner_id IN '
+            '(SELECT id FROM "user" WHERE is_superadmin = 1 AND workspace_id IS NOT NULL)'
+        )
+        await conn.exec_driver_sql("PRAGMA user_version = 3")
 
 
 async def ensure_initialized() -> None:

@@ -34,7 +34,7 @@
 {% elif request.query_params.get('error') == 'assign_company' %}
 <div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ That account could not be added to the company (it may already have one). Reload the page and try again.</div>
 {% elif request.query_params.get('success') == 'left_company' %}
-<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded text-green-800">✅ You left the company. The console is yours; choose a company below to open the Dashboard and tabs again.</div>
+<div class="mb-4 p-4 bg-green-50 border border-green-200 rounded text-green-800">✅ You left the company. Projects you brought there stay with it; choose it again below to get back to them.</div>
 {% elif request.query_params.get('error') == 'work_in_company' %}
 <div class="mb-4 p-4 bg-red-50 border border-red-200 rounded text-red-800">❌ That company was not found. Reload the page and try again.</div>
 {% elif request.query_params.get('success') == 'support_email' %}
@@ -59,13 +59,16 @@
   {% if current_company %}
   <p class="text-sm text-indigo-800 mt-1 mb-3">
     You work in <strong>{{ current_company.name }}</strong> as one of its admins: the Dashboard, tickets,
-    tasks and the other tabs show that company. Company backups and restores leave this account out.
+    tasks and the other tabs show that company, with the projects you brought here.
+    Company backups and restores leave this account out.
   </p>
   {% else %}
   <p class="text-sm text-indigo-800 mt-1 mb-3">
-    {% if request.query_params.get('choose_company') %}<strong>Choose a company first.</strong>{% endif %}
-    The Dashboard, tickets, tasks and the other tabs belong to a company. Choose the company to open
-    them for; you work in it as one of its admins, and can switch or leave here at any time.
+    {% if request.query_params.get('choose_company') %}<strong>That page belongs to a company: choose one below.</strong>{% endif %}
+    Your own work is open now: Dashboard, All Tasks, Board View and Calendar{% if own_projects %}, with your
+    {{ own_projects }} project{{ '' if own_projects == 1 else 's' }}{% endif %}. Tickets, chats, users and the rest belong to a company;
+    choose one to open them too. You work in it as one of its admins, and can switch or leave here at any time.
+    {% if own_projects %}Your projects and their tasks move into the company you choose, where its admins can see them.{% endif %}
   </p>
   {% endif %}
   <div class="flex flex-wrap items-center gap-3">

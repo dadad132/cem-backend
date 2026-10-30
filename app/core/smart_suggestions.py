@@ -35,6 +35,8 @@ async def track_user_action(
     Record a user action for learning purposes.
     Call this whenever a user does something significant.
     """
+    if not workspace_id:
+        return  # the super admin with no company: nothing to learn for
     try:
         now = datetime.utcnow()
         behavior = UserBehavior(

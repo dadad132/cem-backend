@@ -20028,6 +20028,10 @@ async def web_superadmin_console(request: Request, db: AsyncSession = Depends(ge
         'backups': backups,
         'companies': companies,
         'current_company': next((c for c in companies if c['id'] == user.workspace_id), None),
+        'own_projects': (await db.execute(
+            select(sa_func.count()).select_from(Project)
+            .where(Project.owner_id == user.id, Project.workspace_id.is_(None))
+        )).scalar() or 0,
         'accounts_without_company': accounts_without_company,
         'notification_counts': notification_counts,
         'download_code': app_download.code_status(),
@@ -20052,6 +20056,17 @@ async def web_superadmin_clear_notifications(request: Request, db: AsyncSession 
     return RedirectResponse(f'/web/superadmin?success=notifications_cleared&count={removed}', status_code=303)
 
 
+async def _bring_projects_into_company(db: AsyncSession, owner_id: int, workspace_id: int) -> int:
+    """The projects an account made with no company follow it into one, with
+    their tasks: nothing could open them otherwise. Returns how many moved."""
+    projects = (await db.execute(
+        select(Project).where(Project.owner_id == owner_id, Project.workspace_id.is_(None))
+    )).scalars().all()
+    for project in projects:
+        project.workspace_id = workspace_id
+    return len(projects)
+
+
 @router.post('/superadmin/company')
 async def web_superadmin_work_in_company(
     request: Request,
@@ -20059,7 +20074,8 @@ async def web_superadmin_work_in_company(
     db: AsyncSession = Depends(get_session),
 ):
     """The company the super admin works in: the Dashboard and the other tabs
-    are that company's, as one of its admins. Empty: none, the console only.
+    are that company's, as one of its admins, and its own projects come along.
+    Empty: none, which leaves it the projects it has with no company.
     (Company backups and restores leave the super admin out: tenant_backup.py.)"""
     user, redirect = await _require_superadmin(request, db)
     if redirect:
@@ -20072,11 +20088,13 @@ async def web_superadmin_work_in_company(
             return RedirectResponse('/web/superadmin?error=work_in_company', status_code=303)
 
     user.workspace_id = workspace.id if workspace else None
+    moved = await _bring_projects_into_company(db, user.id, workspace.id) if workspace else 0
     await db.commit()
     request.session['workspace_id'] = user.workspace_id
     logger.warning(
         f"Super admin '{user.username}' "
-        + (f"now works in company '{workspace.name}' (id {workspace.id})" if workspace else 'left its company')
+        + (f"now works in company '{workspace.name}' (id {workspace.id}), with {moved} project(s)"
+           if workspace else 'left its company')
     )
     if workspace:
         return RedirectResponse('/web/dashboard', status_code=303)
@@ -20102,16 +20120,12 @@ async def web_superadmin_assign_company(
         return RedirectResponse('/web/superadmin?error=assign_company', status_code=303)
 
     target.workspace_id = workspace.id
-    projects = (await db.execute(
-        select(Project).where(Project.owner_id == target.id, Project.workspace_id.is_(None))
-    )).scalars().all()
-    for project in projects:
-        project.workspace_id = workspace.id
+    moved = await _bring_projects_into_company(db, target.id, workspace.id)
     await db.commit()
 
     logger.warning(
         f"Super admin '{user.username}' put account '{target.username}' (id {target.id}) "
-        f"into company '{workspace.name}' (id {workspace.id}), with {len(projects)} project(s)"
+        f"into company '{workspace.name}' (id {workspace.id}), with {moved} project(s)"
     )
     return RedirectResponse('/web/superadmin?success=assign_company', status_code=303)
 

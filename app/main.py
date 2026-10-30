@@ -51,6 +51,14 @@ _NO_COMPANY_PATHS = (
     '/web/download', '/web/notifications', '/web/uploads/',
 )
 
+# With no company the super admin still has its own projects and tasks: what it
+# makes there has no company either. The rest is a company's (tickets, chats,
+# users, meetings...) and would crash or come out broken without one.
+_SUPERADMIN_OWN_WORK_PATHS = (
+    '/web/dashboard', '/web/activity', '/web/tasks', '/web/my-tasks', '/web/projects', '/web/calendar',
+    '/web/workload', '/web/profile', '/web/search', '/web/attachments', '/web/task-attachments', '/web/api/',
+)
+
 _NO_COMPANY_PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>No company</title>
@@ -74,12 +82,14 @@ def page_for_account_without_company(path: str, user):
 
     Company pages assume a company. Without one they created users with no
     company (the super admin's Create User) and crashed on save, e.g. a chat
-    with no workspace_id. The super admin goes back to its own console, where
-    it can choose a company to work in.
+    with no workspace_id. The super admin keeps its own projects and tasks, and
+    goes back to its console for the rest, where it can choose a company to work in.
     """
     if not path.startswith('/web/') or path.startswith(_NO_COMPANY_PATHS):
         return None
     if user.is_superadmin:
+        if path.startswith(_SUPERADMIN_OWN_WORK_PATHS):
+            return None
         # The console is where it picks the company to work in
         return RedirectResponse('/web/superadmin?choose_company=1', status_code=303)
     return HTMLResponse(_NO_COMPANY_PAGE, status_code=403)

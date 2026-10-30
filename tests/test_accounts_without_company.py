@@ -12,23 +12,36 @@ import zipfile
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import SQLModel
 
+from app.core.database import apply_data_changes
 from app.core.tenant_backup import WorkspaceBackup
 from app.main import page_for_account_without_company
+from app.models.assignment import Assignment
 from app.models.chat import ChatMember
 from app.models.project import Project
+from app.models.task import Task
 from app.models.ticket import Ticket
 from app.models.user import User
 from app.models.workspace import Workspace
-from app.web.routes import web_chat_create, web_superadmin_assign_company, web_superadmin_work_in_company
+from app.web.routes import (
+    _board_projects,
+    _task_list_data,
+    web_chat_create,
+    web_dashboard_quick_task,
+    web_superadmin_assign_company,
+    web_superadmin_work_in_company,
+    web_task_add_time_log,
+    web_task_duplicate,
+)
 
 
 # --- which pages they can open ----------------------------------------------------------
 
-@pytest.mark.parametrize('path', ['/web/chats', '/web/admin/users/create', '/web/dashboard', '/web/tickets/5'])
+@pytest.mark.parametrize('path', ['/web/chats', '/web/admin/users/create', '/web/users/invite', '/web/tickets/5',
+                                  '/web/meetings', '/web/knowledge-base', '/web/templates'])
 def test_company_pages_send_the_super_admin_to_its_console(path):
     response = page_for_account_without_company(path, SimpleNamespace(is_superadmin=True))
     assert (response.status_code, response.headers['location']) == (303, '/web/superadmin?choose_company=1')
@@ -47,6 +60,16 @@ def test_other_accounts_without_a_company_get_told_why(path):
 def test_pages_that_need_no_company_stay_open(path):
     for is_superadmin in (True, False):
         assert page_for_account_without_company(path, SimpleNamespace(is_superadmin=is_superadmin)) is None
+
+
+@pytest.mark.parametrize('path', [
+    '/web/dashboard', '/web/dashboard/quick-task', '/web/tasks/list', '/web/tasks/22', '/web/tasks/create', '/web/my-tasks',
+    '/web/projects', '/web/projects/11', '/web/calendar', '/web/workload', '/web/activity', '/web/profile',
+    '/web/search', '/web/attachments/1/download', '/web/task-attachments/1/download', '/web/api/search',
+])
+def test_the_super_admin_keeps_its_own_work_without_a_company(path):
+    assert page_for_account_without_company(path, SimpleNamespace(is_superadmin=True)) is None
+    assert page_for_account_without_company(path, SimpleNamespace(is_superadmin=False)).status_code == 403,         'that is for the super admin only'
 
 
 # --- starting a chat ------------------------------------------------------------------------
@@ -220,3 +243,89 @@ async def test_company_backup_and_restore_leave_the_super_admin_alone(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM user WHERE username IN ('ada', 'bob')").fetchone() == (2,)
     finally:
         conn.close()
+
+
+# --- the super admin's own projects and tasks ------------------------------------------------
+
+async def _own_work(db, root):
+    """A project the super admin made with no company, and a task it set itself."""
+    mine = Project(name='My own work', owner_id=root.id)
+    db.add(mine)
+    await db.flush()
+    task = Task(title='Renew the domain', project_id=mine.id, creator_id=root.id)
+    db.add(task)
+    await db.flush()
+    db.add(Assignment(task_id=task.id, assignee_id=root.id))
+    await db.commit()
+    return mine, task
+
+
+def _session(user):
+    return SimpleNamespace(session={'user_id': user.id}, state=SimpleNamespace())
+
+
+async def _sees_its_work(db, root):
+    tasks, _, _ = await _task_list_data(db, root, None, None, None, None, None)
+    return ('My own work' in [p.name for p in await _board_projects(db, root)],
+            'Renew the domain' in [t.title for t in tasks])
+
+
+@pytest.mark.asyncio
+async def test_with_no_company_it_works_on_its_own_tasks(tmp_path):
+    """Quick add, duplicate and log time saved a learning record that needs a
+    company, so they failed where the rest of the page worked."""
+    engine, db, acme, p = await _seed(tmp_path / 'c.db')
+    try:
+        mine, task = await _own_work(db, p['root'])
+        assert await _sees_its_work(db, p['root']) == (True, True)
+
+        await web_dashboard_quick_task(
+            _session(p['root']), title='Quick one', project_id=mine.id, priority='medium', due_date=None,
+            customer_name=None, customer_surname=None, customer_email=None, customer_phone=None, db=db)
+        await web_task_duplicate(_session(p['root']), task.id, db=db)
+        await web_task_add_time_log(_session(p['root']), task.id, hours=1.5, description=None, db=db)
+
+        titles = (await db.execute(select(Task.title).where(Task.project_id == mine.id))).scalars().all()
+        assert 'Quick one' in titles and len(titles) == 3
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_its_own_work_comes_along_when_it_chooses_a_company(tmp_path):
+    engine, db, acme, p = await _seed(tmp_path / 'c.db')
+    try:
+        mine, _ = await _own_work(db, p['root'])
+        await _work_in(db, p['root'], str(acme.id))
+        await db.refresh(p['root'])
+        await db.refresh(mine)
+        assert mine.workspace_id == acme.id
+        assert await _sees_its_work(db, p['root']) == (True, True), 'there, in the company it chose'
+
+        stray = (await db.execute(select(Project).where(Project.name == 'Made while stray'))).scalar_one()
+        assert stray.workspace_id is None, "another account's work stays out of it"
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_super_admin_already_in_a_company_gets_its_work_back(tmp_path):
+    """Choosing a company used to leave its own projects behind, out of reach."""
+    engine, db, acme, p = await _seed(tmp_path / 'c.db')
+    try:
+        await _own_work(db, p['root'])
+        p['root'].workspace_id = acme.id
+        await db.commit()
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql('PRAGMA user_version = 2')
+            await apply_data_changes(conn)
+        rows = dict((await db.execute(text('SELECT name, workspace_id FROM project'))).all())
+        assert rows['My own work'] == acme.id and rows['Made while stray'] is None
+
+        await db.refresh(p['root'])
+        assert await _sees_its_work(db, p['root']) == (True, True)
+    finally:
+        await db.close()
+        await engine.dispose()
