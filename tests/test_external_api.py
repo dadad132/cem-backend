@@ -304,3 +304,59 @@ async def test_only_values_the_helpdesk_knows(api):
     assert body.get("ticket", body)["status"] != "banana"
     edge = await client.get("/api/v1/tickets", params={"updated_since": "0001-01-01T00:00:00+05:00"})
     assert edge.status_code == 400, "a time at the edge of the calendar is a bad request, not a crash"
+
+
+@pytest.mark.asyncio
+async def test_assigned_as_it_was_made(api):
+    """A ticket given a technician on the new-ticket form (or by an e-mail
+    rule) has no "assigned" entry; it was held from the moment it was made."""
+    client, db, acme, u, t, _ = api
+    made = Ticket(ticket_number="TKT-2026-07000", subject="Assigned at once", workspace_id=acme.id,
+                  created_by_id=u["ada"].id, assigned_to_id=u["bob"].id,
+                  created_at=_ago(days=1), updated_at=_ago(days=1))
+    passed_on = Ticket(ticket_number="TKT-2026-07001", subject="Then passed on", workspace_id=acme.id,
+                       created_by_id=u["ada"].id, assigned_to_id=u["ada"].id,
+                       created_at=_ago(days=1), updated_at=_ago(days=1))
+    db.add_all([made, passed_on])
+    await db.flush()
+    db.add(TicketHistory(ticket_id=passed_on.id, user_id=u["ada"].id, action="assigned",
+                         old_value=str(u["bob"].id), new_value=str(u["ada"].id), created_at=_ago(hours=3)))
+    await db.commit()
+    for number, ticket in (("TKT-2026-07000", made), ("TKT-2026-07001", passed_on)):
+        d = (await client.get(f"/api/v1/tickets/{number}")).json()
+        assert d["first_assigned_at"] == ticket.created_at.isoformat() + "+00:00", number
+    # Unassigned, then assigned: the time of that assignment, as before
+    busy = (await client.get("/api/v1/tickets/TKT-2026-05337")).json()
+    assert busy["first_assigned_at"] == (t["busy"].created_at + timedelta(minutes=30)).isoformat() + "+00:00"
+    assert (await client.get("/api/v1/tickets/TKT-2026-05673")).json()["first_assigned_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_customer_company_id_from_the_crm(api):
+    client, db, acme, u, _, _ = api
+    from app.models.company import Company
+    db.add(Company(name="  client  co ", workspace_id=acme.id, created_by=u["ada"].id))
+    await db.commit()
+    d = (await client.get("/api/v1/tickets/TKT-2026-05337")).json()
+    company = (await db.execute(sqlmodel_select(Company))).scalars().one()
+    assert d["customer"]["company"] == "Client Co" and d["customer"]["company_id"] == company.id
+    assert (await client.get("/api/v1/tickets/TKT-2026-05673")).json()["customer"]["company_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_comments_a_page_at_a_time(api):
+    client, db, _, u, t, _ = api
+    page = (await client.get("/api/v1/comments?limit=2")).json()
+    assert page["total"] == 3 and page["next_offset"] == 2
+    assert [c["body"] for c in page["comments"]] == ["It is broken again", "On my way"]
+    assert page["comments"][0]["ticket_number"] == "TKT-2026-05337"
+    assert page["comments"][0]["author"]["type"] == "customer"
+    with_notes = (await client.get("/api/v1/comments?include_internal=true")).json()
+    assert with_notes["total"] == 4
+    since = (t["busy"].created_at + timedelta(hours=3)).isoformat() + "Z"
+    assert [c["body"] for c in (await client.get(f"/api/v1/comments?since={since}")).json()["comments"]] == ["Fixed?"]
+    assert (await client.get("/api/v1/comments?ticket_number=TKT-2026-05673")).json()["total"] == 0
+    # Another company's comments never show
+    db.add(TicketComment(ticket_id=t["theirs"].id, user_id=u["olive"].id, content="theirs", created_at=NOW))
+    await db.commit()
+    assert "theirs" not in [c["body"] for c in (await client.get("/api/v1/comments?limit=1000")).json()["comments"]]

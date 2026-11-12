@@ -13,6 +13,8 @@ For a sync that only fetches what changed: GET /tickets?updated_since=...
 counts any comment, status change, reassignment or timer as a change, and
 returns the same fields as GET /tickets/{number}; add include=comments,
 history,time_entries for those too, so no call per ticket is needed.
+GET /comments pages through every ticket's comments, with since=... for
+only the new ones.
 """
 from __future__ import annotations
 
@@ -36,6 +38,7 @@ from app.core.team_overview import build_overview, project_counts
 from app.core.work_timer import TICKET_DONE_STATUSES, stop_timer, worked_seconds
 from app.models.api_key import APIKey
 from app.models.assignment import Assignment
+from app.models.company import Company
 from app.models.enums import TaskStatus
 from app.models.project import Project
 from app.models.task import Task
@@ -204,6 +207,39 @@ def _customer_name(t: Ticket) -> Optional[str]:
     return " ".join(p for p in (t.guest_name, t.guest_surname) if p) or t.guest_email or None
 
 
+def _company_key(name) -> str:
+    return " ".join((name or "").split()).casefold()
+
+
+async def _company_ids(db: AsyncSession, workspace_id: int, names) -> dict:
+    """{company name as typed on a ticket: CRM company id}. A ticket keeps
+    its customer's company as text; it has an id only when a CRM company of
+    the same name exists (ignoring case and spacing)."""
+    wanted = {_company_key(n) for n in names if _company_key(n)}
+    if not wanted:
+        return {}
+    found = {}
+    for company_id, name in (await db.execute(
+        select(Company.id, Company.name).where(Company.workspace_id == workspace_id)
+        .order_by(Company.id.asc())
+    )).all():
+        key = _company_key(name)
+        if key in wanted:
+            found.setdefault(key, company_id)   # two of the same name: the first made
+    return found
+
+
+def _comment_item(c: TicketComment, users: dict, customer: Optional[str]) -> dict:
+    return {
+        "id": c.id,
+        "author": ({"type": "staff", **_person(users, c.user_id)} if c.user_id
+                   else {"type": "customer", "id": None, "name": customer}),
+        "created_at": _utc(c.created_at),
+        "is_internal": c.is_internal,
+        "body": c.content,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tickets
 # ---------------------------------------------------------------------------
@@ -213,10 +249,11 @@ async def _ticket_context(db: AsyncSession, workspace, tickets: list, include: s
     """Everything the ticket fields need, fetched once for a whole page."""
     ids = [t.id for t in tickets]
     ctx = {"first_reply": {}, "last_comment": {}, "history": {}, "worked": {},
-           "entries": {}, "comments": {}, "projects": {}}
+           "entries": {}, "comments": {}, "projects": {}, "companies": {}}
     if not ids:
         ctx["users"] = {}
         return ctx
+    ctx["companies"] = await _company_ids(db, workspace.id, {t.guest_company for t in tickets})
 
     # The first reply the customer saw: a staff comment that is not a private note
     for ticket_id, user_id, created in (await db.execute(
@@ -287,6 +324,18 @@ def _origin(t: Ticket, history: list) -> tuple:
     return {"type": "system", "id": None, "name": None}, "system"
 
 
+def _first_assigned(t: Ticket, history: list) -> Optional[datetime]:
+    """When someone first held the ticket. A ticket given a technician as it
+    was made (on the new-ticket form, or by an e-mail rule) has no
+    "assigned" entry for that, so it was held from the moment it was made:
+    its first reassignment starts from a person, or it has none and has
+    someone now."""
+    moves = [h for h in history if h.action == "assigned"]
+    if (moves and str(moves[0].old_value or "").isdigit()) or (not moves and t.assigned_to_id):
+        return t.created_at
+    return next((h.created_at for h in moves if str(h.new_value or "").isdigit()), None)
+
+
 def _history_item(h: TicketHistory, users: dict) -> dict:
     def value(v):
         if h.action == "assigned":
@@ -328,8 +377,7 @@ def _ticket_to_dict(t: Ticket, ctx: Optional[dict] = None, zone=None, workspace=
             to_local(t.created_at, zone), to_local(first[0], zone),
             workspace.business_hours_start or "07:30", workspace.business_hours_end or "16:00",
             workspace.business_hours_exclude_weekends), 2)
-    assigned = [h.created_at for h in history
-                if h.action == "assigned" and h.new_value and str(h.new_value).isdigit()]
+    first_assigned = _first_assigned(t, history)
     reopened = sum(1 for h in history if h.action == "status_changed"
                    and h.old_value in TICKET_DONE_STATUSES and h.new_value not in TICKET_DONE_STATUSES)
     activity = [t.updated_at, t.created_at, ctx["last_comment"].get(t.id),
@@ -339,7 +387,8 @@ def _ticket_to_dict(t: Ticket, ctx: Optional[dict] = None, zone=None, workspace=
     is_open = t.status not in TICKET_DONE_STATUSES and not t.is_archived
     data.update({
         "customer": {"name": t.guest_name, "surname": t.guest_surname, "email": t.guest_email,
-                     "phone": t.guest_phone, "company": t.guest_company, "company_id": None,
+                     "phone": t.guest_phone, "company": t.guest_company,
+                     "company_id": ctx["companies"].get(_company_key(t.guest_company)),
                      "branch": t.guest_branch, "office_number": t.guest_office_number},
         "assigned_to": _person(users, t.assigned_to_id),
         "created_by": creator,
@@ -349,7 +398,7 @@ def _ticket_to_dict(t: Ticket, ctx: Optional[dict] = None, zone=None, workspace=
         "first_reply_at": _utc(first[0]) if first else None,
         "first_reply_by": _person(users, first[1]) if first else None,
         "first_reply_business_hours": first_hours,
-        "first_assigned_at": _utc(assigned[0]) if assigned else None,
+        "first_assigned_at": _utc(first_assigned),
         "resolved_at": _utc(t.resolved_at),
         "closed_by": _person(users, t.closed_by_id),
         "close_reason": t.closing_notes or None,
@@ -369,14 +418,7 @@ def _ticket_to_dict(t: Ticket, ctx: Optional[dict] = None, zone=None, workspace=
     })
     if "comments" in include:
         customer = _customer_name(t)
-        data["comments"] = [{
-            "id": c.id,
-            "author": ({"type": "staff", **_person(users, c.user_id)} if c.user_id
-                       else {"type": "customer", "id": None, "name": customer}),
-            "created_at": _utc(c.created_at),
-            "is_internal": c.is_internal,
-            "body": c.content,
-        } for c in ctx["comments"].get(t.id, [])]
+        data["comments"] = [_comment_item(c, users, customer) for c in ctx["comments"].get(t.id, [])]
     if "history" in include:
         data["history"] = [_history_item(h, users) for h in history]
     if "time_entries" in include:
@@ -615,6 +657,47 @@ async def update_ticket(
     await db.commit()
     await db.refresh(ticket)
     return JSONResponse(_ticket_to_dict(ticket))
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/comments
+# ---------------------------------------------------------------------------
+
+@router.get("/comments")
+async def list_comments(
+    since: Optional[str] = Query(None, description="Only comments written since this time"),
+    ticket_number: Optional[str] = Query(None, description="Only this ticket's comments"),
+    include_internal: bool = Query(False, description="Also private notes"),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    auth=Depends(require_api_key),
+    db: AsyncSession = Depends(get_session),
+):
+    """Comments on your workspace's tickets, oldest first, a page at a time.
+    Comments are never edited, so a sync can ask only for those since the
+    newest it already has."""
+    _, workspace = auth
+    conditions = [Ticket.workspace_id == workspace.id]
+    written = _since(since, "since")
+    if written:
+        conditions.append(TicketComment.created_at >= written)
+    if ticket_number:
+        conditions.append(Ticket.ticket_number == ticket_number)
+    if not include_internal:
+        conditions.append(TicketComment.is_internal == False)
+    where = and_(*conditions)
+    total = await db.scalar(
+        select(func.count()).select_from(TicketComment)
+        .join(Ticket, Ticket.id == TicketComment.ticket_id).where(where)) or 0
+    rows = (await db.execute(
+        select(TicketComment, Ticket).join(Ticket, Ticket.id == TicketComment.ticket_id)
+        .where(where).order_by(TicketComment.created_at.asc(), TicketComment.id.asc())
+        .offset(offset).limit(limit)
+    )).all()
+    users = await _users(db, workspace.id, {c.user_id for c, _ in rows})
+    return JSONResponse({**_page(rows, total, limit, offset), "comments": [
+        {**_comment_item(c, users, _customer_name(t)), "ticket_id": t.id, "ticket_number": t.ticket_number}
+        for c, t in rows]})
 
 
 # ---------------------------------------------------------------------------
