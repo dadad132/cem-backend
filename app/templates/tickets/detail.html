@@ -359,7 +359,8 @@
                     
                     <div class="flex flex-wrap justify-between items-center gap-3 mt-3">
                         <label class="flex items-center gap-2 text-sm text-gray-700">
-                            <input type="checkbox" name="is_internal" value="true" class="rounded">
+                            <!-- Ticked by default, so nothing reaches the customer by accident -->
+                            <input type="checkbox" name="is_internal" value="true" class="rounded" checked>
                             <span>Internal comment (only visible to team)</span>
                         </label>
                         
