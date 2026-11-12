@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import SQLModel
+from sqlmodel import select as sqlmodel_select
 
 from app.api.routes import external
 from app.core.database import get_session
@@ -274,3 +275,32 @@ async def test_overview_matches_the_page(api):
     assert set(data["last_7_days"]) == {"tickets_in", "tickets_done", "replies", "tasks_done", "backlog_change"}
     on_timer = [p for p in data["team"] if p["working_on"]][0]
     assert on_timer["working_on"]["since"].endswith("+00:00")
+
+
+@pytest.mark.asyncio
+async def test_new_tickets_get_a_free_number_whatever_the_company(api):
+    """Numbers are unique across companies. Counting this company's tickets
+    gave a number another company (or a deleted ticket) already had."""
+    client, db, *_ = api
+    prefix = f"TKT-{datetime.utcnow().year}-"
+    taken = (await db.execute(sqlmodel_select(Ticket.ticket_number))).scalars().all()
+    highest = max((int(n[len(prefix):]) for n in taken if n.startswith(prefix)), default=0)
+    first = await client.post("/api/v1/tickets", json={"subject": "From the monitor"})
+    second = await client.post("/api/v1/tickets", json={"subject": "And another"})
+    assert (first.status_code, second.status_code) == (201, 201)
+    assert [first.json()["ticket_number"], second.json()["ticket_number"]] == \
+        [f"{prefix}{highest + 1:05d}", f"{prefix}{highest + 2:05d}"]
+
+
+@pytest.mark.asyncio
+async def test_only_values_the_helpdesk_knows(api):
+    """Any text was saved as a status, and then counted as open for good."""
+    client, *_ = api
+    for body in ({"status": "banana"}, {"priority": "whenever"}):
+        assert (await client.patch("/api/v1/tickets/TKT-2026-05337", json=body)).status_code == 422, body
+    assert (await client.post("/api/v1/tickets", json={"subject": ""})).status_code == 422
+    assert (await client.post("/api/v1/tickets", json={"subject": "x", "priority": "asap"})).status_code == 422
+    body = (await client.get("/api/v1/tickets/TKT-2026-05337")).json()
+    assert body.get("ticket", body)["status"] != "banana"
+    edge = await client.get("/api/v1/tickets", params={"updated_since": "0001-01-01T00:00:00+05:00"})
+    assert edge.status_code == 400, "a time at the edge of the calendar is a bad request, not a crash"

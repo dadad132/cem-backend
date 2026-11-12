@@ -19,12 +19,13 @@ from __future__ import annotations
 import hashlib
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, exists, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -77,9 +78,12 @@ async def require_api_key(
     if not workspace:
         raise HTTPException(status_code=401, detail="Workspace not found")
 
-    # Update last_used timestamp
-    api_key.last_used_at = datetime.utcnow()
-    await db.commit()
+    # A dashboard calls every few seconds: note the use at most every few
+    # minutes, rather than writing to the database on every call
+    now = datetime.utcnow()
+    if not api_key.last_used_at or now - api_key.last_used_at > timedelta(minutes=5):
+        api_key.last_used_at = now
+        await db.commit()
 
     return api_key, workspace
 
@@ -88,22 +92,27 @@ async def require_api_key(
 # Schemas
 # ---------------------------------------------------------------------------
 
+# Only the values the helpdesk knows: anything else would count as open forever
+TicketStatusValue = Literal["open", "in_progress", "waiting", "resolved", "closed"]
+TicketPriorityValue = Literal["low", "medium", "high", "urgent"]
+
+
 class TicketCreateRequest(BaseModel):
-    subject: str
-    description: Optional[str] = None
-    priority: Optional[str] = "medium"   # low | medium | high | urgent
-    category: Optional[str] = "general"
-    guest_name: Optional[str] = None
-    guest_surname: Optional[str] = None
-    guest_email: Optional[str] = None
-    guest_phone: Optional[str] = None
-    guest_company: Optional[str] = None
+    subject: str = Field(min_length=1, max_length=500)
+    description: Optional[str] = Field(None, max_length=50000)
+    priority: Optional[TicketPriorityValue] = "medium"
+    category: Optional[str] = Field("general", max_length=50)
+    guest_name: Optional[str] = Field(None, max_length=200)
+    guest_surname: Optional[str] = Field(None, max_length=200)
+    guest_email: Optional[str] = Field(None, max_length=254)
+    guest_phone: Optional[str] = Field(None, max_length=50)
+    guest_company: Optional[str] = Field(None, max_length=200)
 
 
 class TicketUpdateRequest(BaseModel):
-    status: Optional[str] = None   # open | in_progress | waiting | resolved | closed
-    priority: Optional[str] = None
-    category: Optional[str] = None
+    status: Optional[TicketStatusValue] = None
+    priority: Optional[TicketPriorityValue] = None
+    category: Optional[str] = Field(None, max_length=50)
 
 
 # ---------------------------------------------------------------------------
@@ -144,11 +153,11 @@ def _since(value: Optional[str], name: str) -> Optional[datetime]:
         text = text[:-1] + "+00:00"
     try:
         moment = datetime.fromisoformat(text)
-    except ValueError:
+        if moment.tzinfo is not None:
+            moment = moment.astimezone(timezone.utc).replace(tzinfo=None)
+    except (ValueError, OverflowError):  # (OverflowError: a time at the edge of the calendar)
         raise HTTPException(status_code=400,
                             detail=f"{name}: use an ISO 8601 time, like 2026-11-11T04:56:01Z")
-    if moment.tzinfo is not None:
-        moment = moment.astimezone(timezone.utc).replace(tzinfo=None)
     return moment
 
 
@@ -434,7 +443,7 @@ async def list_tickets(
     if assigned_to:
         if assigned_to.strip().lower() == "none":
             conditions.append(Ticket.assigned_to_id.is_(None))
-        elif assigned_to.strip().isdigit():
+        elif assigned_to.strip().isdecimal():
             conditions.append(Ticket.assigned_to_id == int(assigned_to))
         else:
             raise HTTPException(status_code=400, detail="assigned_to: a user id, or 'none'")
@@ -509,38 +518,48 @@ async def create_ticket(
     """Create a new ticket in your workspace."""
     _, workspace = auth
 
-    # Generate ticket number
-    count = (
-        await db.execute(
-            select(Ticket).where(Ticket.workspace_id == workspace.id)
+    for attempt in range(3):
+        ticket = Ticket(
+            workspace_id=workspace.id,
+            ticket_number=await _next_ticket_number(db),
+            subject=payload.subject,
+            description=payload.description,
+            priority=payload.priority or "medium",
+            category=payload.category or "general",
+            status="open",
+            is_guest=True,
+            guest_name=payload.guest_name,
+            guest_surname=payload.guest_surname,
+            guest_email=payload.guest_email,
+            guest_phone=payload.guest_phone,
+            guest_company=payload.guest_company,
+            created_at=datetime.utcnow(),
         )
-    ).scalars().all()
-    year = datetime.utcnow().year
-    ticket_number = f"TKT-{year}-{(len(count) + 1):05d}"
-
-    ticket = Ticket(
-        workspace_id=workspace.id,
-        ticket_number=ticket_number,
-        subject=payload.subject,
-        description=payload.description,
-        priority=payload.priority or "medium",
-        category=payload.category or "general",
-        status="open",
-        is_guest=True,
-        guest_name=payload.guest_name,
-        guest_surname=payload.guest_surname,
-        guest_email=payload.guest_email,
-        guest_phone=payload.guest_phone,
-        guest_company=payload.guest_company,
-        created_at=datetime.utcnow(),
-    )
-    db.add(ticket)
-    await db.flush()
+        db.add(ticket)
+        try:
+            await db.flush()
+            break
+        except IntegrityError:  # someone took that number at the same moment
+            await db.rollback()
+            if attempt == 2:
+                raise HTTPException(status_code=409, detail="Could not give the ticket a number; try again")
     # Marks it as made by a program, so its origin reads "system"
     db.add(TicketHistory(ticket_id=ticket.id, action="created", new_value="api"))
     await db.commit()
     await db.refresh(ticket)
     return JSONResponse(_ticket_to_dict(ticket), status_code=201)
+
+
+async def _next_ticket_number(db: AsyncSession) -> str:
+    """The next free ticket number. Numbers are unique across every company,
+    so take the highest of the year anywhere, as the e-mail importer does
+    (counting this company's tickets reused numbers and failed)."""
+    prefix = f"TKT-{datetime.utcnow().year}-"
+    numbers = (await db.execute(
+        select(Ticket.ticket_number).where(Ticket.ticket_number.like(f"{prefix}%"))
+    )).scalars().all()
+    highest = max((int(n[len(prefix):]) for n in numbers if n[len(prefix):].isdecimal()), default=0)
+    return f"{prefix}{highest + 1:05d}"
 
 
 # ---------------------------------------------------------------------------
@@ -644,7 +663,7 @@ async def list_tasks(
     if assignee_id:
         if assignee_id.strip().lower() == "none":
             conditions.append(~exists().where(Assignment.task_id == Task.id))
-        elif assignee_id.strip().isdigit():
+        elif assignee_id.strip().isdecimal():
             conditions.append(exists().where(Assignment.task_id == Task.id,
                                              Assignment.assignee_id == int(assignee_id)))
         else:
