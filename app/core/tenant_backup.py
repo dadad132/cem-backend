@@ -105,6 +105,7 @@ TENANT_SCOPE: Dict[str, Tuple] = {
     'milestone': ('via', 'project', 'project_id'),
     'notification': ('via', 'user', 'user_id'),
     'project_member': ('via', 'project', 'project_id'),
+    'projectweeklyreport': ('via', 'project', 'project_id'),
     'recurringtask': ('via', 'project', 'project_id'),
     'recurringtaskinstance': ('via', 'recurringtask', 'recurring_task_id'),
     'subtask': ('via', 'task', 'task_id'),

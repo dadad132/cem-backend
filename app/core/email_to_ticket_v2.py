@@ -1127,7 +1127,7 @@ class EmailToTicketService:
                                     if addr:
                                         all_recipient_emails.add(addr.lower())
                         is_to_self = bool(own_addresses & all_recipient_emails)
-                        if is_from_self and not is_to_self:
+                        if (is_from_self and not is_to_self) or msg.get('X-CEM-Report'):  # (our own weekly report: never a ticket)
                             print(f"[IMAP] ⏭️ SKIPPING: Outgoing reply from our address ({sender_email}) to external ({to_email})")
                             _syslog('INFO', 'IMAP', 'Skipped own outgoing email', f'From={sender_email}')
                             await self.mark_email_processed(fresh_db, message_id, sender_email,
@@ -2037,7 +2037,7 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                                 if addr:
                                     all_recipient_emails.add(addr.lower())
                     is_to_self = bool(own_addresses & all_recipient_emails)
-                    if is_from_self and not is_to_self:
+                    if (is_from_self and not is_to_self) or msg.get('X-CEM-Report'):  # (our own weekly report: never a ticket)
                         print(f"[Email Account] ⏭️ SKIPPING: Email sent from our own address ({sender_email_addr}) to external recipient ({to_email_addr})")
                         _syslog('INFO', 'Email Account', 'Skipped own outgoing email', f'From={sender_email_addr}', workspace_id)
                         processed = ProcessedMail(

@@ -569,6 +569,14 @@ async def lifespan(app):  # FastAPI lifespan
         logger.info("✅ Data retention scheduler started")
     except Exception as e:
         logger.warning(f"⚠️  Data retention scheduler not started: {e}")
+
+    # Weekly report to each Board View project with a linked e-mail, Mondays 08:00
+    try:
+        from app.core.project_weekly_report import start_weekly_report_scheduler
+        asyncio.create_task(start_weekly_report_scheduler())
+        logger.info("✅ Weekly project report scheduler started")
+    except Exception as e:
+        logger.warning(f"⚠️  Weekly project report scheduler not started: {e}")
     
     yield
     

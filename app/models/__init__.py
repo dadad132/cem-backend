@@ -2,6 +2,7 @@ from .workspace import Workspace
 from .user import User
 from .project import Project
 from .project_member import ProjectMember
+from .project_report import ProjectWeeklyReport
 from .task import Task
 from .subtask import Subtask
 from .comment import Comment
