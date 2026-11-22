@@ -147,6 +147,20 @@
             <span class="sm:hidden">User</span>
           </a>
         </div>
+        <!-- Admin-only project scope for this dashboard. Unchecked means all
+             company projects; checked means only projects assigned to this
+             admin. The choice is remembered on the user's account. -->
+        <form method="get" action="/web/dashboard" class="flex items-center gap-2 bg-slate-700/50 rounded-lg px-3 py-2">
+          <input type="hidden" name="assigned_only" value="0">
+          {% if view and view != 'personal' %}<input type="hidden" name="view" value="{{ view }}">{% endif %}
+          {% if selected_user %}<input type="hidden" name="user_id" value="{{ selected_user.id }}">{% endif %}
+          <label for="assigned-only-toggle" class="text-sm font-medium text-slate-200 cursor-pointer whitespace-nowrap">Only my assigned projects</label>
+          <input type="checkbox" id="assigned-only-toggle" name="assigned_only" value="1"
+                 class="h-4 w-4 rounded border-slate-400 text-blue-500 focus:ring-blue-400"
+                 {% if assigned_only %}checked{% endif %}
+                 onchange="this.form.submit()">
+          <button type="submit" class="px-2 py-1 bg-white/10 hover:bg-white/20 text-slate-100 text-xs rounded">Apply</button>
+        </form>
         {% endif %}
         <a href="/web/tasks/list" class="px-4 py-2 bg-white text-slate-900 rounded-lg font-medium hover:bg-slate-100 transition">
           View All Tasks

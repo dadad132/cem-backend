@@ -101,6 +101,8 @@ async def init_models() -> None:
                 ("task", "close_type", "VARCHAR"),
                 ("workspace", "timezone", "VARCHAR"),
                 ("workspace", "comment_timezone", "VARCHAR"),
+                ("user", "dashboard_assigned_only", "BOOLEAN NOT NULL DEFAULT 0"),
+                ("user", "default_landing_page", "VARCHAR"),
             ):
                 try:
                     res = await conn.exec_driver_sql(f'PRAGMA table_info("{table}")')
@@ -168,10 +170,50 @@ async def ensure_initialized() -> None:
         _initialized = True
 
 
+def ensure_user_preference_columns() -> None:
+    """Add the web-only user preferences to an existing data.db at startup.
+
+    init_models() already does this for every SQLite engine (tests, scripts and
+    workers included). Real startups also run against a long-lived data.db that
+    predates these columns, so keep the same guarded ALTER there as well. Both
+    PRAGMA checks make this a no-op on databases that are already current.
+    """
+    try:
+        import sqlite3
+        from pathlib import Path
+
+        db_path = Path("data.db")
+        if not db_path.exists():
+            return
+        conn = sqlite3.connect(str(db_path), timeout=30)
+        try:
+            cols = {row[1] for row in conn.execute('PRAGMA table_info("user")')}
+            if not cols:
+                return
+            for column, ddl in (
+                ("dashboard_assigned_only", "BOOLEAN NOT NULL DEFAULT 0"),
+                ("default_landing_page", "VARCHAR"),
+            ):
+                if column not in cols:
+                    conn.execute(f'ALTER TABLE "user" ADD COLUMN {column} {ddl}')
+                    conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        # A locked or read-only file must not stop the server from starting;
+        # init_models() reports schema problems through the normal log path.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            f"Could not migrate user preference columns: {exc}"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app):  # FastAPI lifespan
     # Initialize database
     await init_models()
+    ensure_user_preference_columns()
     
     # Setup graceful shutdown handlers
     from app.core.shutdown import shutdown_handler

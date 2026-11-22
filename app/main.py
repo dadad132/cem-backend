@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 # restart trigger: updated timestamp
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -6,11 +6,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from starlette.middleware.sessions import SessionMiddleware
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 import os
 
 from app.core.config import get_settings
-from app.core.database import lifespan
+from app.core.database import get_session, lifespan
 from app.api.routes import auth as auth_routes
 from app.api.routes import users as users_routes
 from app.api.routes import projects as projects_routes
@@ -233,7 +234,23 @@ app.include_router(web_routes.router, prefix="/web")
 
 # Minimal server-rendered pages
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+async def index(request: Request, db: AsyncSession = Depends(get_session)):
+    # A signed-in user skips the public landing page and goes straight to
+    # their saved tab. Guards match the login route so nobody lands somewhere
+    # they are not allowed to be.
+    user_id = request.session.get('user_id')
+    if user_id:
+        user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        if not user or not user.is_active:
+            request.session.clear()
+        else:
+            from app.web.routes import safe_landing_page
+
+            if user.is_superadmin:
+                return RedirectResponse('/web/superadmin', status_code=303)
+            if not user.profile_completed:
+                return RedirectResponse('/web/profile/complete', status_code=303)
+            return RedirectResponse(safe_landing_page(user.default_landing_page), status_code=303)
     # Get workspace from request state (added by middleware)
     workspace = getattr(request.state, 'workspace', None)
     # Render the landing page template

@@ -72,6 +72,29 @@ from jinja2 import pass_context
 BASE_DIR = Path(__file__).resolve().parents[1]
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
 
+# The tabs a user may choose as their landing page. These are the real paths
+# from base.html. A submitted value must match one exactly: never redirect to
+# a URL assembled from user input (that would be an open redirect).
+LANDING_PAGE_OPTIONS = (
+    ('/web/dashboard', 'Dashboard'),
+    ('/web/activity', 'Activity Feed'),
+    ('/web/tasks/list', 'All Tasks'),
+    ('/web/projects', 'Board View'),
+    ('/web/calendar', 'Calendar'),
+    ('/web/tickets', 'Support Tickets'),
+    ('/web/chats', 'Chat'),
+)
+DEFAULT_LANDING_PAGE = LANDING_PAGE_OPTIONS[0][0]
+_LANDING_PAGE_PATHS = frozenset(path for path, _ in LANDING_PAGE_OPTIONS)
+
+
+def safe_landing_page(value: Optional[str]) -> str:
+    """Return a known internal tab, or the dashboard for anything else."""
+    if isinstance(value, str) and value in _LANDING_PAGE_PATHS:
+        return value
+    return DEFAULT_LANDING_PAGE
+
+
 # Store original TemplateResponse
 _original_template_response = templates.TemplateResponse
 
@@ -309,6 +332,7 @@ async def web_login_post(
     request: Request,
     username: str = Form(...),
     password: str = Form(...),
+    next_url: Optional[str] = Form(None, alias='next'),
     db: AsyncSession = Depends(get_session),
 ):
     result = await db.execute(select(User).where(User.username == username))
@@ -328,7 +352,11 @@ async def web_login_post(
     # Redirect to profile completion if not completed
     if not user.profile_completed:
         return RedirectResponse('/web/profile/complete', status_code=303)
-    return RedirectResponse('/web/dashboard', status_code=303)
+    # An explicit next only counts when it is one of our own tabs; otherwise
+    # use the user's saved landing page. Both go through the same allowlist.
+    landing = (next_url if next_url in _LANDING_PAGE_PATHS
+               else safe_landing_page(user.default_landing_page))
+    return RedirectResponse(landing, status_code=303)
 
 
 @router.get('/signup', response_class=HTMLResponse)
@@ -442,7 +470,12 @@ async def web_profile(request: Request, db: AsyncSession = Depends(get_session))
     if not user or not user.is_active:
         request.session.clear()
         return RedirectResponse('/web/login', status_code=303)
-    return templates.TemplateResponse('auth/profile.html', {'request': request, 'user': user})
+    return templates.TemplateResponse('auth/profile.html', {
+        'request': request,
+        'user': user,
+        'landing_page_choices': LANDING_PAGE_OPTIONS,
+        'default_landing_page': DEFAULT_LANDING_PAGE,
+    })
 
 
 @router.post('/profile')
@@ -453,6 +486,7 @@ async def web_profile_post(
     preferred_meeting_platform: Optional[str] = Form(None),
     calendar_color: Optional[str] = Form(None),
     mute_ticket_notifications: Optional[str] = Form(None),
+    default_landing_page: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_session),
 ):
     user_id = request.session.get('user_id')
@@ -470,7 +504,9 @@ async def web_profile_post(
             return templates.TemplateResponse('auth/profile.html', {
                 'request': request, 
                 'user': user, 
-                'error': 'Email already in use'
+                'error': 'Email already in use',
+                'landing_page_choices': LANDING_PAGE_OPTIONS,
+                'default_landing_page': DEFAULT_LANDING_PAGE,
             }, status_code=400)
     
     user.full_name = full_name
@@ -490,12 +526,18 @@ async def web_profile_post(
     # profile (without the checkbox) used to unmute them.
     if user.is_admin:
         user.mute_ticket_notifications = mute_ticket_notifications == 'true'
-    
+
+    # A tampered or external value is stored as the dashboard, never as a
+    # redirect target. None means the browser omitted the select entirely.
+    user.default_landing_page = safe_landing_page(default_landing_page)
+
     await db.commit()
     return templates.TemplateResponse('auth/profile.html', {
         'request': request, 
         'user': user, 
-        'success': 'Profile updated successfully'
+        'success': 'Profile updated successfully',
+        'landing_page_choices': LANDING_PAGE_OPTIONS,
+        'default_landing_page': DEFAULT_LANDING_PAGE,
     })
 
 
@@ -693,6 +735,67 @@ async def web_google_oauth_unlink(request: Request, db: AsyncSession = Depends(g
 # --------------------------
 # Dashboard
 # --------------------------
+def _admin_assigned_only(request: Request, user: User) -> tuple[bool, Optional[str]]:
+    """The admin's requested project scope and the raw query value (if any).
+
+    The toggle is a GET form with a hidden 0 before the checkbox's 1, so the
+    last submitted value is the one that counts. Non-admins get no say in the
+    matter: their scope is always their own assignments, and the returned flag
+    stays False so the admin-only control is never shown to them.
+    """
+    if not user.is_admin:
+        return False, None
+    query = getattr(request, 'query_params', None)
+    values = []
+    if query is not None:
+        getlist = getattr(query, 'getlist', None)
+        if callable(getlist):
+            values = getlist('assigned_only')
+        elif hasattr(query, 'get'):
+            values = [query.get('assigned_only')]
+    raw = values[-1] if values else None
+    if raw in ('0', '1'):
+        return raw == '1', raw
+    return bool(getattr(user, 'dashboard_assigned_only', False)), None
+
+
+async def _dashboard_projects(db: AsyncSession, user: User,
+                              assigned_only: Optional[bool] = None):
+    """The non-archived projects in this dashboard's scope.
+
+    Shared with the Work Timers panel so its 30-second HTMX refresh cannot
+    silently widen the scope back to the whole company.
+    """
+    from app.models.project_member import ProjectMember
+
+    if assigned_only is None:
+        assigned_only = bool(user.dashboard_assigned_only) if user.is_admin else False
+    if assigned_only or not user.is_admin:
+        member_result = await db.execute(
+            select(ProjectMember.project_id)
+            .join(Project, Project.id == ProjectMember.project_id)
+            .where(
+                ProjectMember.user_id == user.id,
+                Project.workspace_id == user.workspace_id,
+            )
+        )
+        member_ids = [row[0] for row in member_result.fetchall()]
+        result = await db.execute(
+            select(Project).where(
+                Project.id.in_(member_ids),
+                Project.workspace_id == user.workspace_id,
+                Project.is_archived == False,
+            )
+        )
+    else:
+        result = await db.execute(
+            select(Project).where(
+                Project.workspace_id == user.workspace_id, Project.is_archived == False
+            )
+        )
+    return assigned_only, result.scalars().all()
+
+
 @router.get('/dashboard', response_class=HTMLResponse)
 async def web_dashboard(request: Request, view: Optional[str] = None, user_id: Optional[int] = None, db: AsyncSession = Depends(get_session)):
     """Main dashboard with stats and overview"""
@@ -718,31 +821,29 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
     today = local_today(zone)
     week_ago = today - timedelta(days=7)
     
-    # Get user's projects (admin sees all, user sees assigned)
-    if user.is_admin:
-        projects_result = await db.execute(
-            select(Project)
-            .where(Project.workspace_id == user.workspace_id, Project.is_archived == False)
-        )
-        projects = projects_result.scalars().all()
-        project_ids = [p.id for p in projects]
-    else:
-        member_result = await db.execute(
-            select(ProjectMember.project_id)
-            .where(ProjectMember.user_id == current_user_id)
-        )
-        project_ids = [r[0] for r in member_result.fetchall()]
-        projects_result = await db.execute(
-            select(Project)
-            .where(Project.id.in_(project_ids), Project.is_archived == False)
-        )
-        projects = projects_result.scalars().all()
+    # Project scope: an admin may widen it to the whole company, but only by
+    # explicit choice. Everyone else is always limited to assigned projects in
+    # their own company — even if they send ?assigned_only=0 themselves.
+    assigned_only, requested_scope = _admin_assigned_only(request, user)
+    if requested_scope is not None and assigned_only != bool(user.dashboard_assigned_only):
+        user.dashboard_assigned_only = assigned_only
+        await db.commit()
+    assigned_only, projects = await _dashboard_projects(db, user, assigned_only)
+    # Every project-scoped card and activity query uses this one list.
+    project_ids = [p.id for p in projects]
     
-    # My Tasks stats
+    # My Tasks stats. Project scope matters here too: a stray membership row
+    # pointing at another company's project must not leak its tasks.
     my_tasks_result = await db.execute(
         select(Task)
         .join(Assignment, Task.id == Assignment.task_id)
-        .where(Assignment.assignee_id == current_user_id, Task.status != TaskStatus.done)
+        .join(Project, Task.project_id == Project.id)
+        .where(
+            Assignment.assignee_id == current_user_id,
+            Task.status != TaskStatus.done,
+            Project.workspace_id == user.workspace_id,
+            Task.project_id.in_(project_ids),
+        )
     )
     my_tasks = my_tasks_result.scalars().all()
     
@@ -751,10 +852,13 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
         select(func.count())
         .select_from(Task)
         .join(Assignment, Task.id == Assignment.task_id)
+        .join(Project, Task.project_id == Project.id)
         .where(
             Assignment.assignee_id == current_user_id,
             Task.status == TaskStatus.done,
-            Task.archived_at >= day_start_utc(week_ago, zone)
+            Task.archived_at >= day_start_utc(week_ago, zone),
+            Project.workspace_id == user.workspace_id,
+            Task.project_id.in_(project_ids),
         )
     )
     my_tasks_done = my_done_result.scalar() or 0
@@ -768,7 +872,9 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
             Assignment.assignee_id == current_user_id,
             Task.status != TaskStatus.done,
             Task.due_date.isnot(None),
-            Task.due_date <= today + timedelta(days=7)
+            Task.due_date <= today + timedelta(days=7),
+            Project.workspace_id == user.workspace_id,
+            Task.project_id.in_(project_ids),
         )
         .order_by(Task.due_date)
     )
@@ -848,7 +954,10 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
         .join(Project, Task.project_id == Project.id)
         .where(
             TaskHistory.editor_id == current_user_id,
-            Task.project_id.in_(project_ids) if project_ids else True
+            Project.workspace_id == user.workspace_id,
+            # No truthiness fallback: an empty scope must show nothing, not
+            # every project the user happened to touch in another company.
+            Task.project_id.in_(project_ids),
         )
         .order_by(TaskHistory.created_at.desc())
         .limit(10)
@@ -890,7 +999,8 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
             Assignment.assignee_id == current_user_id,
             Task.creator_id != current_user_id,  # Not created by me
             Task.status != TaskStatus.done,
-            Project.workspace_id == user.workspace_id
+            Project.workspace_id == user.workspace_id,
+            Task.project_id.in_(project_ids),
         )
         .order_by(Task.created_at.desc())
         .limit(5)
@@ -918,7 +1028,8 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
             Task.creator_id == current_user_id,
             Assignment.assignee_id != current_user_id,  # Assigned to someone else
             Task.status != TaskStatus.done,
-            Project.workspace_id == user.workspace_id
+            Project.workspace_id == user.workspace_id,
+            Task.project_id.in_(project_ids),
         )
         .order_by(Task.created_at.desc())
         .limit(5)
@@ -945,7 +1056,8 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
             Assignment.assignee_id == current_user_id,
             Task.status != TaskStatus.done,
             Task.due_date < today,
-            Project.workspace_id == user.workspace_id
+            Project.workspace_id == user.workspace_id,
+            Task.project_id.in_(project_ids),
         )
         .order_by(Task.due_date.asc())
         .limit(20)
@@ -1075,7 +1187,12 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
                         select(func.count())
                         .select_from(Task)
                         .join(Assignment, Task.id == Assignment.task_id)
-                        .where(Assignment.assignee_id == user_id, Task.status != TaskStatus.done)
+                        .join(Project, Task.project_id == Project.id)
+                        .where(
+                            Assignment.assignee_id == user_id,
+                            Task.status != TaskStatus.done,
+                            Project.workspace_id == user.workspace_id,
+                        )
                     )
                     su_open_tasks = su_tasks_result.scalar() or 0
                     
@@ -1084,10 +1201,12 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
                         select(func.count())
                         .select_from(Task)
                         .join(Assignment, Task.id == Assignment.task_id)
+                        .join(Project, Task.project_id == Project.id)
                         .where(
                             Assignment.assignee_id == user_id,
                             Task.status == TaskStatus.done,
-                            Task.archived_at >= day_start_utc(week_ago, zone)
+                            Task.archived_at >= day_start_utc(week_ago, zone),
+                            Project.workspace_id == user.workspace_id,
                         )
                     )
                     su_done_tasks = su_done_result.scalar() or 0
@@ -1099,7 +1218,8 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
                         .where(
                             Ticket.assigned_to_id == user_id,
                             Ticket.status.in_(['open', 'in_progress', 'waiting']),
-                            Ticket.is_archived == False
+                            Ticket.is_archived == False,
+                            Ticket.workspace_id == user.workspace_id,
                         )
                     )
                     su_open_tickets = su_tickets_result.scalar() or 0
@@ -1109,10 +1229,12 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
                         select(func.count())
                         .select_from(Task)
                         .join(Assignment, Task.id == Assignment.task_id)
+                        .join(Project, Task.project_id == Project.id)
                         .where(
                             Assignment.assignee_id == user_id,
                             Task.status != TaskStatus.done,
-                            Task.due_date < today
+                            Task.due_date < today,
+                            Project.workspace_id == user.workspace_id,
                         )
                     )
                     su_overdue_tasks = su_overdue_result.scalar() or 0
@@ -1121,7 +1243,11 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
                     su_projects_result = await db.execute(
                         select(Project)
                         .join(ProjectMember, Project.id == ProjectMember.project_id)
-                        .where(ProjectMember.user_id == user_id, Project.is_archived == False)
+                        .where(
+                            ProjectMember.user_id == user_id,
+                            Project.is_archived == False,
+                            Project.workspace_id == user.workspace_id,
+                        )
                     )
                     selected_user_projects = su_projects_result.scalars().all()
                     
@@ -1142,7 +1268,8 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
                             Assignment.assignee_id == user_id,
                             Task.status != TaskStatus.done,
                             Task.due_date.isnot(None),
-                            Task.due_date <= today + timedelta(days=14)
+                            Task.due_date <= today + timedelta(days=14),
+                            Project.workspace_id == user.workspace_id,
                         )
                         .order_by(Task.due_date)
                         .limit(10)
@@ -1190,12 +1317,13 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
         'today': today,
         'workspace': workspace,
         'view': view or 'personal',
+        'assigned_only': assigned_only,
         'team_members': team_members,
         'selected_user': selected_user,
         'selected_user_stats': selected_user_stats,
         'selected_user_tasks': selected_user_tasks,
         'selected_user_projects': selected_user_projects,
-        'timers': await _dashboard_timers(db, user) if view != 'user' else None,
+        'timers': await _dashboard_timers(db, user, project_ids=project_ids) if view != 'user' else None,
         'attention': await attention_counts(db, user.workspace_id, zone)
         if user.is_admin and user.workspace_id and view != 'user' else None,
     })
@@ -1214,7 +1342,8 @@ DASHBOARD_PAUSED_SHOWN = 10
 DASHBOARD_FORGOTTEN_HOURS = 8
 
 
-async def _dashboard_timers(db: AsyncSession, user, now: Optional[datetime] = None) -> dict:
+async def _dashboard_timers(db: AsyncSession, user, now: Optional[datetime] = None,
+                            project_ids: Optional[list] = None) -> dict:
     """Which work timers are running and which are not, for the dashboard.
 
     Admins see the whole company; everyone else only work assigned to them or
@@ -1241,10 +1370,14 @@ async def _dashboard_timers(db: AsyncSession, user, now: Optional[datetime] = No
         select(TaskTimeEntry, Task, Project)
         .join(Task, Task.id == TaskTimeEntry.task_id)
         .join(Project, Project.id == Task.project_id)
-        .where(Project.workspace_id == ws, or_(
-            Task.id.in_(select(TaskTimeEntry.task_id).where(TaskTimeEntry.ended_at.is_(None))),
-            and_(Task.status != TaskStatus.done, Task.is_archived == False),
-        ))
+        .where(
+            Project.workspace_id == ws,
+            Task.project_id.in_(project_ids) if project_ids is not None else True,
+            or_(
+                Task.id.in_(select(TaskTimeEntry.task_id).where(TaskTimeEntry.ended_at.is_(None))),
+                and_(Task.status != TaskStatus.done, Task.is_archived == False),
+            ),
+        )
     )).all()
 
     items = {}
@@ -1344,10 +1477,15 @@ async def web_dashboard_timers(request: Request, db: AsyncSession = Depends(get_
     user = user_id and (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user or not user.is_active:
         return _htmx_login_redirect()
+    # This panel refreshes itself every 30 seconds, so it must use the same
+    # saved scope as the page it sits on (a non-admin is always assigned-only).
+    _, scoped_projects = await _dashboard_projects(db, user)
     return templates.TemplateResponse('dashboard/_timers.html', {
         'request': request,
         'user': user,
-        'timers': await _dashboard_timers(db, user),
+        'timers': await _dashboard_timers(
+            db, user, project_ids=[p.id for p in scoped_projects]
+        ),
         'workspace': await get_workspace_for_user(user.id, db),
     })
 

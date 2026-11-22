@@ -81,6 +81,12 @@ class User(UserBase, table=True):
     # Activity tracking for "What Changed" feature
     last_seen_at: Optional[datetime] = None  # Last time user was active
     away_summary_preference: str = Field(default="ask")  # "always", "ask", or "never"
+    # Web preferences. Both are set through the web UI only, so they stay off
+    # UserBase/UserCreate and cannot be supplied by a signup or user-edit form.
+    # Admins can narrow their dashboard to just the projects assigned to them;
+    # every landing page is checked against a server-side allowlist before use.
+    dashboard_assigned_only: bool = Field(default=False)
+    default_landing_page: Optional[str] = Field(default="/web/dashboard")
 
 
 # User.shown_name in SQL, for queries that select or sort by the name itself
