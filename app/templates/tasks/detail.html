@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from '_dropzone_assets.html' import dropzone %}
 {% block content %}
 {# Finishing used to archive a task, so the same admin-only lock applies to
    both done and explicitly archived tasks. #}
@@ -87,7 +88,16 @@
         </div>
       </div>
       {% endif %}
-      
+
+      {% if can_comment and (not locked or user.is_admin) %}
+      <form method="post" action="/web/tasks/{{ task.id }}/attachments" enctype="multipart/form-data" class="mb-4">
+        <h3 class="text-sm font-semibold mb-2">📎 Add task files</h3>
+        {{ dropzone('files', 'task-files-' ~ task.id, upload_url='/web/tasks/' ~ task.id ~ '/attachments',
+                    label='Drop task files here, or click to browse') }}
+        <button type="submit" data-dropzone-submit class="mt-2 px-3 py-1.5 rounded bg-blue-600 text-white text-sm">Upload files</button>
+      </form>
+      {% endif %}
+
       {% if locked and not user.is_admin %}
       <div style="background: #fef3c7; border: 1px solid #fbbf24; padding: 0.75rem; border-radius: 0.375rem; margin-bottom: 1rem; color: #78350f;">
         ⚠️ This task is {% if task.is_archived %}archived{% else %}finished{% endif %} and read-only. Only admins can modify or reopen it.
@@ -395,11 +405,7 @@
         
         <!-- File Upload Section -->
         <div style="margin-top: 0.75rem; margin-bottom: 0.75rem;">
-          <label for="attachments-{{ task.id }}" style="display: inline-block; padding: 0.5rem 1rem; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 0.375rem; cursor: pointer; font-size: 0.875rem;">
-            📎 Add Attachments
-          </label>
-          <input type="file" id="attachments-{{ task.id }}" name="files" multiple style="display: none;" onchange="updateFileList(this, 'file-list-{{ task.id }}')">
-          <div id="file-list-{{ task.id }}" style="margin-top: 0.5rem; font-size: 0.875rem; color: #6b7280;"></div>
+          {{ dropzone('files', 'attachments-' ~ task.id, label='📎 Drop attachments here, or click to browse') }}
         </div>
         
         <div class="pt-2 text-right">
@@ -486,76 +492,84 @@
       const modal = document.getElementById('previewModal');
       const title = document.getElementById('previewTitle');
       const content = document.getElementById('previewContent');
-      
-      title.textContent = filename;
+
+      // Build the preview with DOM nodes: filenames and MIME types come from
+      // uploaded records (including old ones) and must never become HTML.
+      title.textContent = filename || '';
       modal.style.display = 'block';
-      
-      // Determine how to preview based on content type
+      content.replaceChildren();
+
+      const type = String(contentType || '').toLowerCase();
       const imageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
       const pdfType = 'application/pdf';
       const textTypes = ['text/plain', 'text/html', 'text/css', 'text/javascript', 'application/json', 'application/xml'];
-      
-      const previewUrl = `/web/attachments/${attachmentId}/preview`;
-      const downloadUrl = `/web/attachments/${attachmentId}/download`;
-      
-      if (imageTypes.includes(contentType)) {
-        // Image preview
-        content.innerHTML = `<img src="${previewUrl}" style="max-width: 100%; max-height: 100%; object-fit: contain;" alt="${filename}">`;
-      } else if (contentType === pdfType) {
-        // PDF preview with fallback link
-        content.innerHTML = `
-          <iframe src="${previewUrl}" style="width: 100%; height: 100%; border: none;"></iframe>
-          <div style="position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); color: white; padding: 10px 20px; border-radius: 5px; font-size: 0.875rem;">
-            PDF not displaying? <a href="${downloadUrl}" style="color: #3b82f6; text-decoration: underline;">Download instead</a>
-          </div>
-        `;
-      } else if (textTypes.includes(contentType) || contentType.startsWith('text/')) {
-        // Text file preview
+      const id = Number(attachmentId) || 0;
+      const previewUrl = '/web/attachments/' + id + '/preview';
+      const downloadUrl = '/web/attachments/' + id + '/download';
+
+      const make = function (tag, css, text) {
+        const element = document.createElement(tag);
+        if (css) element.style.cssText = css;
+        if (text !== undefined) element.textContent = text;
+        return element;
+      };
+      const mediaWithSource = function (tag, css) {
+        const media = make(tag, css);
+        media.controls = true;
+        const source = document.createElement('source');
+        source.src = previewUrl;
+        source.type = type;
+        media.appendChild(source);
+        media.appendChild(document.createTextNode('Your browser does not support this playback.'));
+        return media;
+      };
+
+      if (imageTypes.includes(type)) {
+        const image = make('img', 'max-width: 100%; max-height: 100%; object-fit: contain;');
+        image.src = previewUrl;
+        image.alt = filename || '';
+        content.appendChild(image);
+      } else if (type === pdfType) {
+        const frame = make('iframe', 'width: 100%; height: 100%; border: none;');
+        frame.src = previewUrl;
+        const overlay = make('div', 'position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); color: white; padding: 10px 20px; border-radius: 5px; font-size: 0.875rem;');
+        const link = make('a', 'color: #3b82f6; text-decoration: underline;', 'Download instead');
+        link.href = downloadUrl;
+        overlay.append('PDF not displaying? ', link);
+        content.append(frame, overlay);
+      } else if (textTypes.includes(type) || type.startsWith('text/')) {
         fetch(previewUrl)
           .then(response => response.text())
           .then(text => {
-            content.innerHTML = `<pre style="width: 100%; height: 100%; overflow: auto; margin: 0; padding: 1rem; background: #1f2937; color: #f3f4f6; border-radius: 0.375rem; font-family: monospace; font-size: 0.875rem;">${escapeHtml(text)}</pre>`;
+            content.replaceChildren(make('pre', 'width: 100%; height: 100%; overflow: auto; margin: 0; padding: 1rem; background: #1f2937; color: #f3f4f6; border-radius: 0.375rem; font-family: monospace; font-size: 0.875rem;', text));
           })
           .catch(error => {
-            content.innerHTML = `<p style="color: #ef4444;">Error loading preview: ${error.message}</p>`;
+            content.replaceChildren(make('p', 'color: #ef4444;', 'Error loading preview: ' + error.message));
           });
-      } else if (contentType.startsWith('video/')) {
-        // Video preview
-        content.innerHTML = `<video controls style="max-width: 100%; max-height: 100%;">
-          <source src="${previewUrl}" type="${contentType}">
-          Your browser does not support video playback.
-        </video>`;
-      } else if (contentType.startsWith('audio/')) {
-        // Audio preview
-        content.innerHTML = `<div style="text-align: center;">
-          <p style="margin-bottom: 1rem; color: #374151;">🎵 ${filename}</p>
-          <audio controls style="width: 100%; max-width: 500px;">
-            <source src="${previewUrl}" type="${contentType}">
-            Your browser does not support audio playback.
-          </audio>
-        </div>`;
+      } else if (type.startsWith('video/')) {
+        content.appendChild(mediaWithSource('video', 'max-width: 100%; max-height: 100%;'));
+      } else if (type.startsWith('audio/')) {
+        const wrapper = make('div', 'text-align: center;');
+        wrapper.appendChild(make('p', 'margin-bottom: 1rem; color: #374151;', '🎵 ' + (filename || '')));
+        wrapper.appendChild(mediaWithSource('audio', 'width: 100%; max-width: 500px;'));
+        content.appendChild(wrapper);
       } else {
-        // Unsupported file type - offer download
-        content.innerHTML = `<div style="text-align: center;">
-          <p style="color: #6b7280; margin-bottom: 1rem;">Preview not available for this file type.</p>
-          <p style="color: #6b7280; margin-bottom: 1rem;">File type: ${contentType}</p>
-          <a href="${downloadUrl}" style="display: inline-block; padding: 0.75rem 1.5rem; background: #10b981; color: white; text-decoration: none; border-radius: 0.375rem; font-weight: 500;">
-            ⬇️ Download File
-          </a>
-        </div>`;
+        const wrapper = make('div', 'text-align: center;');
+        wrapper.appendChild(make('p', 'color: #6b7280; margin-bottom: 1rem;', 'Preview not available for this file type.'));
+        wrapper.appendChild(make('p', 'color: #6b7280; margin-bottom: 1rem;', 'File type: ' + type));
+        const link = make('a', 'display: inline-block; padding: 0.75rem 1.5rem; background: #10b981; color: white; text-decoration: none; border-radius: 0.375rem; font-weight: 500;', '⬇️ Download File');
+        link.href = downloadUrl;
+        wrapper.appendChild(link);
+        content.appendChild(wrapper);
       }
     }
 
     function closePreview() {
       const modal = document.getElementById('previewModal');
       modal.style.display = 'none';
-      document.getElementById('previewContent').innerHTML = '<p style="color: #6b7280;">Loading preview...</p>';
-    }
-
-    function escapeHtml(text) {
-      const div = document.createElement('div');
-      div.textContent = text;
-      return div.innerHTML;
+      const content = document.getElementById('previewContent');
+      content.replaceChildren();
+      content.appendChild(document.createTextNode('Loading preview...'));
     }
 
     // Close modal when clicking outside

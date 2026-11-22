@@ -1,0 +1,214 @@
+{#
+  Reusable drag-and-drop file picker.
+
+  Load this file once (base.html does it), then call the macro wherever a file
+  input is needed -- task files, task/ticket comments, ticket photos, and Slice 5
+  project quotation uploads. Dropping a file is an enhancement: the input is a
+  normal file input, so clicking the label/button and submitting a form still
+  works without JavaScript.
+#}
+{% macro dropzone(input_name, input_id, accept='image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip,.rar', upload_url='', label='Drop photos or files here, or click to browse', hint='', multiple=true, input_class='cem-dropzone-input') -%}
+<div class="cem-dropzone" data-dropzone{% if upload_url %} data-upload-url="{{ upload_url }}"{% endif %}>
+  <label class="cem-dropzone-target" for="{{ input_id }}">
+    <input type="file" id="{{ input_id }}" name="{{ input_name }}"
+           class="{{ input_class }}" data-dropzone-input
+           accept="{{ accept }}"{% if multiple %} multiple{% endif %}>
+    <span class="cem-dropzone-icon" aria-hidden="true">&#128206;</span>
+    <span class="cem-dropzone-label">{{ label }}</span>
+  </label>
+  <div class="cem-dropzone-preview" data-dropzone-preview aria-live="polite"></div>
+  {% if hint %}<p class="cem-dropzone-hint">{{ hint }}</p>{% endif %}
+  <p class="cem-dropzone-status" data-dropzone-status role="status" hidden></p>
+</div>
+{%- endmacro %}
+
+<style>
+  .cem-dropzone { border: 2px dashed #cbd5e1; border-radius: 0.5rem; background: #f8fafc; padding: 0.75rem; transition: border-color .15s, background .15s; }
+  .cem-dropzone.is-dragover { border-color: #4f46e5; background: #eef2ff; }
+  .cem-dropzone-target { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.875rem; color: #334155; }
+  .cem-dropzone-input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
+  .cem-dropzone-icon { font-size: 1.1rem; }
+  .cem-dropzone-preview { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+  .cem-dropzone-file { display: flex; align-items: center; gap: 0.4rem; max-width: 16rem; padding: 0.3rem 0.45rem; background: white; border: 1px solid #e2e8f0; border-radius: 0.375rem; font-size: 0.75rem; color: #334155; }
+  .cem-dropzone-thumb { width: 2.25rem; height: 2.25rem; object-fit: cover; border-radius: 0.25rem; }
+  .cem-dropzone-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cem-dropzone-remove { margin-left: auto; border: 0; background: transparent; color: #dc2626; font-weight: 700; cursor: pointer; }
+  .cem-dropzone-hint { margin: 0.4rem 0 0; font-size: 0.7rem; color: #64748b; }
+  .cem-dropzone-status { margin: 0.4rem 0 0; font-size: 0.75rem; color: #4338ca; }
+  .cem-dropzone-status.is-error { color: #b91c1c; }
+</style>
+
+<script>
+(function () {
+  'use strict';
+  var GLOBAL = window.CEMDropzone = window.CEMDropzone || {};
+
+  function status(root, text, isError) {
+    var box = root.querySelector('[data-dropzone-status]');
+    if (!box) return;
+    box.textContent = text || '';
+    box.hidden = !text;
+    box.className = 'cem-dropzone-status' + (isError ? ' is-error' : '');
+  }
+
+  // A zone may live in a form that also has a plain submit button (the no-JS
+  // fallback). Disable it while the AJAX post runs so the same files cannot be
+  // posted twice.
+  function setSubmitDisabled(root, disabled) {
+    var form = root.closest ? root.closest('form') : null;
+    if (!form) return;
+    Array.prototype.forEach.call(form.querySelectorAll('[data-dropzone-submit]'), function (button) {
+      button.disabled = disabled;
+    });
+  }
+
+  function render(root, input) {
+    var preview = root.querySelector('[data-dropzone-preview]');
+    if (!preview) return;
+    while (preview.firstChild) {
+      var old = preview.firstChild;
+      if (old._objectUrl) URL.revokeObjectURL(old._objectUrl);
+      preview.removeChild(old);
+    }
+    Array.prototype.forEach.call(input.files || [], function (file) {
+      var row = document.createElement('div');
+      row.className = 'cem-dropzone-file';
+      if (file.type && file.type.indexOf('image/') === 0) {
+        var thumb = document.createElement('img');
+        thumb.className = 'cem-dropzone-thumb';
+        thumb.alt = '';
+        thumb.src = URL.createObjectURL(file);
+        row._objectUrl = thumb.src;
+        row.appendChild(thumb);
+      }
+      var name = document.createElement('span');
+      name.className = 'cem-dropzone-name';
+      name.textContent = file.name;           // textContent: filenames are never HTML
+      name.title = file.name;
+      row.appendChild(name);
+      var remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'cem-dropzone-remove';
+      remove.textContent = '\u00d7';
+      remove.setAttribute('aria-label', 'Remove ' + file.name);
+      remove.addEventListener('click', function () {
+        var remaining = new DataTransfer();
+        Array.prototype.forEach.call(input.files || [], function (other) {
+          if (other !== file) remaining.items.add(other);
+        });
+        input.files = remaining.files;
+        render(root, input);
+      });
+      row.appendChild(remove);
+      preview.appendChild(row);
+    });
+  }
+
+  function addFiles(root, input, incoming) {
+    if (!incoming || !incoming.length) return;
+    var combined = new DataTransfer();
+    var multiple = input.hasAttribute('multiple');
+    Array.prototype.forEach.call(input.files || [], function (file) { combined.items.add(file); });
+    Array.prototype.forEach.call(incoming, function (file) {
+      if (multiple || !combined.files.length) combined.items.add(file);
+    });
+    input.files = combined.files;             // populate the real file input
+    render(root, input);
+    status(root, combined.files.length + ' file(s) ready');
+    if (!root.getAttribute('data-upload-url')) {
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+
+  function upload(root, input) {
+    var url = root.getAttribute('data-upload-url');
+    if (!url || !input.files.length) return;
+    var form = new FormData();
+    Array.prototype.forEach.call(input.files, function (file) {
+      form.append(input.name, file, file.name);
+    });
+    status(root, 'Uploading ' + input.files.length + ' file(s)…');
+    setSubmitDisabled(root, true);
+    fetch(url, {
+      method: 'POST',
+      body: form,
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    }).then(function (response) {
+      return response.json().then(function (data) { return { ok: response.ok, data: data }; });
+    }).then(function (result) {
+      if (!result.ok) {
+        status(root, result.data.error || 'The upload failed.', true);
+        setSubmitDisabled(root, false);
+        return;
+      }
+      if (typeof location !== 'undefined' && location.reload) location.reload();
+    }).catch(function () {
+      status(root, 'The upload failed. Check the connection and try again.', true);
+      setSubmitDisabled(root, false);
+    });
+  }
+
+  GLOBAL.init = function (root) {
+    if (!root || root.dataset.cemReady) return;
+    root.dataset.cemReady = '1';
+    var input = root.querySelector('[data-dropzone-input]');
+    if (!input) return;
+    render(root, input);
+
+    input.addEventListener('change', function () { render(root, input); });
+    if (root.getAttribute('data-upload-url')) {
+      input.addEventListener('change', function () {
+        if (input.files.length) upload(root, input);
+      });
+    }
+
+    var depth = 0;
+    root.addEventListener('dragenter', function (event) {
+      event.preventDefault();
+      depth += 1;
+      root.classList.add('is-dragover');
+    });
+    root.addEventListener('dragover', function (event) {
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+      root.classList.add('is-dragover');
+    });
+    root.addEventListener('dragleave', function (event) {
+      event.preventDefault();
+      depth = Math.max(0, depth - 1);
+      if (!depth) root.classList.remove('is-dragover');
+    });
+    root.addEventListener('drop', function (event) {
+      event.preventDefault();                 // no "navigate away to the image"
+      depth = 0;
+      root.classList.remove('is-dragover');
+      var files = event.dataTransfer && event.dataTransfer.files;
+      if (!files || !files.length) return;
+      addFiles(root, input, files);
+      if (root.getAttribute('data-upload-url')) upload(root, input);
+    });
+  };
+
+  GLOBAL.initAll = function () {
+    document.querySelectorAll('[data-dropzone]').forEach(GLOBAL.init);
+  };
+
+  // A file dropped outside the zone must not replace the current page either.
+  function hasFiles(event) {
+    var types = event.dataTransfer && event.dataTransfer.types;
+    return types && Array.prototype.indexOf.call(types, 'Files') !== -1;
+  }
+  document.addEventListener('dragover', function (event) {
+    if (hasFiles(event)) event.preventDefault();
+  });
+  document.addEventListener('drop', function (event) {
+    if (hasFiles(event)) event.preventDefault();
+  });
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', GLOBAL.initAll);
+  } else {
+    GLOBAL.initAll();
+  }
+})();
+</script>

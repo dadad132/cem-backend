@@ -92,17 +92,17 @@
       
       <form method="POST" action="/web/projects/{{ project.id }}/members/add" id="inviteForm">
         <div class="mb-4">
-          <label class="block text-sm font-medium text-slate-700 mb-2">Username or Email</label>
+          <label for="userIdentifier" class="block text-sm font-medium text-slate-700 mb-2">Username, name, or email</label>
           <input 
             type="text" 
             name="user_identifier" 
             id="userIdentifier"
-            placeholder="Enter username or email address"
+            placeholder="Search by username, name, or email..."
             required 
             class="w-full rounded-lg border border-slate-300 px-4 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
             autocomplete="off"
           />
-          <p class="mt-1 text-xs text-slate-500">Enter the username or email of the user you want to invite</p>
+          <p class="mt-1 text-xs text-slate-500">Start typing to find a user, then pick a result to add them.</p>
         </div>
         
         <div id="userPreview" class="mb-4 p-3 bg-slate-50 rounded-lg hidden">
@@ -124,56 +124,103 @@
 
       <div class="mt-4 pt-4 border-t border-slate-200">
         <p class="text-xs text-slate-600 font-medium mb-2">Quick Select (Available Users)</p>
-        {% if available_users %}
-          <div class="space-y-2 max-h-48 overflow-y-auto">
-            {% for available_user in available_users %}
-              <button 
-                type="button"
-                onclick='selectUser({{ available_user.username|tojson }}, {{ (available_user.shown_name or available_user.email)|tojson }}, {{ available_user.email|tojson }})'
-                class="w-full text-left px-3 py-2 text-sm bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors"
-              >
-                <div class="font-medium text-slate-900">{{ available_user.shown_name or available_user.email }}</div>
-                <div class="text-xs text-slate-500">@{{ available_user.username }}</div>
-              </button>
-            {% endfor %}
-          </div>
-        {% else %}
-          <p class="text-xs text-slate-500 italic">All workspace users are already assigned</p>
-        {% endif %}
+        <input type="search" id="memberSearch" data-member-search
+               placeholder="Search by username, name, or email..."
+               value="{{ member_query|default('', true) }}"
+               class="w-full mb-2 rounded-lg border border-slate-300 px-3 py-2 text-sm"
+               autocomplete="off">
+        <div id="memberResults" data-member-results class="space-y-2 max-h-48 overflow-y-auto">
+          {% for available_user in available_users %}
+            {% set label = (available_user.shown_name or available_user.full_name or available_user.username) ~ ' (@' ~ available_user.username ~ ') — ' ~ (available_user.email or '') %}
+            {% set haystack = (available_user.username ~ ' ' ~ (available_user.full_name or '') ~ ' ' ~ (available_user.email or '') ~ ' ' ~ (available_user.shown_name or '') ~ ' ' ~ (available_user.display_name or ''))|lower %}
+            <button type="button"
+                    data-member-user
+                    data-search="{{ haystack }}"
+                    data-username="{{ available_user.username }}"
+                    data-label="{{ label }}"
+                    onclick='selectUser({{ available_user.username|tojson }}, {{ label|tojson }})'
+                    class="w-full text-left px-3 py-2 text-sm bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors">
+              {{ label }}
+            </button>
+          {% endfor %}
+        </div>
+        <p data-member-empty class="text-xs text-slate-500 italic {% if available_users %}hidden{% endif %}">
+          No available users match.
+        </p>
       </div>
     </div>
   </div>
 
   <script>
-    function selectUser(username, fullname, email) {
+    function selectUser(username, label) {
       const input = document.getElementById('userIdentifier');
       const preview = document.getElementById('userPreview');
       const initial = document.getElementById('userInitial');
       const userName = document.getElementById('userName');
       const userEmail = document.getElementById('userEmail');
-      
+
       input.value = username;
-      initial.textContent = (fullname || email)[0].toUpperCase();
-      userName.textContent = fullname;
+      initial.textContent = label.trim()[0].toUpperCase();
+      userName.textContent = label;
       userEmail.textContent = '@' + username;
       preview.classList.remove('hidden');
     }
-    
-    // Show preview on manual input blur
-    document.getElementById('userIdentifier').addEventListener('blur', function() {
-      const value = this.value.trim();
-      if (value) {
-        const preview = document.getElementById('userPreview');
-        const initial = document.getElementById('userInitial');
-        const userName = document.getElementById('userName');
-        const userEmail = document.getElementById('userEmail');
-        
-        initial.textContent = value[0].toUpperCase();
-        userName.textContent = 'Searching...';
-        userEmail.textContent = value;
-        preview.classList.remove('hidden');
-      }
-    });
+
+    (function () {
+      const search = document.getElementById('memberSearch');
+      const results = document.getElementById('memberResults');
+      const empty = document.querySelector('[data-member-empty]');
+      if (!search || !results) return;
+
+      const makeButton = function (user) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.memberUser = '';
+        button.dataset.username = user.username;
+        button.dataset.search = [user.username, user.full_name, user.email, user.label]
+          .filter(Boolean).join(' ').toLowerCase();
+        button.className = 'w-full text-left px-3 py-2 text-sm bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors';
+        button.textContent = user.label;              // textContent: user data is never HTML
+        button.addEventListener('click', function () {
+          selectUser(user.username, user.label);
+        });
+        return button;
+      };
+
+      const render = function (users) {
+        results.replaceChildren.apply(results, users.map(makeButton));
+        empty.hidden = users.length > 0;
+      };
+
+      const filterLocal = function () {
+        const term = search.value.trim().toLowerCase();
+        let shown = 0;
+        results.querySelectorAll('[data-member-user]').forEach(function (button) {
+          const hit = (button.dataset.search || '').includes(term);
+          button.hidden = !hit;
+          if (hit) shown += 1;
+        });
+        empty.hidden = shown > 0;
+      };
+
+      let timer = null;
+      let sequence = 0;
+      search.addEventListener('input', function () {
+        filterLocal();                                // instant feedback
+        const term = search.value.trim();
+        const mine = ++sequence;
+        clearTimeout(timer);
+        timer = setTimeout(function () {
+          fetch('/web/projects/{{ project.id }}/available-users?q=' + encodeURIComponent(term))
+            .then(function (response) { return response.ok ? response.json() : { users: [] }; })
+            .then(function (data) {
+              if (mine !== sequence) return;          // ignore a stale response
+              render(data.users || []);
+            })
+            .catch(function () { /* local filtering still works offline */ });
+        }, 250);
+      });
+    })();
   </script>
 
   <!-- Info Box -->

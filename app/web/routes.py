@@ -16,6 +16,7 @@ from typing import List, Optional
 from pathlib import Path
 from datetime import date, datetime, timedelta, time, timezone
 import calendar as pycalendar
+import inspect
 import os
 import uuid
 import asyncio
@@ -31,6 +32,10 @@ from sqlalchemy import select, or_, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
+from app.core.attachment_upload import (
+    MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_UPLOAD,
+    clean_upload_name, photo_type as _photo_type, validate_attachment,
+)
 from app.core.security import verify_password, get_password_hash
 from app.core.email import send_email
 from app.models.project import Project
@@ -97,6 +102,7 @@ def safe_landing_page(value: Optional[str]) -> str:
 
 # Store original TemplateResponse
 _original_template_response = templates.TemplateResponse
+_TEMPLATE_RESPONSE_TAKES_REQUEST = {}
 
 def enhanced_template_response(name: str, context: dict, *args, **kwargs):
     """Enhanced TemplateResponse that adds workspace from request state"""
@@ -110,7 +116,19 @@ def enhanced_template_response(name: str, context: dict, *args, **kwargs):
         elif 'workspace' not in context:
             context['workspace'] = None
     
-    return _original_template_response(name, context, *args, **kwargs)
+    # Starlette changed TemplateResponse from (name, context) to
+    # (request, name, context). Support both shapes so the legacy call sites in
+    # this module keep working after a dependency upgrade.
+    original = _original_template_response
+    if original not in _TEMPLATE_RESPONSE_TAKES_REQUEST:
+        try:
+            params = inspect.signature(original).parameters
+        except (TypeError, ValueError):
+            params = {}
+        _TEMPLATE_RESPONSE_TAKES_REQUEST[original] = 'request' in params
+    if _TEMPLATE_RESPONSE_TAKES_REQUEST[original]:
+        return original(context.get('request'), name, context, *args, **kwargs)
+    return original(name, context, *args, **kwargs)
 
 # Replace the TemplateResponse method - this affects ALL template calls
 templates.TemplateResponse = enhanced_template_response
@@ -7439,23 +7457,102 @@ async def web_projects_archived(request: Request, db: AsyncSession = Depends(get
 # --------------------------
 # Project Members (Admin only)
 # --------------------------
-@router.get('/projects/{project_id}/members', response_class=HTMLResponse)
-async def web_project_members(request: Request, project_id: int, db: AsyncSession = Depends(get_session)):
+def _member_search_pattern(q: str) -> Optional[str]:
+    """A bounded LIKE pattern, with wildcards in the query treated as text."""
+    term = (q or '').strip()[:100]
+    if not term:
+        return None
+    escaped = term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+    return f'%{escaped}%'
+
+
+async def _available_project_users(db: AsyncSession, project, workspace_id: int,
+                                   q: str = '') -> list:
+    """Active users of this company who can still be added to the project.
+
+    Both the page and the JSON search endpoint use this one query, so their
+    results cannot drift apart. The subquery keeps existing members out,
+    including when a user belongs to several projects.
+    """
+    from app.models.project_member import ProjectMember
+
+    stmt = (
+        select(User)
+        .where(User.workspace_id == workspace_id, User.is_active.is_(True))
+        .where(User.id.notin_(
+            select(ProjectMember.user_id).where(ProjectMember.project_id == project.id)
+        ))
+        .order_by(USER_SHOWN_NAME, User.email)
+        .limit(100)
+    )
+    pattern = _member_search_pattern(q)
+    if pattern:
+        stmt = stmt.where(or_(
+            User.username.ilike(pattern, escape='\\'),
+            User.full_name.ilike(pattern, escape='\\'),
+            User.display_name.ilike(pattern, escape='\\'),
+            USER_SHOWN_NAME.ilike(pattern, escape='\\'),
+            User.email.ilike(pattern, escape='\\'),
+        ))
+    return (await db.execute(stmt)).scalars().all()
+
+
+def _available_user_json(user: User) -> dict:
+    name = user.shown_name or user.full_name or user.username
+    email = user.email or ''
+    return {
+        'id': user.id,
+        'username': user.username,
+        'full_name': name,
+        'name': name,
+        'email': email,
+        'label': f'{name} (@{user.username}) — {email}' if email else f'{name} (@{user.username})',
+    }
+
+
+async def _project_member_admin(request: Request, project_id: int, db: AsyncSession):
+    """Shared auth for the member list, search and add/remove actions."""
     user_id = request.session.get('user_id')
     if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
+        return None, None, RedirectResponse('/web/login', status_code=303)
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user or not user.is_admin:
         raise HTTPException(status_code=403, detail='Admin access required')
-    
-    # Get project
     project = (await db.execute(
         select(Project).where(Project.id == project_id, Project.workspace_id == user.workspace_id)
     )).scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail='Project not found')
-    
-    # Get assigned members (exclude deleted users)
+    return user, project, None
+
+
+@router.get('/projects/{project_id}/available-users')
+async def web_project_available_users(
+    request: Request, project_id: int, q: str = '',
+    db: AsyncSession = Depends(get_session)
+):
+    """Server-side counterpart of the live filter on the members page."""
+    try:
+        user, project, denied = await _project_member_admin(request, project_id, db)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            return JSONResponse({'users': [], 'detail': exc.detail}, status_code=403)
+        raise
+    if denied:
+        return denied
+    users = await _available_project_users(db, project, user.workspace_id, q)
+    return JSONResponse({'users': [_available_user_json(u) for u in users]})
+
+
+@router.get('/projects/{project_id}/members', response_class=HTMLResponse)
+async def web_project_members(
+    request: Request, project_id: int, q: str = '',
+    db: AsyncSession = Depends(get_session)
+):
+    user, project, denied = await _project_member_admin(request, project_id, db)
+    if denied:
+        return denied
+
     from app.models.project_member import ProjectMember
     assigned_members = (await db.execute(
         select(User, ProjectMember.assigned_at)
@@ -7463,25 +7560,15 @@ async def web_project_members(request: Request, project_id: int, db: AsyncSessio
         .where(ProjectMember.project_id == project_id)
         .order_by(USER_SHOWN_NAME, User.email)
     )).all()
-    
-    # Get all active workspace users for assignment dropdown
-    all_users = (await db.execute(
-        select(User)
-        .where(User.workspace_id == user.workspace_id)
-        .where(User.is_active == True)
-        .order_by(USER_SHOWN_NAME, User.email)
-    )).scalars().all()
-    
-    # Filter out already assigned users
-    assigned_user_ids = {m[0].id for m in assigned_members}
-    available_users = [u for u in all_users if u.id not in assigned_user_ids]
-    
+    available_users = await _available_project_users(db, project, user.workspace_id, q)
+
     return templates.TemplateResponse('projects/members.html', {
         'request': request,
         'user': user,
         'project': project,
         'assigned_members': assigned_members,
-        'available_users': available_users
+        'available_users': available_users,
+        'member_query': q,
     })
 
 
@@ -7511,6 +7598,7 @@ async def web_project_members_add(
     target_user = (await db.execute(
         select(User).where(
             User.workspace_id == user.workspace_id,
+            User.is_active.is_(True),
             (User.username == user_identifier) | (User.email == user_identifier)
         )
     )).scalar_one_or_none()
@@ -9599,45 +9687,137 @@ async def web_task_add_comment(
         )
         db.add(notification)
     
-    # Handle file attachments
+    # Handle file attachments: same type/size/path rules as the other upload routes
+    skipped = []
+    if len(files) > MAX_ATTACHMENTS_PER_UPLOAD:
+        skipped.append(f'{len(files) - MAX_ATTACHMENTS_PER_UPLOAD} file(s) were not uploaded (limit {MAX_ATTACHMENTS_PER_UPLOAD})')
+
     if files:
-        # Create uploads directory if it doesn't exist
         upload_dir = BASE_DIR / 'uploads' / 'comments'
         upload_dir.mkdir(parents=True, exist_ok=True)
-        
-        for file in files:
-            if file.filename:  # Only process if file was actually uploaded
-                # Read file content
-                file_content = await file.read()
-                
-                # Validate file size (max 10MB)
-                if len(file_content) > 10 * 1024 * 1024:
-                    raise HTTPException(status_code=400, detail=f'File {file.filename} is too large. Maximum size is 10MB.')
-                
-                # Generate unique filename
-                file_extension = os.path.splitext(file.filename)[1]
-                unique_filename = f"{uuid.uuid4()}{file_extension}"
-                file_path = upload_dir / unique_filename
-                
-                # Save file to disk
-                with open(file_path, 'wb') as f:
-                    f.write(file_content)
-                
-                # Store relative path from app directory
-                relative_path = f"app/uploads/comments/{unique_filename}"
-                
-                # Create attachment record
-                attachment = CommentAttachment(
-                    comment_id=comment.id,
-                    filename=file.filename,
-                    file_path=relative_path,
-                    file_size=len(file_content),
-                    content_type=file.content_type or 'application/octet-stream',
-                    uploaded_by_id=user_id
-                )
-                db.add(attachment)
-    
+
+        for file in files[:MAX_ATTACHMENTS_PER_UPLOAD]:
+            if not file.filename:
+                continue
+            name = clean_upload_name(file.filename)
+            file_content = await file.read(MAX_ATTACHMENT_BYTES + 1)
+            if len(file_content) > MAX_ATTACHMENT_BYTES:
+                skipped.append(f'{name} is larger than 10 MB')
+                continue
+            kind = validate_attachment(file_content, name, file.content_type)
+            if not kind:
+                skipped.append(f'{name} is not an allowed file')
+                continue
+            mime, ext = kind
+            unique_filename = f"{uuid.uuid4()}{ext}"
+            (upload_dir / unique_filename).write_bytes(file_content)
+
+            db.add(CommentAttachment(
+                comment_id=comment.id,
+                filename=name,
+                file_path=f"app/uploads/comments/{unique_filename}",
+                file_size=len(file_content),
+                content_type=mime,
+                uploaded_by_id=user_id
+            ))
+
+    if skipped:
+        request.session['error_message'] = '; '.join(skipped)
     await db.commit()
+    return RedirectResponse(f'/web/tasks/{task_id}', status_code=303)
+
+
+@router.post('/tasks/{task_id}/attachments')
+async def web_task_add_attachment(
+    request: Request,
+    task_id: int,
+    files: list[UploadFile] = File(default=[]),
+    db: AsyncSession = Depends(get_session)
+):
+    """Save files dropped on a task's attachment zone (or picked with the button).
+
+    The dropzone posts here immediately with X-Requested-With; a plain form post
+    (or a browser without JavaScript) falls back to a redirect.
+    """
+    from app.models.task_extensions import TaskAttachment
+
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+    user_id = request.session.get('user_id')
+    if not user_id:
+        if is_ajax:
+            return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+        return RedirectResponse('/web/login', status_code=303)
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        if is_ajax:
+            return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+
+    stmt = select(Task).join(Project, Task.project_id == Project.id).where(
+        Task.id == task_id, Project.workspace_id == user.workspace_id
+    )
+    task = (await db.execute(stmt)).scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail='Task not found')
+
+    if (task.is_archived or task.status == TaskStatus.done) and not user.is_admin:
+        raise HTTPException(status_code=403, detail='This task is finished')
+    is_assignee = (await db.execute(
+        select(Assignment).where(Assignment.task_id == task_id, Assignment.assignee_id == user_id)
+    )).scalar_one_or_none() is not None
+    if not user.is_admin and not is_assignee:
+        raise HTTPException(status_code=403, detail='Only assigned users and admins can add attachments')
+
+    upload_dir = BASE_DIR / 'uploads' / 'tasks'
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    saved, skipped = 0, []
+    if len(files) > MAX_ATTACHMENTS_PER_UPLOAD:
+        skipped.append(f'{len(files) - MAX_ATTACHMENTS_PER_UPLOAD} file(s) were not uploaded (limit {MAX_ATTACHMENTS_PER_UPLOAD})')
+    for file in files[:MAX_ATTACHMENTS_PER_UPLOAD]:
+        name = clean_upload_name(file.filename)
+        data = await file.read(MAX_ATTACHMENT_BYTES + 1)
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            skipped.append(f'{name} is larger than 10 MB')
+            continue
+        kind = validate_attachment(data, name, file.content_type)
+        if not kind:
+            skipped.append(f'{name} is not an allowed file (images, PDF and documents up to 10 MB)')
+            continue
+        mime, ext = kind
+        stored = f"{uuid.uuid4()}{ext}"
+        path = (upload_dir / stored).resolve()
+        if not path.is_relative_to(upload_dir.resolve()):
+            skipped.append(f'{name} could not be stored safely')
+            continue
+        with open(path, 'wb') as out:
+            out.write(data)
+        db.add(TaskAttachment(
+            task_id=task_id,
+            filename=name,
+            file_path=f'app/uploads/tasks/{stored}',
+            file_size=len(data),
+            file_type=mime,
+            uploaded_by=user_id,
+        ))
+        saved += 1
+
+    if saved:
+        await db.commit()
+
+    if is_ajax:
+        return JSONResponse(
+            {'saved': saved, 'skipped': skipped,
+             'error': None if saved else ('; '.join(skipped) or 'No file was received.')},
+            status_code=200 if saved else 400,
+        )
+    if saved:
+        request.session['success_message'] = f'{saved} attachment(s) added to the task'
+    else:
+        request.session['error_message'] = '; '.join(skipped) or 'No file was received.'
+    if skipped and saved:
+        request.session['error_message'] = '; '.join(skipped)
     return RedirectResponse(f'/web/tasks/{task_id}', status_code=303)
 
 
@@ -9851,13 +10031,16 @@ async def preview_comment_attachment(
         logger.error(f"File not found: {file_path}")
         raise HTTPException(status_code=404, detail=f'File not found on disk: {file_path}')
     
-    # Serve file inline for preview with proper headers for PDF embedding
+    # Serve file inline for preview with proper headers for PDF embedding.
+    # clean_upload_name() keeps old rows with hostile names from forging a
+    # second Content-Disposition parameter.
+    display_name = clean_upload_name(attachment.filename)
     return FileResponse(
         path=str(file_path),
         media_type=attachment.content_type,
-        filename=attachment.filename,
+        filename=display_name,
         headers={
-            'Content-Disposition': f'inline; filename="{attachment.filename}"',
+            'Content-Disposition': f'inline; filename="{display_name}"',
             'X-Content-Type-Options': 'nosniff',
             'Content-Security-Policy': "frame-ancestors 'self'"
         }
@@ -15972,24 +16155,6 @@ async def web_tickets_signature(
     return RedirectResponse(f'/web/tickets/{ticket_id}#signed', status_code=303)
 
 
-def _photo_type(data: bytes) -> Optional[tuple]:
-    """(mime type, extension) of a photo, judged by its bytes, or None.
-
-    Only photo formats: no SVG, which can carry script.
-    """
-    if data[:3] == b'\xff\xd8\xff':
-        return 'image/jpeg', '.jpg'
-    if data[:8] == b'\x89PNG\r\n\x1a\n':
-        return 'image/png', '.png'
-    if data[:6] in (b'GIF87a', b'GIF89a'):
-        return 'image/gif', '.gif'
-    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
-        return 'image/webp', '.webp'
-    if data[4:8] == b'ftyp' and data[8:12] in (b'heic', b'heix', b'hevc', b'hevx', b'mif1', b'msf1'):
-        return 'image/heic', '.heic'
-    return None
-
-
 TICKET_PHOTO_MAX_BYTES = 15 * 1024 * 1024
 TICKET_PHOTOS_PER_UPLOAD = 20
 
@@ -16029,15 +16194,17 @@ async def web_tickets_add_photos(
     upload_dir = BASE_DIR / 'uploads' / 'tickets'
     upload_dir.mkdir(parents=True, exist_ok=True)
     saved, skipped = 0, []
+    if len(photos) > TICKET_PHOTOS_PER_UPLOAD:
+        skipped.append(f'{len(photos) - TICKET_PHOTOS_PER_UPLOAD} photo(s) were not uploaded (limit {TICKET_PHOTOS_PER_UPLOAD})')
     for photo in photos[:TICKET_PHOTOS_PER_UPLOAD]:
-        name = Path(photo.filename or '').name[:120] or 'photo'
-        data = await photo.read()
+        name = clean_upload_name(photo.filename, 'photo')
+        data = await photo.read(TICKET_PHOTO_MAX_BYTES + 1)
+        if len(data) > TICKET_PHOTO_MAX_BYTES:
+            skipped.append(f'{name} is larger than 15 MB')
+            continue
         kind = _photo_type(data) if data else None
         if not kind:
             skipped.append(f'{name} is not a photo')
-            continue
-        if len(data) > TICKET_PHOTO_MAX_BYTES:
-            skipped.append(f'{name} is larger than 15 MB')
             continue
         mime_type, ext = kind
         stored = f"{uuid.uuid4()}{ext}"
@@ -16071,6 +16238,8 @@ async def web_tickets_add_photos(
         request.session['success_message'] = f"{saved} photo{'' if saved == 1 else 's'} added to ticket #{ticket.ticket_number}."
     else:
         request.session['error_message'] = 'No photo was added: ' + ('; '.join(skipped) or 'no file was received.')
+    if skipped and saved:
+        request.session['error_message'] = '; '.join(skipped)
     return RedirectResponse(f'/web/tickets/{ticket_id}#photos', status_code=303)
 
 
@@ -16292,49 +16461,51 @@ Thank you.
     db.add(comment)
     await db.flush()  # Get comment.id for attachments
     
-    # Handle file attachments
+    # Handle file attachments with the same validation as every other upload
     from app.models.ticket import TicketAttachment
     attachment_count = 0
+    skipped = []
+    if len(files) > MAX_ATTACHMENTS_PER_UPLOAD:
+        skipped.append(f'{len(files) - MAX_ATTACHMENTS_PER_UPLOAD} file(s) were not uploaded (limit {MAX_ATTACHMENTS_PER_UPLOAD})')
     if files:
-        # Create uploads directory if it doesn't exist
         upload_dir = BASE_DIR / 'uploads' / 'tickets'
         upload_dir.mkdir(parents=True, exist_ok=True)
-        
-        for file in files:
-            if file.filename:  # Only process if file was actually uploaded
-                # Read file content
-                file_content = await file.read()
-                
-                # Validate file size (max 10MB)
-                if len(file_content) > 10 * 1024 * 1024:
-                    write_log(f"⚠️ File {file.filename} is too large, skipping")
-                    continue
-                
-                # Generate unique filename
-                file_extension = os.path.splitext(file.filename)[1]
-                unique_filename = f"{uuid.uuid4()}{file_extension}"
-                file_path = upload_dir / unique_filename
-                
-                # Save file to disk
-                with open(file_path, 'wb') as f:
-                    f.write(file_content)
-                
-                # Store relative path from app directory
-                relative_path = f"app/uploads/tickets/{unique_filename}"
-                
-                # Create attachment record
-                attachment = TicketAttachment(
-                    ticket_id=ticket_id,
-                    comment_id=comment.id,
-                    filename=file.filename,
-                    file_path=relative_path,
-                    file_size=len(file_content),
-                    mime_type=file.content_type or 'application/octet-stream',
-                    uploaded_by_id=user_id
-                )
-                db.add(attachment)
-                attachment_count += 1
-                write_log(f"✓ Attachment saved: {file.filename} ({len(file_content)} bytes)")
+
+        for file in files[:MAX_ATTACHMENTS_PER_UPLOAD]:
+            if not file.filename:
+                continue
+            name = clean_upload_name(file.filename)
+            file_content = await file.read(MAX_ATTACHMENT_BYTES + 1)
+            if len(file_content) > MAX_ATTACHMENT_BYTES:
+                skipped.append(f'{name} is larger than 10 MB')
+                write_log(f"⚠️ File {name} is larger than 10 MB")
+                continue
+            kind = validate_attachment(file_content, name, file.content_type)
+            if not kind:
+                skipped.append(f'{name} is not an allowed file')
+                write_log(f"⚠️ File {name} was rejected: wrong type")
+                continue
+            mime, ext = kind
+            unique_filename = f"{uuid.uuid4()}{ext}"
+            path = (upload_dir / unique_filename).resolve()
+            if not path.is_relative_to(upload_dir.resolve()):
+                skipped.append(f'{name} could not be stored safely')
+                write_log(f"⚠️ File {name} could not be stored safely")
+                continue
+            with open(path, 'wb') as out:
+                out.write(file_content)
+
+            db.add(TicketAttachment(
+                ticket_id=ticket_id,
+                comment_id=comment.id,
+                filename=name,
+                file_path=f"app/uploads/tickets/{unique_filename}",
+                file_size=len(file_content),
+                mime_type=mime,
+                uploaded_by_id=user_id
+            ))
+            attachment_count += 1
+            write_log(f"✓ Attachment saved: {name} ({len(file_content)} bytes)")
     
     # Update ticket timestamp
     from datetime import datetime
@@ -16372,6 +16543,8 @@ Thank you.
         write_log(f"❌ NOT SENDING EMAIL: is_internal={is_internal}, guest_email='{ticket.guest_email}'")
     
     write_log(f"✓ COMPLETE - Log saved to: {log_file}")
+    if skipped:
+        request.session['error_message'] = '; '.join(skipped)
     return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
 
@@ -17699,7 +17872,7 @@ async def web_task_attachment_download(
     
     return FileResponse(
         path=str(file_path),
-        filename=attachment.filename,
+        filename=clean_upload_name(attachment.filename),
         media_type=attachment.file_type or 'application/octet-stream'
     )
 
