@@ -402,5 +402,41 @@ def test_startup_preference_helper_is_idempotent(tmp_path, monkeypatch):
 
 def test_modified_templates_parse_cleanly():
     env = Environment(loader=FileSystemLoader('app/templates'))
-    for name in ('base.html', 'dashboard/index.html', 'auth/profile.html'):
+    for name in ('base.html', 'dashboard/index.html', 'auth/profile.html', 'projects/index.html'):
         env.parse(Path('app/templates', name).read_text(encoding='utf-8'))
+
+
+@pytest.mark.asyncio
+async def test_board_view_admin_assigned_only_toggle_and_non_admin_isolation(tmp_path):
+    from app.web.routes import web_projects
+
+    engine, db, people, _ = await _seed(tmp_path / 'board_toggle.db')
+    try:
+        ada = people['ada']
+        bob = people['bob']
+
+        # Admin unchecked (0) sees all workspace projects and sees the toggle
+        resp_all = await web_projects(_request(ada, path='/web/projects', assigned_only='0'), db)
+        assert {p.name for p in resp_all.context['projects']} == {'Mine', 'Team project'}
+        assert resp_all.context['assigned_only'] is False
+        assert 'board-assigned-only-toggle' in resp_all.body.decode('utf-8')
+
+        # Admin ticks Only my assigned projects (1) -> sees only assigned project & persists
+        req_only = _request(ada, path='/web/projects')
+        req_only.query_params = QueryParams([('assigned_only', '0'), ('assigned_only', '1')])
+        resp_only = await web_projects(req_only, db)
+        assert {p.name for p in resp_only.context['projects']} == {'Mine'}
+        assert resp_only.context['assigned_only'] is True
+
+        # Reload without query param remembers preference
+        resp_reload = await web_projects(_request(ada, path='/web/projects'), db)
+        assert {p.name for p in resp_reload.context['projects']} == {'Mine'}
+        assert resp_reload.context['assigned_only'] is True
+
+        # Non-admin cannot bypass via assigned_only=0 and never sees the toggle
+        resp_member = await web_projects(_request(bob, path='/web/projects', assigned_only='0'), db)
+        assert {p.name for p in resp_member.context['projects']} == {'Mine'}
+        assert 'board-assigned-only-toggle' not in resp_member.body.decode('utf-8')
+    finally:
+        await db.close()
+        await engine.dispose()

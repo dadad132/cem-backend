@@ -7,9 +7,20 @@
 {% if request.session.get('error_message') %}
 <div class="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800" data-delete-error-banner>{{ request.session.pop('error_message') }}</div>
 {% endif %}
-<div class="flex items-center justify-between mb-4">
+<div class="flex flex-wrap items-center justify-between gap-3 mb-4">
   <h1 class="text-2xl font-semibold">Projects</h1>
-  <div class="flex items-center gap-2">
+  <div class="flex flex-wrap items-center gap-2">
+    {% if user.is_admin %}
+    <form method="get" action="/web/projects" class="flex items-center gap-2 rounded border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700">
+      <input type="hidden" name="assigned_only" value="0">
+      <label for="board-assigned-only-toggle" class="font-medium cursor-pointer whitespace-nowrap">Only my assigned projects</label>
+      <input type="checkbox" id="board-assigned-only-toggle" name="assigned_only" value="1"
+             class="h-4 w-4 rounded border-slate-400 text-blue-600 focus:ring-blue-500"
+             {% if assigned_only %}checked{% endif %}
+             onchange="this.form.submit()">
+      <button type="submit" class="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs rounded">Apply</button>
+    </form>
+    {% endif %}
     <a href="/web/projects/archived" class="px-3 py-2 rounded border border-slate-300 text-slate-700 hover:bg-slate-50 text-sm flex items-center gap-2">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/>

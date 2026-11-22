@@ -7137,7 +7137,12 @@ async def web_projects(request: Request, db: AsyncSession = Depends(get_session)
         request.session.clear()
         return RedirectResponse('/web/login', status_code=303)
     
-    projects = await _board_projects(db, user)
+    assigned_only, raw_assigned_only = _admin_assigned_only(request, user)
+    if user.is_admin and raw_assigned_only in ('0', '1') and bool(user.dashboard_assigned_only) != assigned_only:
+        user.dashboard_assigned_only = assigned_only
+        await db.commit()
+
+    projects = await _board_projects(db, user, assigned_only=assigned_only)
 
     # Get workspace for branding
     workspace = await get_workspace_for_user(user_id, db)
@@ -7148,16 +7153,20 @@ async def web_projects(request: Request, db: AsyncSession = Depends(get_session)
         'user': user,
         'projects': projects,
         'project_progress': await project_counts(db, [p.id for p in projects], today),
-        'workspace': workspace
+        'workspace': workspace,
+        'assigned_only': assigned_only,
     })
 
 
-async def _board_projects(db: AsyncSession, user: User) -> list:
+async def _board_projects(db: AsyncSession, user: User, assigned_only: Optional[bool] = None) -> list:
     """The projects on the Board View, newest first, not archived: all of the
-    company's for admins, the ones they are a member of for everyone else."""
-    # Admin: see all projects in workspace (excluding archived)
+    company's for admins (unless assigned_only is ticked), the ones they are a
+    member of for everyone else."""
+    if assigned_only is None:
+        assigned_only = bool(getattr(user, 'dashboard_assigned_only', False))
+    # Admin: see all projects in workspace (excluding archived) unless assigned_only is ticked
     # Regular user: only see projects they're assigned to (excluding archived)
-    if user.is_admin:
+    if user.is_admin and not assigned_only:
         result = await db.execute(
             select(Project)
             .where(Project.workspace_id == user.workspace_id, Project.is_archived == False)
