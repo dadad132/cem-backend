@@ -5502,14 +5502,29 @@ async def web_admin_email_settings_save(
         raise HTTPException(status_code=403, detail="Admin access required")
     
     from app.models.email_settings import EmailSettings
+    from app.core.project_weekly_report import recipients as weekly_recipients
     from datetime import datetime
-    
+
     try:
+        normalized_weekly_recipients = weekly_recipients(weekly_report_recipients)
+        weekly_recipients_value = ', '.join(normalized_weekly_recipients) or None
+        weekly_enabled = weekly_report_enabled == 'true'
+        weekly_include_projects = weekly_report_include_projects == 'true'
+        weekly_include_tickets = weekly_report_include_tickets == 'true'
+        weekly_recipient_error = False
+        weekly_attachment_error = False
+        if weekly_enabled and not normalized_weekly_recipients:
+            weekly_enabled = False
+            weekly_recipient_error = True
+        if weekly_enabled and not (weekly_include_projects or weekly_include_tickets):
+            weekly_enabled = False
+            weekly_attachment_error = True
+
         # Get or create settings
         settings = (await db.execute(
             select(EmailSettings).where(EmailSettings.workspace_id == user.workspace_id)
         )).scalar_one_or_none()
-        
+
         if settings:
             # Update existing
             settings.smtp_host = smtp_host
@@ -5538,10 +5553,10 @@ async def web_admin_email_settings_save(
             settings.completion_email_subject = completion_email_subject or "{type} Completed - {title}"
             settings.completion_email_body = completion_email_body
             # Weekly workspace report: unchecked boxes are not submitted at all.
-            settings.weekly_report_enabled = weekly_report_enabled == 'true'
-            settings.weekly_report_recipients = (weekly_report_recipients or '').strip() or None
-            settings.weekly_report_include_projects = weekly_report_include_projects == 'true'
-            settings.weekly_report_include_tickets = weekly_report_include_tickets == 'true'
+            settings.weekly_report_enabled = weekly_enabled
+            settings.weekly_report_recipients = weekly_recipients_value
+            settings.weekly_report_include_projects = weekly_include_projects
+            settings.weekly_report_include_tickets = weekly_include_tickets
             settings.updated_at = datetime.utcnow()
         else:
             # Create new
@@ -5571,22 +5586,39 @@ async def web_admin_email_settings_save(
                 completion_notify_ticket=completion_notify_ticket == 'true',
                 completion_email_subject=completion_email_subject or "{type} Completed - {title}",
                 completion_email_body=completion_email_body,
-                weekly_report_enabled=weekly_report_enabled == 'true',
-                weekly_report_recipients=(weekly_report_recipients or '').strip() or None,
-                weekly_report_include_projects=weekly_report_include_projects == 'true',
-                weekly_report_include_tickets=weekly_report_include_tickets == 'true',
+                weekly_report_enabled=weekly_enabled,
+                weekly_report_recipients=weekly_recipients_value,
+                weekly_report_include_projects=weekly_include_projects,
+                weekly_report_include_tickets=weekly_include_tickets,
             )
             db.add(settings)
-        
+
         await db.commit()
-        
-        request.session['flash_message'] = "✓ Email settings saved successfully"
-        request.session['flash_type'] = 'success'
-        
-    except Exception as e:
-        request.session['flash_message'] = f"✗ Failed to save settings: {str(e)}"
+
+        if weekly_recipient_error:
+            request.session['flash_message'] = (
+                "✗ Please enter at least one valid email address to enable weekly reports"
+            )
+            request.session['flash_type'] = 'error'
+        elif weekly_attachment_error:
+            request.session['flash_message'] = (
+                "✗ Select at least one weekly report attachment (projects or tickets)"
+            )
+            request.session['flash_type'] = 'error'
+        else:
+            request.session['flash_message'] = "✓ Email settings saved successfully"
+            request.session['flash_type'] = 'success'
+
+    except Exception:
+        logging.exception(
+            'Failed to save email settings for workspace %s',
+            getattr(user, 'workspace_id', None),
+        )
+        request.session['flash_message'] = (
+            "✗ Failed to save settings. Check server logs for details."
+        )
         request.session['flash_type'] = 'error'
-    
+
     return RedirectResponse('/web/admin/email-settings', status_code=303)
 
 
@@ -5630,6 +5662,56 @@ async def web_admin_email_settings_test(request: Request, db: AsyncSession = Dep
         
     except Exception as e:
         return JSONResponse({'success': False, 'error': str(e)})
+
+
+@router.post('/admin/email-settings/send-weekly-report')
+async def web_admin_email_settings_send_weekly_report(request: Request, db: AsyncSession = Depends(get_session)):
+    """Send the weekly Excel report on demand to the configured recipients."""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return JSONResponse({'success': False, 'error': 'Not authenticated'}, status_code=401)
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user or not user.is_admin or not user.is_active:
+        return JSONResponse({'success': False, 'error': 'Admin access required'}, status_code=403)
+    if not user.workspace_id:
+        return JSONResponse({'success': False, 'error': 'Workspace not assigned'}, status_code=403)
+
+    from app.models.email_settings import EmailSettings
+    from app.models.workspace import Workspace
+    from app.core.project_weekly_report import send_weekly_report_now
+
+    settings = (await db.execute(
+        select(EmailSettings).where(EmailSettings.workspace_id == user.workspace_id)
+    )).scalar_one_or_none()
+    if not settings:
+        return JSONResponse({'success': False, 'error': 'Email settings not configured'}, status_code=400)
+
+    workspace = (await db.execute(
+        select(Workspace).where(Workspace.id == user.workspace_id)
+    )).scalar_one_or_none()
+    if not workspace:
+        return JSONResponse({'success': False, 'error': 'Workspace not found'}, status_code=400)
+
+    try:
+        result = await send_weekly_report_now(db, workspace, settings)
+        attachments = result.get('attachments', [])
+        recipients = result.get('recipients', [])
+        return JSONResponse({
+            'success': True,
+            'recipients': recipients,
+            'attachments': attachments,
+            'period': result.get('period'),
+            'message': f"Sent weekly report to {', '.join(recipients)} with {len(attachments)} attachment(s).",
+        })
+    except ValueError as exc:
+        return JSONResponse({'success': False, 'error': str(exc)}, status_code=400)
+    except Exception:
+        logging.exception('Failed to send weekly report now for workspace %s', user.workspace_id)
+        return JSONResponse(
+            {'success': False, 'error': 'Failed to send weekly report. Check server logs for details.'},
+            status_code=500,
+        )
 
 
 @router.post('/admin/email-settings/check-emails')
@@ -5957,7 +6039,11 @@ async def web_admin_debug_settings(request: Request, db: AsyncSession = Depends(
             'incoming_mail_username': settings.incoming_mail_username,
             'incoming_mail_use_ssl': settings.incoming_mail_use_ssl,
             'mail_type': settings.incoming_mail_type,
-            'workspace_id': settings.workspace_id
+            'workspace_id': settings.workspace_id,
+            'weekly_report_enabled': settings.weekly_report_enabled,
+            'weekly_report_recipients': settings.weekly_report_recipients,
+            'weekly_report_include_projects': settings.weekly_report_include_projects,
+            'weekly_report_include_tickets': settings.weekly_report_include_tickets,
         },
         'processed_emails': [{
             'message_id': p.message_id[:50] + '...' if len(p.message_id) > 50 else p.message_id,

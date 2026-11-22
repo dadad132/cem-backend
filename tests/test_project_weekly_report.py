@@ -502,9 +502,10 @@ async def test_admin_form_persists_weekly_settings(db, acme):
     assert response.status_code == 303
     settings = (await db.execute(select(EmailSettings))).scalar_one()
     assert settings.weekly_report_enabled is True
-    assert settings.weekly_report_recipients == 'new@acme.test ; boss@acme.test'
+    assert settings.weekly_report_recipients == 'new@acme.test, boss@acme.test'
     assert settings.weekly_report_include_projects is True
     assert settings.weekly_report_include_tickets is False
+    assert request.session['flash_type'] == 'success'
 
 
 def test_admin_template_exposes_weekly_settings():

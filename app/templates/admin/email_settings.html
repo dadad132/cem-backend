@@ -292,47 +292,46 @@
                     </div>
                 </div>
 
-                <!-- Weekly Workspace Report -->
+                <!-- Weekly Reports (Excel) -->
                 <div class="bg-white rounded-lg shadow-sm p-6 mb-6">
                     <h2 class="text-xl font-semibold text-gray-900 mb-4 flex items-center">
-                        <i class="fas fa-file-excel text-indigo-600 mr-2"></i>
-                        Weekly Workspace Report
+                        <i class="fas fa-file-excel text-emerald-600 mr-2"></i>
+                        Weekly Reports (Excel)
                     </h2>
                     <p class="text-sm text-gray-600 mb-4">
-                        Every Monday from 08:00 in the company's time zone, one email with the
-                        same Excel reports the download buttons produce: one per active project
-                        and one for all workspace tickets. It covers the previous Monday to Friday.
+                        Every <strong>Monday at 08:00</strong> (company timezone), sends the previous Monday–Friday
+                        <strong>Project Reports (all active projects)</strong> and <strong>Ticket Report</strong> as
+                        the exact same Excel workbooks from the report system, exclusively to the recipients listed below.
                     </p>
 
-                    <div class="flex items-center mb-4 p-3 bg-indigo-50 rounded-lg">
+                    <div class="flex items-center mb-4 p-3 bg-emerald-50 rounded-lg">
                         <input type="checkbox" name="weekly_report_enabled" value="true"
                                id="weekly_report_enabled"
                                {% if settings and settings.weekly_report_enabled %}checked{% endif %}
                                class="mr-3 h-5 w-5">
-                        <label for="weekly_report_enabled" class="text-sm font-medium text-indigo-900">
-                            Send the weekly workspace report
+                        <label for="weekly_report_enabled" class="text-sm font-medium text-emerald-900">
+                            Enable automatic weekly Excel report emails
                         </label>
                     </div>
 
                     <div class="mb-4">
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Send Report To</label>
-                        <input type="text" name="weekly_report_recipients"
-                               value="{{ settings.weekly_report_recipients if settings and settings.weekly_report_recipients else '' }}"
-                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                               placeholder="team@yourdomain.com; manager@yourdomain.com">
+                        <label for="weekly_report_recipients" class="block text-sm font-medium text-gray-700 mb-1">Send Weekly Reports To</label>
+                        <textarea name="weekly_report_recipients" id="weekly_report_recipients" rows="2"
+                                  class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                  placeholder="manager@yourdomain.com, operations@yourdomain.com">{{ settings.weekly_report_recipients if settings and settings.weekly_report_recipients else '' }}</textarea>
                         <p class="text-xs text-gray-500 mt-1">
-                            Separate addresses with commas, semicolons or spaces. Project support emails are not used.
+                            Multiple email addresses can be separated by commas, semicolons, or new lines.
                         </p>
                     </div>
 
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
                         <div class="flex items-center p-3 bg-blue-50 rounded-lg">
                             <input type="checkbox" name="weekly_report_include_projects" value="true"
                                    id="weekly_report_include_projects"
                                    {% if not settings or settings.weekly_report_include_projects %}checked{% endif %}
                                    class="mr-3 h-4 w-4">
                             <label for="weekly_report_include_projects" class="text-sm text-blue-900">
-                                <i class="fas fa-folder mr-1"></i>Attach project reports
+                                <i class="fas fa-folder mr-1"></i>Include Project Reports (Excel — all active projects)
                             </label>
                         </div>
                         <div class="flex items-center p-3 bg-purple-50 rounded-lg">
@@ -341,9 +340,20 @@
                                    {% if not settings or settings.weekly_report_include_tickets %}checked{% endif %}
                                    class="mr-3 h-4 w-4">
                             <label for="weekly_report_include_tickets" class="text-sm text-purple-900">
-                                <i class="fas fa-ticket-alt mr-1"></i>Attach ticket report
+                                <i class="fas fa-ticket-alt mr-1"></i>Include Ticket Report (Excel)
                             </label>
                         </div>
+                    </div>
+
+                    <div class="border-t border-gray-200 pt-4">
+                        <div class="flex flex-wrap items-center gap-3">
+                            <button type="button" id="send-weekly-report-btn" onclick="sendWeeklyReportNow()"
+                                    class="px-4 py-2 bg-emerald-600 text-white rounded-md hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                                <i class="fas fa-paper-plane mr-2"></i>Send Weekly Report Now
+                            </button>
+                            <span class="text-xs text-gray-500">Click <strong>Save Settings</strong> first if recipients were just edited.</span>
+                        </div>
+                        <div id="send-weekly-report-status" class="mt-3 hidden rounded-lg p-3 text-sm"></div>
                     </div>
                 </div>
 
@@ -471,6 +481,72 @@ function sendTestEmail() {
             alert('✗ Error: ' + err.message);
         });
     }
+}
+
+function sendWeeklyReportNow() {
+    const button = document.getElementById('send-weekly-report-btn');
+    const status = document.getElementById('send-weekly-report-status');
+    const originalHtml = button.innerHTML;
+
+    status.className = 'mt-3 rounded-lg p-3 text-sm bg-blue-50 border border-blue-200 text-blue-800';
+    status.textContent = 'Sending weekly report...';
+    status.classList.remove('hidden');
+    button.disabled = true;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Sending...';
+
+    fetch('/web/admin/email-settings/send-weekly-report', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'}
+    })
+    .then(response => response.json().then(data => ({ok: response.ok, data})))
+    .then(({ok, data}) => {
+        status.className = ok
+            ? 'mt-3 rounded-lg p-3 text-sm bg-green-50 border border-green-200 text-green-800'
+            : 'mt-3 rounded-lg p-3 text-sm bg-red-50 border border-red-200 text-red-800';
+        status.textContent = '';
+
+        const title = document.createElement('div');
+        title.className = 'font-medium mb-1';
+        title.textContent = ok ? 'Weekly report sent' : 'Could not send weekly report';
+        status.appendChild(title);
+
+        const message = document.createElement('div');
+        message.textContent = ok
+            ? (data.message || 'Weekly report sent successfully.')
+            : (data.error || 'Failed to send weekly report.');
+        status.appendChild(message);
+
+        if (ok && Array.isArray(data.recipients) && data.recipients.length) {
+            const recipients = document.createElement('div');
+            recipients.className = 'mt-2';
+            recipients.textContent = 'Recipients: ' + data.recipients.join(', ');
+            status.appendChild(recipients);
+        }
+
+        if (ok && Array.isArray(data.attachments) && data.attachments.length) {
+            const attachmentsLabel = document.createElement('div');
+            attachmentsLabel.className = 'mt-2';
+            attachmentsLabel.textContent = 'Attachments:';
+            status.appendChild(attachmentsLabel);
+
+            const list = document.createElement('ul');
+            list.className = 'list-disc ml-5 mt-1';
+            data.attachments.forEach(name => {
+                const item = document.createElement('li');
+                item.textContent = String(name);
+                list.appendChild(item);
+            });
+            status.appendChild(list);
+        }
+    })
+    .catch(err => {
+        status.className = 'mt-3 rounded-lg p-3 text-sm bg-red-50 border border-red-200 text-red-800';
+        status.textContent = 'Error: ' + err.message;
+    })
+    .finally(() => {
+        button.disabled = false;
+        button.innerHTML = originalHtml;
+    });
 }
 
 function debugSettings() {
