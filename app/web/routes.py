@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, File, UploadFile, Query, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, or_, and_
+from sqlalchemy import select, or_, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
@@ -856,7 +856,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
         .where(
             Assignment.assignee_id == current_user_id,
             Task.status == TaskStatus.done,
-            Task.archived_at >= day_start_utc(week_ago, zone),
+            func.coalesce(Task.completed_at, Task.archived_at) >= day_start_utc(week_ago, zone),
             Project.workspace_id == user.workspace_id,
             Task.project_id.in_(project_ids),
         )
@@ -1141,7 +1141,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
             .where(
                 Task.project_id.in_(project_ids),
                 Task.status == TaskStatus.done,
-                Task.archived_at >= day_start_utc(week_ago, zone)
+                func.coalesce(Task.completed_at, Task.archived_at) >= day_start_utc(week_ago, zone)
             )
         )
         team_tasks_completed = team_done_result.scalar() or 0
@@ -1205,7 +1205,7 @@ async def web_dashboard(request: Request, view: Optional[str] = None, user_id: O
                         .where(
                             Assignment.assignee_id == user_id,
                             Task.status == TaskStatus.done,
-                            Task.archived_at >= day_start_utc(week_ago, zone),
+                            func.coalesce(Task.completed_at, Task.archived_at) >= day_start_utc(week_ago, zone),
                             Project.workspace_id == user.workspace_id,
                         )
                     )
@@ -7742,7 +7742,8 @@ async def _project_report_data(db: AsyncSession, project, start_date: Optional[s
     tasks_detail = []
     for task in all_tasks:
         # (the last time it was done means nothing if it was reopened since)
-        completed_at = task_completions.get(task.id) if task.status == TaskStatus.done else None
+        completed_at = ((task.completed_at or task.archived_at or task_completions.get(task.id))
+                        if task.status == TaskStatus.done else None)
         duration_days = None
         if completed_at:
             duration_days = (completed_at - task.created_at).days
@@ -8975,8 +8976,9 @@ async def web_task_update(
     if not task:
         raise HTTPException(status_code=404, detail='Task not found')
     
-    # Check if task is archived - only admins can edit archived tasks
-    if task.is_archived and not user.is_admin:
+    # Done used to be the same as archived: keep the lock (admins only) now
+    # that done work stays on the board instead of being archived.
+    if (task.is_archived or task.status == TaskStatus.done) and not user.is_admin:
         raise HTTPException(status_code=403, detail='This task is archived. Only admins can modify it.')
     
     # Check permission: Admin OR assigned to this task
@@ -9016,16 +9018,22 @@ async def web_task_update(
         old_status_value = task.status.value
         task.status = new_status
         
-        # Auto-archive when moved to done
+        # Done stays on the board; a bot archives it later. is_archived and
+        # archived_at are left alone so an already-archived task stays archived.
         if new_status.value == 'done':
-            task.is_archived = True
-            task.archived_at = datetime.utcnow()
+            task.completed_at = datetime.utcnow()
             task_just_completed = True  # Flag to send completion notification
             await _stop_task_timer(db, task)  # no more work is timed on a done task
         elif old_status_value == 'done' and new_status.value != 'done':
-            # Unarchive if moved out of done
-            task.is_archived = False
-            task.archived_at = None
+            finished_at = task.completed_at or task.archived_at
+            task.completed_at = None
+            # A pre-Slice-2 done task was archived at the same moment it
+            # finished. Let an admin move it out of Done without losing it
+            # behind the archive filter; a later bot archive keeps its own
+            # timestamp, so it stays archived.
+            if task.is_archived and finished_at == task.archived_at:
+                task.is_archived = False
+                task.archived_at = None
     
     new_priority = TaskPriority(priority)
     if task.priority != new_priority:
@@ -9097,7 +9105,7 @@ async def web_task_update(
                 priority=task.priority.value.title(),
                 completed_by_name=user.shown_name or user.username,
                 created_at=task.created_at,
-                completed_at=task.archived_at or datetime.utcnow(),
+                completed_at=task.completed_at or datetime.utcnow(),
                 additional_details=additional_details
             )
         except Exception as e:
@@ -9181,8 +9189,9 @@ async def web_task_complete_with_details(
     task.status = TaskStatus.done
     task.close_type = 'sla' if is_sla else 'billable'
     task.updated_at = now
-    task.is_archived = True
-    task.archived_at = now
+    # Finishing is not archiving: the card stays in the board's Done column
+    # until a bot (or an admin) explicitly archives it.
+    task.completed_at = now
 
     # No more work is timed on a done task
     from app.core.work_timer import format_duration
@@ -9275,7 +9284,7 @@ async def web_task_complete_with_details(
                 subject=task.title,
                 priority=task.priority.value.title() if task.priority else "Normal",
                 created_at=task.created_at,
-                closed_at=task.archived_at or datetime.utcnow(),
+                closed_at=task.completed_at or datetime.utcnow(),
                 technician_name=user.shown_name or user.username,
                 client_name=task.customer_name,
                 client_surname=task.customer_surname,
@@ -9306,7 +9315,7 @@ async def web_task_complete_with_details(
             priority=task.priority.value.title(),
             completed_by_name=user.shown_name or user.username,
             created_at=task.created_at,
-            completed_at=task.archived_at,
+            completed_at=task.completed_at,
             additional_details=additional_details,
             pdf_attachment=task_pdf_bytes,
             pdf_filename=f"JobCard_Task_{task_id}.pdf",
@@ -9358,9 +9367,9 @@ async def web_task_add_subtasks(
     if not task:
         raise HTTPException(status_code=404, detail='Task not found')
     
-    # Check if task is archived
-    if task.is_archived and not user.is_admin:
-        raise HTTPException(status_code=403, detail='Cannot add subtasks to archived tasks')
+    # Done tasks used to be archived, so they kept their subtasks locked
+    if (task.is_archived or task.status == TaskStatus.done) and not user.is_admin:
+        raise HTTPException(status_code=403, detail='Cannot modify subtasks of a finished task')
     
     # Check permission: Admin OR assigned to this task
     if not user.is_admin:
@@ -9434,9 +9443,9 @@ async def web_task_toggle_subtask(
     if not task:
         return JSONResponse({'error': 'Task not found'}, status_code=404)
     
-    # Check if task is archived
-    if task.is_archived and not user.is_admin:
-        return JSONResponse({'error': 'Cannot modify subtasks in archived tasks'}, status_code=403)
+    # Done tasks used to be archived, so they kept their subtasks locked
+    if (task.is_archived or task.status == TaskStatus.done) and not user.is_admin:
+        return JSONResponse({'error': 'Cannot modify subtasks of a finished task'}, status_code=403)
     
     # Check permission: Admin OR assigned to this task
     if not user.is_admin:
@@ -9511,9 +9520,9 @@ async def web_task_delete_subtask(
     if not task:
         return JSONResponse({'error': 'Task not found'}, status_code=404)
     
-    # Check if task is archived
-    if task.is_archived and not user.is_admin:
-        return JSONResponse({'error': 'Cannot delete subtasks from archived tasks'}, status_code=403)
+    # Done tasks used to be archived, so they kept their subtasks locked
+    if (task.is_archived or task.status == TaskStatus.done) and not user.is_admin:
+        return JSONResponse({'error': 'Cannot modify subtasks of a finished task'}, status_code=403)
     
     # Check permission: Admin OR assigned to this task
     if not user.is_admin:
@@ -9556,9 +9565,9 @@ async def web_task_add_comment(
     if not task:
         raise HTTPException(status_code=404, detail='Task not found')
     
-    # Check if task is archived - only admins can comment on archived tasks
-    if task.is_archived and not user.is_admin:
-        raise HTTPException(status_code=403, detail='This task is archived. Only admins can add comments.')
+    # Finished tasks were archived, so only admins could comment on them
+    if (task.is_archived or task.status == TaskStatus.done) and not user.is_admin:
+        raise HTTPException(status_code=403, detail='This task is finished. Only admins can add comments.')
     
     # Check permission: only admin or assignees can comment
     is_assignee = (await db.execute(
@@ -9967,7 +9976,12 @@ async def web_task_update_status(request: Request, task_id: int, status_value: s
     task = result.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail='Task not found')
-    
+
+    # Finished tasks were archived, so only admins could change their status.
+    # Keep that lock now that they stay visible on the board.
+    if (task.is_archived or task.status == TaskStatus.done) and not user.is_admin:
+        raise HTTPException(status_code=403, detail='Only admins can modify a finished task')
+
     # Check permission: Admin OR project member
     if not user.is_admin:
         from app.models.project_member import ProjectMember
@@ -9995,15 +10009,20 @@ async def web_task_update_status(request: Request, task_id: int, status_value: s
     old_status = task.status.value
     task.status = TaskStatus(status_value)
     
-    # Auto-archive when moved to done
+    # Done stays on the board; a bot archives it later. A repeated "done" must
+    # not re-date work that already finished.
     if status_value == 'done':
-        task.is_archived = True
-        task.archived_at = datetime.utcnow()
+        if old_status != 'done':
+            task.completed_at = datetime.utcnow()
         await _stop_task_timer(db, task)  # no more work is timed on a done task
     elif old_status == 'done' and status_value != 'done':
-        # Unarchive if moved out of done
-        task.is_archived = False
-        task.archived_at = None
+        finished_at = task.completed_at or task.archived_at
+        task.completed_at = None
+        # Old done work was archived when it finished; moving it out of Done
+        # must bring it back onto the board. A later explicit archive stays.
+        if task.is_archived and finished_at == task.archived_at:
+            task.is_archived = False
+            task.archived_at = None
     
     # Save history
     history_entry = TaskHistory(
@@ -10228,6 +10247,7 @@ async def web_task_reopen(request: Request, task_id: int, db: AsyncSession = Dep
     # Reopen the task
     task.is_archived = False
     task.archived_at = None
+    task.completed_at = None
     # If status is done, set it back to in_progress
     if task.status == TaskStatus.done:
         task.status = TaskStatus.in_progress
@@ -18560,7 +18580,7 @@ async def web_activity_feed(
         .join(Project, Task.project_id == Project.id)
         .where(Project.workspace_id == user.workspace_id)
         .where(Task.status == TaskStatus.done)
-        .where(Task.archived_at >= day_start_utc(week_ago, zone))
+        .where(func.coalesce(Task.completed_at, Task.archived_at) >= day_start_utc(week_ago, zone))
     )).scalars().all()
     
     overdue = (await db.execute(
@@ -18598,16 +18618,20 @@ async def web_activity_feed(
                     .where(Task.id.in_(task_ids))
                 )).scalars().all()
                 
-                # Tasks completed in the last month
-                completed_month = [t for t in member_tasks 
-                                  if t.status == TaskStatus.done 
-                                  and t.archived_at 
-                                  and to_local(t.archived_at, zone).date() >= month_ago]
-                
+                # Tasks completed in the last month. Older rows have the
+                # finish time in archived_at, so fall back to it.
+                def _done_at(t):
+                    return t.completed_at or t.archived_at
+
+                completed_month = [t for t in member_tasks
+                                  if t.status == TaskStatus.done
+                                  and _done_at(t)
+                                  and to_local(_done_at(t), zone).date() >= month_ago]
+
                 # Tasks completed late (had due date, completed after due date)
                 completed_late = [t for t in completed_month
-                                 if t.due_date and t.archived_at 
-                                 and to_local(t.archived_at, zone).date() > t.due_date]
+                                 if t.due_date and _done_at(t)
+                                 and to_local(_done_at(t), zone).date() > t.due_date]
                 
                 # Currently overdue tasks
                 overdue_tasks = [t for t in member_tasks
@@ -18653,18 +18677,21 @@ async def web_activity_feed(
             )).scalars().all()
             
             # Tasks completed in the last month
-            completed_month = [t for t in member_tasks 
-                              if t.status == TaskStatus.done 
-                              and t.archived_at 
-                              and to_local(t.archived_at, zone).date() >= month_ago]
-            
+            def _done_at(t):
+                return t.completed_at or t.archived_at
+
+            completed_month = [t for t in member_tasks
+                              if t.status == TaskStatus.done
+                              and _done_at(t)
+                              and to_local(_done_at(t), zone).date() >= month_ago]
+
             # Separate completed on time vs late
             completed_on_time = []
             completed_late = []
-            
+
             for t in completed_month:
-                if t.due_date and t.archived_at:
-                    if to_local(t.archived_at, zone).date() > t.due_date:
+                if t.due_date and _done_at(t):
+                    if to_local(_done_at(t), zone).date() > t.due_date:
                         completed_late.append(t)
                     else:
                         completed_on_time.append(t)

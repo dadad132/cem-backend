@@ -15,6 +15,9 @@ returns the same fields as GET /tickets/{number}; add include=comments,
 history,time_entries for those too, so no call per ticket is needed.
 GET /comments pages through every ticket's comments, with since=... for
 only the new ones.
+
+Finishing a task does not archive it: POST /tasks/{id}/archive or
+POST /tasks/archive-done lets a bot move finished work out of the board.
 """
 from __future__ import annotations
 
@@ -59,7 +62,7 @@ BILLING_FIELDS = (("travel", "traveling"), ("labour_onsite", "labour_onsite"),
 # ---------------------------------------------------------------------------
 
 async def require_api_key(
-    x_api_key: str = Header(..., alias="X-API-Key"),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     db: AsyncSession = Depends(get_session),
 ) -> tuple[APIKey, Workspace]:
     """Validate the X-API-Key header and return (api_key_row, workspace)."""
@@ -116,6 +119,12 @@ class TicketUpdateRequest(BaseModel):
     status: Optional[TicketStatusValue] = None
     priority: Optional[TicketPriorityValue] = None
     category: Optional[str] = Field(None, max_length=50)
+
+
+class ArchiveDoneRequest(BaseModel):
+    """Optional filters for the bot's 'archive everything finished' call."""
+    project_id: Optional[int] = None
+    older_than_days: Optional[int] = Field(None, ge=0)
 
 
 # ---------------------------------------------------------------------------
@@ -754,7 +763,7 @@ async def list_tasks(
     changed = _since(updated_since, "updated_since")
     if changed:
         conditions.append(or_(Task.updated_at >= changed, Task.created_at >= changed,
-                              Task.archived_at >= changed))
+                              Task.completed_at >= changed, Task.archived_at >= changed))
     where = and_(*conditions)
     total = await db.scalar(
         select(func.count()).select_from(Task).join(Project, Project.id == Task.project_id).where(where)) or 0
@@ -794,13 +803,101 @@ async def list_tasks(
             "is_overdue": bool(task.due_date and task.due_date < today and not done and not task.is_archived),
             "created_at": _utc(task.created_at),
             "updated_at": _utc(task.updated_at),
-            # Finished tasks are archived as they finish, and later edits leave archived_at alone
-            "completed_at": _utc(task.archived_at) if done else None,
+            # Finishing and archiving are separate events now; older rows still
+            # carry the finish time in archived_at.
+            "completed_at": _utc(task.completed_at or task.archived_at) if done else None,
             "is_archived": task.is_archived,
             "coverage": task.close_type,
             "time_worked_seconds": worked.get(task.id, 0),
         })
     return JSONResponse({**_page(rows, total, limit, offset), "tasks": tasks})
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/tasks/archive-done
+# ---------------------------------------------------------------------------
+
+@router.post("/tasks/archive-done")
+async def archive_done_tasks(
+    project_id: Optional[int] = Query(None),
+    older_than_days: Optional[int] = Query(None, ge=0),
+    payload: Optional[ArchiveDoneRequest] = None,
+    auth=Depends(require_api_key),
+    db: AsyncSession = Depends(get_session),
+):
+    """Archive this workspace's finished, still-unarchived tasks in one call.
+
+    Filters may be sent as query parameters or as a JSON body. A bot that runs
+    this every night only ever sees work belonging to its own API key.
+    """
+    _, workspace = auth
+    body = payload or ArchiveDoneRequest()
+    project_id = body.project_id if body.project_id is not None else project_id
+    older_than_days = body.older_than_days if body.older_than_days is not None else older_than_days
+
+    conditions = [Project.workspace_id == workspace.id,
+                  Task.status == TaskStatus.done, Task.is_archived == False]  # noqa: E712
+    if project_id is not None:
+        # The workspace join above stays in force, so a project id from another
+        # company simply matches no rows instead of widening the caller's scope.
+        conditions.append(Task.project_id == project_id)
+    if older_than_days is not None:
+        finished_at = func.coalesce(Task.completed_at, Task.archived_at)
+        conditions.append(finished_at < datetime.utcnow() - timedelta(days=older_than_days))
+
+    rows = (await db.execute(
+        select(Task).join(Project, Project.id == Task.project_id)
+        .where(and_(*conditions)).order_by(Task.id.asc())
+    )).scalars().all()
+    now = datetime.utcnow()
+    ids = []
+    for task in rows:
+        task.is_archived = True
+        task.archived_at = now
+        task.updated_at = now
+        if task.status == TaskStatus.done and task.completed_at is None:
+            task.completed_at = now
+        ids.append(task.id)
+    if ids:
+        await db.commit()
+    return JSONResponse({"archived_count": len(ids), "task_ids": ids})
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/tasks/{task_id}/archive
+# ---------------------------------------------------------------------------
+
+@router.post("/tasks/{task_id}/archive")
+async def archive_task(
+    task_id: int,
+    auth=Depends(require_api_key),
+    db: AsyncSession = Depends(get_session),
+):
+    """Explicitly archive one task. Repeat calls are harmless."""
+    _, workspace = auth
+    task = (await db.execute(
+        select(Task).join(Project, Project.id == Task.project_id).where(
+            Task.id == task_id, Project.workspace_id == workspace.id)
+    )).scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if not task.is_archived:
+        now = datetime.utcnow()
+        task.is_archived = True
+        task.archived_at = now
+        task.updated_at = now
+        if task.status == TaskStatus.done and task.completed_at is None:
+            task.completed_at = now
+        await db.commit()
+
+    return JSONResponse({
+        "id": task.id,
+        "status": getattr(task.status, "value", task.status),
+        "is_archived": task.is_archived,
+        "archived_at": _utc(task.archived_at),
+        "completed_at": _utc(task.completed_at) if task.status == TaskStatus.done else None,
+    })
 
 
 # ---------------------------------------------------------------------------

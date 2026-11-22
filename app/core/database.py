@@ -99,6 +99,7 @@ async def init_models() -> None:
                 ("task", "customer_branch", "VARCHAR"),
                 ("ticket", "due_date", "TIMESTAMP"),
                 ("task", "close_type", "VARCHAR"),
+                ("task", "completed_at", "TIMESTAMP"),
                 ("workspace", "timezone", "VARCHAR"),
                 ("workspace", "comment_timezone", "VARCHAR"),
                 ("user", "dashboard_assigned_only", "BOOLEAN NOT NULL DEFAULT 0"),
@@ -161,6 +162,15 @@ async def apply_data_changes(conn) -> None:
             "UPDATE task SET archived_at = updated_at WHERE status = 'done' AND archived_at IS NULL"
         )
         await conn.exec_driver_sql("PRAGMA user_version = 4")
+    if version < 5:
+        # Marking a task done no longer archives it: the finish time moved to
+        # completed_at. Give older finished tasks the date the old reports used
+        # so "done this week" does not lose history after the upgrade.
+        await conn.exec_driver_sql(
+            "UPDATE task SET completed_at = archived_at "
+            "WHERE status = 'done' AND completed_at IS NULL AND archived_at IS NOT NULL"
+        )
+        await conn.exec_driver_sql("PRAGMA user_version = 5")
 
 
 async def ensure_initialized() -> None:
@@ -445,6 +455,7 @@ async def lifespan(app):  # FastAPI lifespan
                 "time_spent_hours":           "FLOAT",
                 "is_archived":                "BOOLEAN NOT NULL DEFAULT 0",
                 "archived_at":                "TIMESTAMP",
+                "completed_at":               "TIMESTAMP",
                 "parent_task_id":             "INTEGER",
             }
             added = []

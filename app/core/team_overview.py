@@ -247,7 +247,7 @@ async def _team_load(db: AsyncSession, workspace_id: int, zone, now: datetime) -
 
 async def project_counts(db: AsyncSession, project_ids, today: date) -> Dict[int, dict]:
     """Progress per project: {project id: total, done, percent, blocked, overdue}.
-    Completed tasks are archived, so they count here though the board hides them."""
+    Finished tasks count here whether or not they have since been archived."""
     project_ids = list(project_ids)
     counts = {pid: {'total': 0, 'done': 0, 'blocked': 0, 'overdue': 0, 'percent': 0} for pid in project_ids}
     if not project_ids:
@@ -312,11 +312,13 @@ async def _changes(db: AsyncSession, workspace_id: int, start: datetime, end: da
             Ticket.workspace_id == workspace_id, TicketComment.is_internal == False,
             TicketComment.user_id.is_not(None), TicketComment.created_at >= start, TicketComment.created_at < end)
     ) or 0
-    # archived_at: done tasks are archived as they finish, and later edits leave it alone
+    # Done tasks stay unarchived now; older rows still date their finish in
+    # archived_at. A later explicit archive must not re-date the work.
+    finished_at = func.coalesce(Task.completed_at, Task.archived_at)
     tasks_done = await db.scalar(
         select(func.count()).select_from(Task).join(Project, Project.id == Task.project_id).where(
             Project.workspace_id == workspace_id, Task.status == TaskStatus.done,
-            Task.archived_at >= start, Task.archived_at < end)
+            finished_at >= start, finished_at < end)
     ) or 0
     return {'tickets_in': tickets_in, 'tickets_done': tickets_done, 'replies': replies, 'tasks_done': tasks_done,
             'backlog_change': tickets_in - tickets_done}

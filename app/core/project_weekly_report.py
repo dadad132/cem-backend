@@ -123,9 +123,14 @@ async def build_report(db: AsyncSession, project: Project, workspace: Workspace,
         worked[log.user_id] = worked.get(log.user_id, 0) + int(log.hours * 3600)
     worked = {u: s for u, s in worked.items() if s > 0}
 
-    # Finished tasks are archived as they finish (as the Team Overview counts them)
-    finished = sorted((t for t in tasks if _status(t) == 'done' and t.archived_at and start <= t.archived_at < end),
-                      key=lambda t: t.archived_at)
+    # Finishing is not archiving any more. Older rows still have their finish
+    # time in archived_at, so take the first date we actually recorded.
+    def finished_at(t):
+        return getattr(t, 'completed_at', None) or t.archived_at
+
+    finished = sorted((t for t in tasks if _status(t) == 'done' and finished_at(t)
+                       and start <= finished_at(t) < end),
+                      key=finished_at)
     added = [t for t in tasks if t.created_at and start <= t.created_at < end]
     still_open = [t for t in tasks if _status(t) != 'done' and not t.is_archived]
     overdue = sorted((t for t in still_open if t.due_date and t.due_date < today), key=lambda t: t.due_date)
@@ -142,7 +147,7 @@ async def build_report(db: AsyncSession, project: Project, workspace: Workspace,
         'company': workspace.name,
         'week_start': week_start,
         'week_end': week_start + timedelta(days=4),
-        'finished': [(t.title, who(t), to_local(t.archived_at, zone)) for t in finished],
+        'finished': [(t.title, who(t), to_local(finished_at(t), zone)) for t in finished],
         'added': len(added),
         'open': len(still_open),
         'open_by_status': {s: sum(1 for t in still_open if _status(t) == s) for s in ('todo', 'in_progress', 'blocked')},

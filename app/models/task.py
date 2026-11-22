@@ -23,9 +23,11 @@ class TaskBase(SQLModel):
     # Time tracking
     estimated_hours: Optional[float] = None
     time_spent_hours: Optional[float] = None
-    # Archive status - when task is marked done and locked
+    # Done tasks stay on the board; is_archived/archived_at are set later, by
+    # an explicit archive (bot or admin), not by marking the task done.
     is_archived: bool = Field(default=False, index=True)
     archived_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None  # when the task was marked done
     # Tags for flexible categorization
     tags: Optional[str] = None  # Comma-separated tags
     # Customer info (optional - for tasks related to specific customers)

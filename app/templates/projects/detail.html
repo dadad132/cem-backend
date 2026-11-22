@@ -68,7 +68,7 @@
 
 <div class="mb-4" x-data="taskSuggestions()">
   <div class="bg-blue-50 border-l-4 border-blue-400 p-3 rounded text-sm text-blue-800 mb-4">
-    <strong>ℹ️ Note:</strong> Completed tasks are automatically archived and hidden from this board.
+    <strong>ℹ️ Note:</strong> Completed tasks stay here in Done. They are only hidden once a bot or admin archives them.
     <a href="/web/tasks/list?project_id={{ project.id }}&tab=done" class="underline font-medium">View all tasks including archived →</a>
   </div>
   <form method="post" action="/web/tasks/create" class="grid grid-cols-1 lg:grid-cols-6 gap-2 items-end">
@@ -716,8 +716,12 @@ async function submitTaskCompletion(closeType, btn) {
     form.reset();
     if (btn) btn.disabled = false;
     
-    // Remove task from kanban (it's now archived)
-    pendingTaskCompletion.element.remove();
+    // Keep the card on the board: it belongs in Done until it is archived.
+    // Sortable already put it there; make sure the DOM and the column agree.
+    const doneColumn = document.getElementById('col-done');
+    doneColumn.appendChild(pendingTaskCompletion.element);
+    const doneCount = doneColumn.closest('section')?.querySelector('span.rounded-full');
+    if (doneCount) doneCount.textContent = String((Number(doneCount.textContent) || 0) + 1);
     pendingTaskCompletion = null;
     
     // Optionally show success message
