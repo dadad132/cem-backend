@@ -36,6 +36,12 @@ from app.core.attachment_upload import (
     MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_UPLOAD,
     clean_upload_name, photo_type as _photo_type, validate_attachment,
 )
+from app.core import project_quotation as quotations
+from app.core.project_quotation import (
+    validate_quotation, store_quotation, safe_quotation_path,
+    delete_quotation_file, new_quotation_name,
+    reserve_workspace_quota, release_workspace_quota,
+)
 from app.core.security import verify_password, get_password_hash
 from app.core.email import send_email
 from app.models.project import Project
@@ -7268,8 +7274,25 @@ async def web_projects_export(request: Request, fmt: str, db: AsyncSession = Dep
     return export_response(export, fmt)
 
 
+QUOTATION_REQUIRED_MESSAGE = (
+    'Please upload the project quotation/paperwork before creating the project'
+)
+
+
 @router.post('/projects/create')
-async def web_projects_create(request: Request, name: str = Form(...), description: Optional[str] = Form(None), db: AsyncSession = Depends(get_session)):
+async def web_projects_create(
+    request: Request,
+    name: str = Form(...),
+    description: Optional[str] = Form(None),
+    quotation_file: Optional[UploadFile] = File(None),
+    db: AsyncSession = Depends(get_session),
+):
+    """Create a project only when an acceptable quotation file was uploaded.
+
+    Storage is reserved atomically before any Project row exists, and the same
+    transaction reserves the bytes and commits the project. A failed creation
+    releases both the reservation and the stored file.
+    """
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
@@ -7277,17 +7300,94 @@ async def web_projects_create(request: Request, name: str = Form(...), descripti
     if not user:
         request.session.clear()
         return RedirectResponse('/web/login', status_code=303)
-    project = Project(name=name, description=description, owner_id=user_id, workspace_id=user.workspace_id)
-    db.add(project)
-    await db.commit()
-    await db.refresh(project)
-    
-    # Auto-assign the creator to the project
-    from app.models.project_member import ProjectMember
-    member = ProjectMember(project_id=project.id, user_id=user_id, assigned_by=user_id)
-    db.add(member)
-    await db.commit()
-    
+
+    # File(None) keeps a missing part out of FastAPI's 422 path: the HTML form
+    # gets the same friendly, visible error as an empty or disallowed file.
+    if quotation_file is None or not getattr(quotation_file, 'filename', None):
+        request.session['error_message'] = QUOTATION_REQUIRED_MESSAGE
+        return RedirectResponse('/web/projects', status_code=303)
+
+    # Read the limit from the module at call time so tests and deployments can
+    # tune it without this route freezing an old value.
+    limit = quotations.MAX_QUOTATION_BYTES
+    data = await quotation_file.read(limit + 1)
+    kind = validate_quotation(data, quotation_file.filename)
+    if not kind:
+        request.session['error_message'] = (
+            'The project quotation/paperwork must be a PDF, image or approved '
+            f'document under {quotations.DISPLAY_MAX_QUOTATION_MB} MB.'
+        )
+        return RedirectResponse('/web/projects', status_code=303)
+
+    mime, extension = kind
+    # The guarded UPDATE reads the current counter inside the write lock, so
+    # concurrent requests (in this worker or another) cannot both pass it.
+    try:
+        reserved = await reserve_workspace_quota(
+            db, user.workspace_id, len(data),
+            quotations.MAX_QUOTATION_BYTES_PER_WORKSPACE,
+        )
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            logger.exception('Quotation rollback after reservation error failed')
+        logger.exception('Could not reserve quotation storage')
+        request.session['error_message'] = (
+            'Quotation storage is temporarily unavailable. Please try again.'
+        )
+        return RedirectResponse('/web/projects', status_code=303)
+    if not reserved:
+        try:
+            await db.rollback()
+        except Exception:
+            logger.exception('Quotation rollback after quota rejection failed')
+        request.session['error_message'] = (
+            'This company has reached its quotation storage limit. '
+            'Contact an administrator to free space.'
+        )
+        return RedirectResponse('/web/projects', status_code=303)
+
+    # Generate the final name before writing so a cancelled write can still be
+    # cleaned up below.
+    stored_name = new_quotation_name(extension)
+    committed = False
+    try:
+        original_name = clean_upload_name(quotation_file.filename)
+        # Write off the event loop: a 25 MB synchronous write would stall every
+        # request while it completes.
+        await asyncio.to_thread(store_quotation, BASE_DIR, data, extension, stored_name)
+
+        from app.models.project_member import ProjectMember
+        project = Project(
+            name=name,
+            description=description,
+            owner_id=user_id,
+            workspace_id=user.workspace_id,
+            quotation_filename=stored_name,
+            quotation_original_name=original_name,
+            quotation_content_type=mime,
+            quotation_size=len(data),
+            quotation_uploaded_at=datetime.utcnow(),
+        )
+        db.add(project)
+        await db.flush()  # assign project.id for the membership row
+        db.add(ProjectMember(project_id=project.id, user_id=user_id, assigned_by=user_id))
+        await db.commit()
+        committed = True
+    except BaseException:
+        # Cancellation (a client disconnect during commit) is a BaseException;
+        # the original failure is never masked by cleanup.
+        try:
+            await db.rollback()
+        except Exception:
+            logger.exception('Quotation project rollback failed')
+        finally:
+            if not committed:
+                await asyncio.shield(delete_quotation_file(BASE_DIR, stored_name))
+        raise
+
+    request.session['success_message'] = f'Project "{name}" was created.'
     return RedirectResponse('/web/projects', status_code=303)
 
 
@@ -7365,11 +7465,19 @@ async def web_projects_delete(request: Request, project_id: int, db: AsyncSessio
         raise HTTPException(status_code=404, detail='Project not found')
 
     name = project.name
+    quotation_name = project.quotation_filename
+    quotation_size = project.quotation_size or 0
+    workspace_id = project.workspace_id
     db.add(build_deletion_audit(project=project, user=user, reason=reason))
     db.add(build_project_activity(project=project, user=user, action_type='deleted',
                                   details=f'Deleted project "{name}": {reason}'))
     await db.delete(project)
+    # Release the reserved bytes in the same transaction as the deletion.
+    await release_workspace_quota(db, workspace_id, quotation_size)
     await db.commit()
+    # Only remove the file once the row is really gone; a failed commit must
+    # leave a still-referenced project downloadable.
+    await asyncio.shield(delete_quotation_file(BASE_DIR, quotation_name))
     request.session['success_message'] = f'Project "{name}" was deleted.'
     return RedirectResponse('/web/projects', status_code=303)
 
@@ -8449,6 +8557,55 @@ async def web_project_detail(request: Request, project_id: int, db: AsyncSession
         'users': users,
         'user': user
     })
+
+
+@router.get('/projects/{project_id}/quotation')
+async def web_project_quotation_download(
+    request: Request, project_id: int, db: AsyncSession = Depends(get_session)
+):
+    """Serve the project's quotation only to people who can see that project."""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+
+    project = (await db.execute(
+        select(Project).where(Project.id == project_id, Project.workspace_id == user.workspace_id)
+    )).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail='Project not found')
+
+    if not user.is_admin:
+        from app.models.project_member import ProjectMember
+        member = (await db.execute(
+            select(ProjectMember).where(
+                ProjectMember.project_id == project_id,
+                ProjectMember.user_id == user_id,
+            )
+        )).scalar_one_or_none()
+        if not member:
+            raise HTTPException(status_code=403, detail='You do not have access to this project')
+
+    if not project.quotation_filename:
+        raise HTTPException(status_code=404, detail='Quotation not found')
+    file_path = safe_quotation_path(BASE_DIR, project.quotation_filename)
+    if not file_path or not file_path.is_file():
+        raise HTTPException(status_code=404, detail='Quotation not found')
+
+    display_name = clean_upload_name(project.quotation_original_name or file_path.name)
+    return FileResponse(
+        path=str(file_path),
+        media_type=project.quotation_content_type or 'application/octet-stream',
+        headers={
+            'Content-Disposition': f'attachment; filename="{display_name}"',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "default-src 'none'",
+            'Cache-Control': 'no-store, private',
+        },
+    )
 
 
 # Tasks

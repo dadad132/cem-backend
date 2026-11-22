@@ -7,17 +7,18 @@
   normal file input, so clicking the label/button and submitting a form still
   works without JavaScript.
 #}
-{% macro dropzone(input_name, input_id, accept='image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip,.rar', upload_url='', label='Drop photos or files here, or click to browse', hint='', multiple=true, input_class='cem-dropzone-input') -%}
-<div class="cem-dropzone" data-dropzone{% if upload_url %} data-upload-url="{{ upload_url }}"{% endif %}>
+{% macro dropzone(input_name, input_id, accept='image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip,.rar', upload_url='', label='Drop photos or files here, or click to browse', hint='', multiple=true, input_class='cem-dropzone-input', required=false, required_message='', max_bytes=0, show_size=false) -%}
+<div class="cem-dropzone" data-dropzone{% if required %} data-dropzone-required{% endif %}{% if show_size %} data-dropzone-show-size{% endif %}{% if required_message %} data-required-message="{{ required_message }}"{% endif %}{% if max_bytes %} data-max-bytes="{{ max_bytes }}"{% endif %}{% if upload_url %} data-upload-url="{{ upload_url }}"{% endif %}>
   <label class="cem-dropzone-target" for="{{ input_id }}">
     <input type="file" id="{{ input_id }}" name="{{ input_name }}"
            class="{{ input_class }}" data-dropzone-input
-           accept="{{ accept }}"{% if multiple %} multiple{% endif %}>
+           accept="{{ accept }}"{% if multiple %} multiple{% endif %}{% if required %} required{% endif %}>
     <span class="cem-dropzone-icon" aria-hidden="true">&#128206;</span>
     <span class="cem-dropzone-label">{{ label }}</span>
   </label>
   <div class="cem-dropzone-preview" data-dropzone-preview aria-live="polite"></div>
   {% if hint %}<p class="cem-dropzone-hint">{{ hint }}</p>{% endif %}
+  {% if required_message %}<p class="cem-dropzone-required-message" data-dropzone-required-message role="alert" hidden>{{ required_message }}</p>{% endif %}
   <p class="cem-dropzone-status" data-dropzone-status role="status" hidden></p>
 </div>
 {%- endmacro %}
@@ -33,9 +34,11 @@
   .cem-dropzone-thumb { width: 2.25rem; height: 2.25rem; object-fit: cover; border-radius: 0.25rem; }
   .cem-dropzone-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cem-dropzone-remove { margin-left: auto; border: 0; background: transparent; color: #dc2626; font-weight: 700; cursor: pointer; }
+  .cem-dropzone-size { color: #64748b; white-space: nowrap; }
   .cem-dropzone-hint { margin: 0.4rem 0 0; font-size: 0.7rem; color: #64748b; }
   .cem-dropzone-status { margin: 0.4rem 0 0; font-size: 0.75rem; color: #4338ca; }
   .cem-dropzone-status.is-error { color: #b91c1c; }
+  .cem-dropzone-required-message { margin: 0.4rem 0 0; font-size: 0.75rem; color: #b91c1c; }
 </style>
 
 <script>
@@ -62,6 +65,52 @@
     });
   }
 
+  function humanSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  // A "required" dropzone keeps its form's submit button disabled until a
+  // present, correctly named, in-limit file is attached. The server repeats
+  // every one of these checks; this is only immediate user feedback.
+  function syncRequired(root, input) {
+    if (!root.hasAttribute('data-dropzone-required')) return;
+    var form = root.closest ? root.closest('form') : null;
+    if (!form) return;
+    var files = input.files || [];
+    var reason = '';
+    if (!files.length) {
+      reason = root.getAttribute('data-required-message') || 'Please attach a file before continuing.';
+    } else {
+      var allowed = (input.getAttribute('accept') || '').split(',')
+        .map(function (part) { return part.trim().toLowerCase(); })
+        .filter(function (part) { return part.charAt(0) === '.'; });
+      var max = parseInt(root.getAttribute('data-max-bytes'), 10);
+      for (var i = 0; i < files.length; i++) {
+        var fileName = (files[i].name || '').toLowerCase();
+        if (allowed.length && !allowed.some(function (ext) {
+          return fileName.slice(-ext.length) === ext;
+        })) {
+          reason = 'Unsupported file type. Use an allowed paperwork or image format.';
+          break;
+        }
+        if (max && files[i].size > max) {
+          reason = 'That file is too large (maximum ' + Math.round(max / (1024 * 1024)) + ' MB).';
+          break;
+        }
+      }
+    }
+    var buttons = form.querySelectorAll('[data-dropzone-submit]');
+    var busy = root.dataset.cemUploading === '1';
+    Array.prototype.forEach.call(buttons, function (button) { button.disabled = busy || !!reason; });
+    var message = root.querySelector('[data-dropzone-required-message]');
+    if (message) {
+      message.textContent = reason;
+      message.hidden = !reason;
+    }
+  }
+
   function render(root, input) {
     var preview = root.querySelector('[data-dropzone-preview]');
     if (!preview) return;
@@ -86,6 +135,12 @@
       name.textContent = file.name;           // textContent: filenames are never HTML
       name.title = file.name;
       row.appendChild(name);
+      if (root.hasAttribute('data-dropzone-show-size')) {
+        var size = document.createElement('span');
+        size.className = 'cem-dropzone-size';
+        size.textContent = humanSize(file.size);
+        row.appendChild(size);
+      }
       var remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'cem-dropzone-remove';
@@ -102,6 +157,7 @@
       row.appendChild(remove);
       preview.appendChild(row);
     });
+    syncRequired(root, input);
   }
 
   function addFiles(root, input, incoming) {
@@ -128,7 +184,13 @@
       form.append(input.name, file, file.name);
     });
     status(root, 'Uploading ' + input.files.length + ' file(s)…');
+    root.dataset.cemUploading = '1';
     setSubmitDisabled(root, true);
+    function done() {
+      delete root.dataset.cemUploading;
+      setSubmitDisabled(root, false);
+      syncRequired(root, input);
+    }
     fetch(url, {
       method: 'POST',
       body: form,
@@ -138,13 +200,13 @@
     }).then(function (result) {
       if (!result.ok) {
         status(root, result.data.error || 'The upload failed.', true);
-        setSubmitDisabled(root, false);
+        done();
         return;
       }
       if (typeof location !== 'undefined' && location.reload) location.reload();
     }).catch(function () {
       status(root, 'The upload failed. Check the connection and try again.', true);
-      setSubmitDisabled(root, false);
+      done();
     });
   }
 

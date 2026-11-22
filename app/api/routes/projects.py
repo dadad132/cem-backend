@@ -1,4 +1,6 @@
+import asyncio
 from datetime import date
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
@@ -7,12 +9,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from app.api.deps import get_current_user_id, get_db
+from app.core.project_quotation import delete_quotation_file, release_workspace_quota
 from app.models.project import Project, ProjectCreate, ProjectRead, ProjectUpdate
 from app.models.user import User
 
-router = APIRouter(prefix="/projects", tags=["projects"]) 
+router = APIRouter(prefix="/projects", tags=["projects"])
+# Same application directory used by the web routes; kept as a module constant
+# so tests can sandbox file deletion without touching real runtime data.
+APP_DIR = Path(__file__).resolve().parents[2]
 
 
+# The mandatory quotation upload is a web-board rule (see
+# web_projects_create): this JSON API serves integrations and pre-existing
+# clients that send no multipart file. API-created projects intentionally have
+# no quotation metadata, so the detail card is omitted and the download route
+# returns 404. Pinned by tests/test_project_quotation_upload.py.
 @router.post("/", response_model=ProjectRead, status_code=201)
 async def create_project(
     data: ProjectCreate,
@@ -124,9 +135,14 @@ async def delete_project(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    quotation_name = project.quotation_filename
+    quotation_size = project.quotation_size or 0
+    workspace_id = project.workspace_id
     db.add(build_deletion_audit(project=project, user=user, reason=reason))
     db.add(build_project_activity(project=project, user=user, action_type='deleted',
                                   details=f'Deleted project "{project.name}": {reason}'))
     await db.delete(project)
+    await release_workspace_quota(db, workspace_id, quotation_size)
     await db.commit()
+    await asyncio.shield(delete_quotation_file(APP_DIR, quotation_name))
     return None

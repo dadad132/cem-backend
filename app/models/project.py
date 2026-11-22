@@ -29,6 +29,15 @@ class Project(ProjectBase, table=True):
     owner_id: int = Field(foreign_key="user.id", index=True)
     workspace_id: Optional[int] = Field(default=None, foreign_key="workspace.id", index=True)
 
+    # Mandatory quotation / paperwork supplied when the project is created.
+    # Only the generated storage name is a path; the original name is display
+    # text and is always cleaned before it is kept or shown to a user.
+    quotation_filename: Optional[str] = Field(default=None, max_length=255)
+    quotation_original_name: Optional[str] = Field(default=None, max_length=255)
+    quotation_content_type: Optional[str] = Field(default=None, max_length=100)
+    quotation_size: Optional[int] = Field(default=None)
+    quotation_uploaded_at: Optional[datetime] = Field(default=None)
+
 
 class ProjectCreate(SQLModel):
     name: str

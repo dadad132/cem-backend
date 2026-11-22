@@ -12,6 +12,7 @@ app/core/secrets_local.py
 
 # Uploads
 app/uploads/
+app/private_uploads/
 
 # DB
 *.db

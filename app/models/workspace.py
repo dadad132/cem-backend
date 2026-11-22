@@ -18,7 +18,11 @@ class Workspace(SQLModel, table=True):
     primary_color: Optional[str] = Field(default="#2563eb")  # Default blue
     # Zone every time is shown in; None: the server's own time (app/core/clock.py)
     timezone: Optional[str] = Field(default=None)
-    
+
+    # Reserved quotation storage for this company, in bytes. Updated with a
+    # guarded UPDATE so concurrent project creations cannot overrun the quota.
+    quotation_bytes: int = Field(default=0)
+
     # Business hours settings for ticket resolution calculation
     business_hours_start: Optional[str] = Field(default="07:30")  # HH:MM format
     business_hours_end: Optional[str] = Field(default="16:00")  # HH:MM format

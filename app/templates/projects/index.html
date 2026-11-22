@@ -1,4 +1,5 @@
 {% extends 'base.html' %}
+{% from '_dropzone_assets.html' import dropzone %}
 {% block content %}
 {% if request.session.get('success_message') %}
 <div class="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">{{ request.session.pop('success_message') }}</div>
@@ -24,7 +25,7 @@
     <form method="dialog">
       <button class="absolute right-3 top-2 text-slate-500">✕</button>
     </form>
-    <form method="post" action="/web/projects/create" class="w-96 p-5">
+    <form method="post" action="/web/projects/create" enctype="multipart/form-data" class="w-[520px] max-w-full p-5">
       <h3 class="text-lg font-medium mb-3">Create project</h3>
       <div class="space-y-3">
         <div>
@@ -35,9 +36,24 @@
           <label class="block text-sm mb-1">Description</label>
           <input class="w-full rounded border border-slate-300 px-3 py-2 text-sm" type="text" name="description" placeholder="Optional" />
         </div>
+        <div>
+          <label for="quotation_file" class="block text-sm font-medium mb-1">Project Quotation / Paperwork (Required)</label>
+          {{ dropzone(
+            input_name='quotation_file',
+            input_id='quotation_file',
+            accept='.pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,.xls,.xlsx,.csv,.txt',
+            label='Drop the project quotation here, or click to browse',
+            hint='PDF, PNG/JPG/WEBP images, Word, Excel, CSV or TXT · up to 25 MB',
+            multiple=false,
+            show_size=true,
+            required=true,
+            required_message='Please upload the project quotation/paperwork before creating the project',
+            max_bytes=25 * 1024 * 1024
+          ) }}
+        </div>
         <div class="flex justify-end gap-2 pt-2">
           <button type="button" onclick="document.getElementById('newProject').close()" class="px-3 py-2 rounded border border-slate-300 text-sm">Cancel</button>
-          <button type="submit" class="px-3 py-2 rounded bg-slate-900 text-white text-sm">Create</button>
+          <button type="submit" data-dropzone-submit class="px-3 py-2 rounded bg-slate-900 text-white text-sm disabled:opacity-50 disabled:cursor-not-allowed">Create Project</button>
         </div>
       </div>
     </form>

@@ -15,6 +15,23 @@ _settings = get_settings()
 
 _initialized: bool = False
 
+# Columns added after the project table first existed. Kept here so every
+# SQLite engine (tests, scripts, workers) and the long-lived data.db startup
+# helper use exactly the same idempotent, PRAGMA-guarded migration.
+PROJECT_QUOTATION_COLUMNS = (
+    ("project", "quotation_filename", "VARCHAR(255)"),
+    ("project", "quotation_original_name", "VARCHAR(255)"),
+    ("project", "quotation_content_type", "VARCHAR(100)"),
+    ("project", "quotation_size", "INTEGER"),
+    ("project", "quotation_uploaded_at", "TIMESTAMP"),
+)
+# The workspace counter is reserved atomically before a file is written. It
+# makes the per-company storage cap safe across concurrent requests/workers.
+WORKSPACE_QUOTATION_COLUMNS = (
+    ("workspace", "quotation_bytes", "INTEGER NOT NULL DEFAULT 0"),
+)
+QUOTATION_COLUMNS = PROJECT_QUOTATION_COLUMNS + WORKSPACE_QUOTATION_COLUMNS
+
 # SQLite uses StaticPool by default with aiosqlite, so we don't set pool parameters
 # For production with PostgreSQL, you would add: pool_size=10, max_overflow=20
 engine: AsyncEngine = create_async_engine(
@@ -104,6 +121,7 @@ async def init_models() -> None:
                 ("workspace", "comment_timezone", "VARCHAR"),
                 ("user", "dashboard_assigned_only", "BOOLEAN NOT NULL DEFAULT 0"),
                 ("user", "default_landing_page", "VARCHAR"),
+                *QUOTATION_COLUMNS,
             ):
                 try:
                     res = await conn.exec_driver_sql(f'PRAGMA table_info("{table}")')
@@ -171,6 +189,32 @@ async def apply_data_changes(conn) -> None:
             "WHERE status = 'done' AND completed_at IS NULL AND archived_at IS NOT NULL"
         )
         await conn.exec_driver_sql("PRAGMA user_version = 5")
+    if version < 6:
+        # Existing paperwork predates the workspace quota counter. Seed it from
+        # the linked rows so the first new upload cannot exceed the cap.
+        try:
+            workspace_cols = {
+                row[1] for row in
+                (await conn.exec_driver_sql('PRAGMA table_info("workspace")')).fetchall()
+            }
+            project_cols = {
+                row[1] for row in
+                (await conn.exec_driver_sql('PRAGMA table_info("project")')).fetchall()
+            }
+            if 'quotation_bytes' in workspace_cols and 'quotation_size' in project_cols:
+                await conn.exec_driver_sql(
+                    'UPDATE workspace SET quotation_bytes = COALESCE(('
+                    'SELECT SUM(quotation_size) FROM project '
+                    'WHERE project.workspace_id = workspace.id '
+                    'AND quotation_size IS NOT NULL), 0)'
+                )
+                # Only mark complete once the backfill actually ran; a schema
+                # that missed the ALTER gets another chance on the next startup.
+                await conn.exec_driver_sql("PRAGMA user_version = 6")
+        except Exception:
+            # Best effort: init_models() already reports schema problems through
+            # the normal startup path.
+            pass
 
 
 async def ensure_initialized() -> None:
@@ -180,13 +224,13 @@ async def ensure_initialized() -> None:
         _initialized = True
 
 
-def ensure_user_preference_columns() -> None:
-    """Add the web-only user preferences to an existing data.db at startup.
+def _ensure_startup_columns(label: str, columns) -> None:
+    """PRAGMA-guarded ALTERs for a long-lived data.db, used at startup.
 
     init_models() already does this for every SQLite engine (tests, scripts and
-    workers included). Real startups also run against a long-lived data.db that
-    predates these columns, so keep the same guarded ALTER there as well. Both
-    PRAGMA checks make this a no-op on databases that are already current.
+    workers included). Real startups also run against a data.db that predates
+    these columns, so keep the same guarded ALTER there. Both PRAGMA checks
+    make this a no-op on databases that are already current.
     """
     try:
         import sqlite3
@@ -197,15 +241,10 @@ def ensure_user_preference_columns() -> None:
             return
         conn = sqlite3.connect(str(db_path), timeout=30)
         try:
-            cols = {row[1] for row in conn.execute('PRAGMA table_info("user")')}
-            if not cols:
-                return
-            for column, ddl in (
-                ("dashboard_assigned_only", "BOOLEAN NOT NULL DEFAULT 0"),
-                ("default_landing_page", "VARCHAR"),
-            ):
-                if column not in cols:
-                    conn.execute(f'ALTER TABLE "user" ADD COLUMN {column} {ddl}')
+            for table, column, ddl in columns:
+                cols = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+                if cols and column not in cols:
+                    conn.execute(f'ALTER TABLE "{table}" ADD COLUMN {column} {ddl}')
                     conn.commit()
         finally:
             conn.close()
@@ -215,8 +254,21 @@ def ensure_user_preference_columns() -> None:
         import logging
 
         logging.getLogger(__name__).warning(
-            f"Could not migrate user preference columns: {exc}"
+            f"Could not migrate {label}: {exc}"
         )
+
+
+def ensure_user_preference_columns() -> None:
+    """Web-only user preferences added after the user table first existed."""
+    _ensure_startup_columns("user preference columns", (
+        ("user", "dashboard_assigned_only", "BOOLEAN NOT NULL DEFAULT 0"),
+        ("user", "default_landing_page", "VARCHAR"),
+    ))
+
+
+def ensure_project_quotation_columns() -> None:
+    """Quotation metadata and the company quota counter added after launch."""
+    _ensure_startup_columns("quotation columns", QUOTATION_COLUMNS)
 
 
 @asynccontextmanager
@@ -224,6 +276,7 @@ async def lifespan(app):  # FastAPI lifespan
     # Initialize database
     await init_models()
     ensure_user_preference_columns()
+    ensure_project_quotation_columns()
     
     # Setup graceful shutdown handlers
     from app.core.shutdown import shutdown_handler
