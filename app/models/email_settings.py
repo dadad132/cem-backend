@@ -89,7 +89,13 @@ This is an automated notification from your CRM system.""")
     # Additional Settings
     company_name: str = Field(default="Support Team")
     auto_reply_enabled: bool = Field(default=True)
-    
+
+    # Workspace weekly report (Excel attachments, sent to these recipients only)
+    weekly_report_enabled: bool = Field(default=False)
+    weekly_report_recipients: Optional[str] = Field(default=None)
+    weekly_report_include_projects: bool = Field(default=True)
+    weekly_report_include_tickets: bool = Field(default=True)
+
     # Timestamps
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

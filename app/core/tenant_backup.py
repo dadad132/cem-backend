@@ -91,6 +91,7 @@ TENANT_SCOPE: Dict[str, Tuple] = {
     'userbehavior': ('direct',),
     'userpreference': ('direct',),
     'webhook': ('direct',),
+    'workspaceweeklyreport': ('direct',),
 
     # Tables scoped through a parent row
     'assignment': ('via', 'task', 'task_id'),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator
 
 from sqlmodel import SQLModel
@@ -31,6 +32,15 @@ WORKSPACE_QUOTATION_COLUMNS = (
     ("workspace", "quotation_bytes", "INTEGER NOT NULL DEFAULT 0"),
 )
 QUOTATION_COLUMNS = PROJECT_QUOTATION_COLUMNS + WORKSPACE_QUOTATION_COLUMNS
+
+# Weekly report preferences added to EmailSettings after the table existed.
+# Used by both the async schema check and the testable startup helper below.
+EMAIL_SETTINGS_WEEKLY_COLUMNS = (
+    ("emailsettings", "weekly_report_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("emailsettings", "weekly_report_recipients", "VARCHAR"),
+    ("emailsettings", "weekly_report_include_projects", "BOOLEAN NOT NULL DEFAULT 1"),
+    ("emailsettings", "weekly_report_include_tickets", "BOOLEAN NOT NULL DEFAULT 1"),
+)
 
 # SQLite uses StaticPool by default with aiosqlite, so we don't set pool parameters
 # For production with PostgreSQL, you would add: pool_size=10, max_overflow=20
@@ -122,6 +132,7 @@ async def init_models() -> None:
                 ("user", "dashboard_assigned_only", "BOOLEAN NOT NULL DEFAULT 0"),
                 ("user", "default_landing_page", "VARCHAR"),
                 *QUOTATION_COLUMNS,
+                *EMAIL_SETTINGS_WEEKLY_COLUMNS,
             ):
                 try:
                     res = await conn.exec_driver_sql(f'PRAGMA table_info("{table}")')
@@ -271,12 +282,52 @@ def ensure_project_quotation_columns() -> None:
     _ensure_startup_columns("quotation columns", QUOTATION_COLUMNS)
 
 
+def _weekly_report_db_path() -> Path:
+    """The SQLite file behind the configured database URL (or ./data.db)."""
+    from sqlalchemy.engine import make_url
+
+    url = make_url(_settings.database_url)
+    if url.get_backend_name() == 'sqlite' and url.database and url.database != ':memory:':
+        return Path(url.database)
+    return Path("data.db")
+
+
+def _ensure_email_settings_weekly_columns(db_path: Path) -> None:
+    """PRAGMA-guarded ALTERs for the weekly report settings on a long-lived DB.
+
+    init_models() covers every SQLite engine, but deployed databases may predate
+    these columns. Takes an explicit path so the migration can be tested against
+    a throwaway file without touching the live one.
+    """
+    import logging
+    import sqlite3
+
+    path = Path(db_path)
+    if not path.exists():
+        return
+    try:
+        conn = sqlite3.connect(str(path), timeout=30)
+        try:
+            cols = {row[1] for row in conn.execute('PRAGMA table_info("emailsettings")')}
+            if not cols:                 # an old database with no such table yet
+                return
+            for _, column, ddl in EMAIL_SETTINGS_WEEKLY_COLUMNS:
+                if column not in cols:
+                    conn.execute(f'ALTER TABLE emailsettings ADD COLUMN {column} {ddl}')
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logging.getLogger(__name__).error("Could not migrate weekly report columns on %s: %s", path, exc)
+
+
 @asynccontextmanager
 async def lifespan(app):  # FastAPI lifespan
     # Initialize database
     await init_models()
     ensure_user_preference_columns()
     ensure_project_quotation_columns()
+    _ensure_email_settings_weekly_columns(_weekly_report_db_path())
     
     # Setup graceful shutdown handlers
     from app.core.shutdown import shutdown_handler
