@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy import asc, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
@@ -96,14 +96,37 @@ async def update_project(
 
 
 @router.delete("/{project_id}", status_code=204)
-async def delete_project(project_id: int, user_id: int = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
+async def delete_project(
+    project_id: int,
+    deletion_reason: Optional[str] = Body(default=None, embed=True),
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.core.project_audit import (
+        build_deletion_audit,
+        build_project_activity,
+        clean_deletion_reason,
+    )
+
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    if not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Only admins can delete projects")
+    reason = clean_deletion_reason(deletion_reason)
+    if not reason:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="A deletion reason is required")
+
     result = await db.execute(select(Project).where(Project.id == project_id, Project.workspace_id == user.workspace_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    db.add(build_deletion_audit(project=project, user=user, reason=reason))
+    db.add(build_project_activity(project=project, user=user, action_type='deleted',
+                                  details=f'Deleted project "{project.name}": {reason}'))
     await db.delete(project)
     await db.commit()
     return None

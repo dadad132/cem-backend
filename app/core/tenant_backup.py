@@ -78,6 +78,7 @@ TENANT_SCOPE: Dict[str, Tuple] = {
     'pending_email': ('direct',),
     'processedmail': ('direct',),
     'project': ('direct',),
+    'projectdeletionaudit': ('direct',),
     'savedview': ('direct',),
     'smartsuggestion': ('direct',),
     'supportarticle': ('direct',),

@@ -1,6 +1,7 @@
 from .workspace import Workspace
 from .user import User
 from .project import Project
+from .project_audit import ProjectDeletionAudit
 from .project_member import ProjectMember
 from .project_report import ProjectWeeklyReport
 from .task import Task
@@ -50,6 +51,7 @@ __all__ = [
     "Workspace",
     "User",
     "Project",
+    "ProjectDeletionAudit",
     "ProjectMember",
     "Task",
     "Subtask",

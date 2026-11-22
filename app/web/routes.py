@@ -7332,28 +7332,85 @@ async def web_projects_edit(request: Request, project_id: int, db: AsyncSession 
 
 @router.post('/projects/{project_id}/delete')
 async def web_projects_delete(request: Request, project_id: int, db: AsyncSession = Depends(get_session)):
+    """Delete a project only when the user explains why, keeping that reason."""
     user_id = request.session.get('user_id')
     if not user_id:
         return RedirectResponse('/web/login', status_code=303)
-    
+
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user:
         request.session.clear()
         return RedirectResponse('/web/login', status_code=303)
-    
-    # Only admins can delete projects
+
     if not user.is_admin:
+        raise HTTPException(status_code=403, detail='Only admins can delete projects')
+
+    from app.core.project_audit import (
+        build_deletion_audit,
+        build_project_activity,
+        clean_deletion_reason,
+    )
+
+    form = await request.form()
+    reason = clean_deletion_reason(form.get('deletion_reason'))
+    if not reason:
+        # A browser with JavaScript disabled still gets a visible error and the
+        # project is left untouched; the JSON API uses a 400 for the same rule.
+        request.session['error_message'] = 'A deletion reason is required. Please type a reason and try again.'
         return RedirectResponse('/web/projects', status_code=303)
-    
-    # Get the project
+
     result = await db.execute(select(Project).where(Project.id == project_id, Project.workspace_id == user.workspace_id))
     project = result.scalar_one_or_none()
-    
-    if project:
-        await db.delete(project)
-        await db.commit()
-    
+    if not project:
+        raise HTTPException(status_code=404, detail='Project not found')
+
+    name = project.name
+    db.add(build_deletion_audit(project=project, user=user, reason=reason))
+    db.add(build_project_activity(project=project, user=user, action_type='deleted',
+                                  details=f'Deleted project "{name}": {reason}'))
+    await db.delete(project)
+    await db.commit()
+    request.session['success_message'] = f'Project "{name}" was deleted.'
     return RedirectResponse('/web/projects', status_code=303)
+
+
+@router.post('/projects/{project_id}/complete')
+async def web_projects_complete(request: Request, project_id: int, db: AsyncSession = Depends(get_session)):
+    """Mark a Board View project as completed by moving it to the archive."""
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse('/web/login', status_code=303)
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        request.session.clear()
+        return RedirectResponse('/web/login', status_code=303)
+
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail='Only admins can complete projects')
+
+    result = await db.execute(select(Project).where(Project.id == project_id, Project.workspace_id == user.workspace_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail='Project not found')
+
+    if project.is_archived:
+        request.session['error_message'] = 'That project is already archived.'
+        return RedirectResponse('/web/projects/archived', status_code=303)
+
+    from app.core.project_audit import build_project_activity
+
+    name = project.name
+    project.is_archived = True
+    project.archived_at = datetime.utcnow()
+    project.updated_at = datetime.utcnow()
+    db.add(build_project_activity(project=project, user=user, action_type='completed',
+                                  details=f'Marked project "{name}" as completed and archived'))
+    await db.commit()
+    request.session['success_message'] = (
+        f'Project "{name}" was marked as completed and moved to Archived Projects.'
+    )
+    return RedirectResponse('/web/projects/archived', status_code=303)
 
 
 @router.post('/projects/{project_id}/archive')

@@ -50,6 +50,7 @@ class ProjectUpdate(SQLModel):
     imap_username: Optional[str] = None
     imap_password: Optional[str] = None
     imap_use_ssl: Optional[bool] = None
-    is_archived: Optional[bool] = None
+    # Archiving is only allowed through the dedicated, admin-only routes so
+    # it always sets archived_at and writes an activity entry.
     start_date: Optional[date] = None
     due_date: Optional[date] = None
