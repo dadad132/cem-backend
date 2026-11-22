@@ -94,15 +94,17 @@
         <div class="mb-4">
           <label for="userIdentifier" class="block text-sm font-medium text-slate-700 mb-2">Username, name, or email</label>
           <input 
-            type="text" 
+            type="search" 
             name="user_identifier" 
             id="userIdentifier"
+            data-member-search
+            value="{{ member_query|default('', true) }}"
             placeholder="Search by username, name, or email..."
             required 
             class="w-full rounded-lg border border-slate-300 px-4 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
             autocomplete="off"
           />
-          <p class="mt-1 text-xs text-slate-500">Start typing to find a user, then pick a result to add them.</p>
+          <p class="mt-1 text-xs text-slate-500">Start typing to filter available users below, then click a user and press Add to Project.</p>
         </div>
         
         <div id="userPreview" class="mb-4 p-3 bg-slate-50 rounded-lg hidden">
@@ -123,12 +125,7 @@
       </form>
 
       <div class="mt-4 pt-4 border-t border-slate-200">
-        <p class="text-xs text-slate-600 font-medium mb-2">Quick Select (Available Users)</p>
-        <input type="search" id="memberSearch" data-member-search
-               placeholder="Search by username, name, or email..."
-               value="{{ member_query|default('', true) }}"
-               class="w-full mb-2 rounded-lg border border-slate-300 px-3 py-2 text-sm"
-               autocomplete="off">
+        <p class="text-xs text-slate-600 font-medium mb-2">Available Users</p>
         <div id="memberResults" data-member-results class="space-y-2 max-h-48 overflow-y-auto">
           {% for available_user in available_users %}
             {% set label = (available_user.shown_name or available_user.full_name or available_user.username) ~ ' (@' ~ available_user.username ~ ') — ' ~ (available_user.email or '') %}
@@ -167,7 +164,8 @@
     }
 
     (function () {
-      const search = document.getElementById('memberSearch');
+      const search = document.getElementById('userIdentifier');
+      const preview = document.getElementById('userPreview');
       const results = document.getElementById('memberResults');
       const empty = document.querySelector('[data-member-empty]');
       if (!search || !results) return;
@@ -206,6 +204,7 @@
       let timer = null;
       let sequence = 0;
       search.addEventListener('input', function () {
+        if (preview) preview.classList.add('hidden');
         filterLocal();                                // instant feedback
         const term = search.value.trim();
         const mine = ++sequence;

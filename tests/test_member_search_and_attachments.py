@@ -178,11 +178,21 @@ async def test_available_user_search_rejects_wrong_admin_and_foreign_project(env
 async def test_members_page_has_live_search_and_filterable_user_details(env):
     page = await web.web_project_members(_request(env.people['ada']), env.project.id, db=env.db)
     html = page.body.decode()
-    assert 'Search by username, name, or email...' in html
-    assert 'data-member-search' in html and 'data-search' in html
+    assert html.count('Search by username, name, or email...') == 1, 'single unified top search bar only'
+    assert html.count('data-member-search') == 1
+    assert 'id="memberSearch"' not in html
+    assert 'data-search' in html
     assert 'cara@acme.test' in html, 'the full address is available to the live filter'
     assert 'data-username="cara"' in html
     assert 'data-username="bob"' not in html, 'an existing member is not offered for adding'
+
+
+def test_profile_dropdown_uses_hover_bridge_and_click_toggle():
+    base_source = (TEMPLATES_DIR / 'base.html').read_text(encoding='utf-8')
+    assert '.profile-dropdown:hover .profile-dropdown-menu' in base_source
+    assert 'profile-dropdown-menu absolute right-0 pt-2 w-56 z-50' in base_source
+    assert 'pinned = !pinned' in base_source, 'clicking pins the profile menu open'
+    assert '@keydown.escape.window' in base_source
 
 
 @pytest.mark.asyncio
