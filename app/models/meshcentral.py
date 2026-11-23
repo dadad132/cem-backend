@@ -30,6 +30,11 @@ class MeshCentralSettings(SQLModel, table=True):
     hide_mesh_chrome: bool = Field(default=True)
     verify_ssl: bool = Field(default=True)
 
+    # Default MeshCentral device group for 1-click client installer downloads & links
+    default_mesh_id: Optional[str] = Field(default=None)
+    default_mesh_name: Optional[str] = Field(default=None)
+    local_install_path: Optional[str] = Field(default=None)
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -77,3 +82,26 @@ class MeshCentralSessionLog(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id", index=True)
     view_mode: str = Field(default="desktop")
     started_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
+class MeshCentralAgentInvite(SQLModel, table=True):
+    """Time-limited client download link (5-15 min) proxied through this website."""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    workspace_id: int = Field(foreign_key="workspace.id", index=True)
+
+    token: str = Field(unique=True, index=True)
+    mesh_id: str = Field(index=True)
+    mesh_name: Optional[str] = Field(default=None)
+    client_name: Optional[str] = Field(default=None)
+
+    platform: str = Field(default="windows64")  # windows64 | windows32 | macos | linux
+    install_mode: str = Field(default="install")  # install | connect
+
+    created_by_id: int = Field(foreign_key="user.id", index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    expires_at: datetime = Field(index=True)
+
+    download_count: int = Field(default=0)
+    max_downloads: int = Field(default=5)
+    revoked: bool = Field(default=False, index=True)

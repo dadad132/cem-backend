@@ -2,31 +2,42 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
 from app.core.meshcentral import (
+    AGENT_PLATFORMS,
     VIEW_MODE_MAP,
+    autodetect_local_meshcentral,
     build_direct_url,
     build_embed_url,
+    build_embed_url_async,
+    build_login_user_id,
+    create_meshcentral_group,
     decrypt_secret,
     detect_os_family,
     encrypt_secret,
+    fetch_meshcentral_auth_cookie,
     fetch_meshcentral_inventory,
+    generate_random_login_token_key,
     normalize_domain,
+    normalize_mesh_id,
     normalize_node_id,
     normalize_server_url,
+    proxy_agent_installer,
     resolve_view_mode,
     sync_workspace_devices,
 )
 from app.models.company import Company
 from app.models.meshcentral import (
+    MeshCentralAgentInvite,
     MeshCentralDevice,
     MeshCentralSessionLog,
     MeshCentralSettings,
@@ -167,8 +178,10 @@ async def web_remote_dashboard(request: Request, db: AsyncSession = Depends(get_
     is_configured = bool(mc_settings and mc_settings.enabled and mc_settings.server_url)
     has_sso = bool(
         mc_settings
-        and mc_settings.login_token_key_encrypted
-        and (mc_settings.login_user_id or mc_settings.username)
+        and (
+            (mc_settings.login_token_key_encrypted and (mc_settings.login_user_id or mc_settings.username))
+            or (mc_settings.username and mc_settings.password_encrypted)
+        )
     )
     has_sync_creds = bool(
         mc_settings
@@ -177,6 +190,28 @@ async def web_remote_dashboard(request: Request, db: AsyncSession = Depends(get_
             or (mc_settings.login_token_key_encrypted and (mc_settings.login_user_id or mc_settings.username))
         )
     )
+
+    # Known MeshCentral device groups for 1-click installer & expiring client links
+    mesh_group_map: dict[str, str] = {}
+    if mc_settings and mc_settings.default_mesh_id:
+        mesh_group_map[mc_settings.default_mesh_id] = mc_settings.default_mesh_name or "Default Client Group"
+    for d in devices:
+        if d.mesh_id and d.mesh_id not in mesh_group_map:
+            mesh_group_map[d.mesh_id] = d.mesh_name or d.client_name or d.mesh_id
+    mesh_groups = [{"mesh_id": mid, "mesh_name": mname} for mid, mname in mesh_group_map.items()]
+
+    # Active & recent expiring client download links
+    now = datetime.utcnow()
+    recent_invites = (
+        await db.execute(
+            select(MeshCentralAgentInvite)
+            .where(MeshCentralAgentInvite.workspace_id == user.workspace_id)
+            .order_by(desc(MeshCentralAgentInvite.created_at))
+            .limit(10)
+        )
+    ).scalars().all()
+    base_origin = _request_public_origin(request)
+    invites_payload = [_serialize_invite(inv, base_origin, now) for inv in recent_invites]
 
     flash_message = request.session.pop("flash_message", None)
     flash_type = request.session.pop("flash_type", None)
@@ -195,6 +230,9 @@ async def web_remote_dashboard(request: Request, db: AsyncSession = Depends(get_
             "devices": devices,
             "devices_payload": devices_payload,
             "groups": groups,
+            "mesh_groups": mesh_groups,
+            "invites_payload": invites_payload,
+            "agent_platforms": AGENT_PLATFORMS,
             "companies": companies,
             "recent_logs": recent_logs,
             "stats": {
@@ -238,8 +276,11 @@ async def web_remote_session(
         request.session["flash_type"] = "error"
         return RedirectResponse("/web/remote", status_code=303)
 
-    embed = build_embed_url(mc_settings, device.node_id, mode=mode)
-    direct_url = build_direct_url(mc_settings, device.node_id, mode=embed["mode"])
+    embed = await build_embed_url_async(mc_settings, device.node_id, mode=mode)
+    direct_embed = await build_embed_url_async(
+        mc_settings, device.node_id, mode=embed["mode"], hide_chrome=False
+    )
+    direct_url = direct_embed["url"]
 
     # Record connection audit log & last-connected timestamp
     now = datetime.utcnow()
@@ -318,8 +359,11 @@ async def web_remote_session_embed_url(
     if not device:
         return JSONResponse({"success": False, "error": "Device not found"}, status_code=404)
 
-    embed = build_embed_url(mc_settings, device.node_id, mode=mode)
-    direct_url = build_direct_url(mc_settings, device.node_id, mode=embed["mode"])
+    embed = await build_embed_url_async(mc_settings, device.node_id, mode=mode)
+    direct_embed = await build_embed_url_async(
+        mc_settings, device.node_id, mode=embed["mode"], hide_chrome=False
+    )
+    direct_url = direct_embed["url"]
 
     now = datetime.utcnow()
     device.last_connected_at = now
@@ -645,12 +689,582 @@ async def web_remote_settings_test(request: Request, db: AsyncSession = Depends(
     try:
         meshes, devices = await fetch_meshcentral_inventory(mc_settings, timeout=10.0)
         online = sum(1 for d in devices if d.get("is_online"))
+        has_token_key = bool(decrypt_secret(mc_settings.login_token_key_encrypted))
+        auto_sso = has_token_key
+        if not auto_sso and mc_settings.username and mc_settings.password_encrypted:
+            try:
+                auto_sso = bool(await fetch_meshcentral_auth_cookie(mc_settings, timeout=5.0))
+            except Exception:
+                auto_sso = False
         return JSONResponse({
             "success": True,
             "groups": len(meshes),
             "devices": len(devices),
             "online": online,
-            "sso_ready": bool(decrypt_secret(mc_settings.login_token_key_encrypted)),
+            "sso_ready": auto_sso,
+            "sso_mode": "token_key" if has_token_key else ("authcookie" if auto_sso else "none"),
         })
     except Exception as exc:
         return JSONResponse({"success": False, "error": str(exc)}, status_code=502)
+
+
+# ---------------------------------------------------------------------------
+# Auto-Configure / Autofill Settings from Web UI (No CLI Required)
+# ---------------------------------------------------------------------------
+
+def _request_public_origin(request: Request) -> str:
+    """Return the browser-facing origin (e.g. https://tickets.hubconnect.co.za)."""
+    scheme = getattr(request.url, "scheme", "https") or "https"
+    netloc = getattr(request.url, "netloc", "") or ""
+    if not netloc:
+        from app.core.config import get_settings
+        return get_settings().public_base_url.rstrip("/")
+    return f"{scheme}://{netloc}".rstrip("/")
+
+
+def _serialize_invite(
+    invite: MeshCentralAgentInvite,
+    base_origin: str,
+    now: Optional[datetime] = None,
+) -> dict:
+    ref = now or datetime.utcnow()
+    remaining = max(0, int((invite.expires_at - ref).total_seconds()))
+    is_active = (
+        not invite.revoked
+        and remaining > 0
+        and invite.download_count < invite.max_downloads
+    )
+    plat_meta = AGENT_PLATFORMS.get(invite.platform, AGENT_PLATFORMS["windows64"])
+    return {
+        "id": invite.id,
+        "token": invite.token,
+        "share_url": f"{base_origin}/web/remote/get/{invite.token}",
+        "mesh_id": invite.mesh_id,
+        "mesh_name": invite.mesh_name or "",
+        "client_name": invite.client_name or "",
+        "platform": invite.platform,
+        "platform_label": plat_meta["short_label"],
+        "install_mode": invite.install_mode,
+        "download_count": invite.download_count,
+        "max_downloads": invite.max_downloads,
+        "revoked": bool(invite.revoked),
+        "remaining_seconds": remaining,
+        "is_active": is_active,
+        "expires_at": invite.expires_at.strftime("%H:%M UTC"),
+    }
+
+
+@router.post("/remote/settings/autofill")
+async def web_remote_settings_autofill(
+    request: Request,
+    server_url: str = Form(""),
+    domain: str = Form(""),
+    username: str = Form(""),
+    password: str = Form(""),
+    verify_ssl: Optional[str] = Form(None),
+    local_install_path: str = Form(""),
+    db: AsyncSession = Depends(get_session),
+):
+    """Auto-detect local MeshCentral config/token key AND auto-connect over WebSocket."""
+    user, redirect = await _require_workspace_admin(request, db)
+    if redirect:
+        return JSONResponse({"success": False, "error": "Authentication required"}, status_code=401)
+
+    row = await _get_or_none_settings(db, user.workspace_id)
+    now = datetime.utcnow()
+    if row is None:
+        row = MeshCentralSettings(workspace_id=user.workspace_id, created_at=now)
+        db.add(row)
+
+    # 1. Local MeshCentral detection (same server) — auto-updates config.json & reads --loginTokenKey
+    local_info = await autodetect_local_meshcentral(local_install_path or row.local_install_path)
+    if local_info["found"] and local_info["path"]:
+        row.local_install_path = local_info["path"]
+
+    # 2. Resolve URL, domain, credentials (form overrides saved DB, local config is fallback)
+    raw_url = (server_url or "").strip() or row.server_url or local_info.get("suggested_url") or ""
+    if raw_url:
+        try:
+            row.server_url = normalize_server_url(raw_url)
+        except ValueError as exc:
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=400)
+
+    if domain is not None and domain.strip():
+        try:
+            row.domain = normalize_domain(domain)
+        except ValueError as exc:
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=400)
+
+    if username and username.strip():
+        row.username = username.strip()
+    if password and password.strip():
+        row.password_encrypted = encrypt_secret(password)
+    if verify_ssl is not None:
+        row.verify_ssl = verify_ssl in ("1", "true", "on", "yes")
+
+    autofilled_key = local_info.get("login_token_key")
+    if autofilled_key:
+        row.login_token_key_encrypted = encrypt_secret(autofilled_key)
+
+    derived_uid = build_login_user_id(row.username, row.domain, row.login_user_id)
+    if derived_uid:
+        row.login_user_id = derived_uid
+
+    # 3. Live WebSocket verification, group discovery, and automatic live SSO check
+    groups_map: dict[str, str] = {}
+    devices_found = 0
+    online_found = 0
+    connected = False
+    authcookie_ok = False
+    connect_error: Optional[str] = None
+
+    has_creds = bool(
+        row.server_url
+        and (
+            (row.username and row.password_encrypted)
+            or (row.login_token_key_encrypted and (row.login_user_id or row.username))
+        )
+    )
+    if has_creds:
+        try:
+            groups_map, devices_list = await fetch_meshcentral_inventory(row, timeout=10.0)
+            connected = True
+            devices_found = len(devices_list)
+            online_found = sum(1 for d in devices_list if d.get("is_online"))
+            if not groups_map:
+                # Auto-create a default Client PCs group so technicians can download agents immediately
+                try:
+                    created_grp = await create_meshcentral_group(row, "Client PCs", "Managed via CEM")
+                    groups_map[created_grp["mesh_id"]] = created_grp["mesh_name"]
+                except Exception:
+                    pass
+            if groups_map and not row.default_mesh_id:
+                first_id, first_name = next(iter(groups_map.items()))
+                row.default_mesh_id = first_id
+                row.default_mesh_name = first_name
+            if not row.login_token_key_encrypted and row.username and row.password_encrypted:
+                try:
+                    authcookie_ok = bool(await fetch_meshcentral_auth_cookie(row, timeout=6.0))
+                except Exception:
+                    authcookie_ok = False
+        except Exception as exc:
+            connect_error = str(exc)
+
+    if row.server_url and (connected or autofilled_key):
+        row.enabled = True
+    row.updated_at = now
+    await db.commit()
+
+    has_token_key = bool(row.login_token_key_encrypted)
+    sso_mode = "token_key" if has_token_key else ("authcookie" if authcookie_ok else "none")
+
+    notes = list(local_info.get("notes") or [])
+    if connected:
+        notes.append(f"Connected to {row.server_url} ({devices_found} PC(s), {len(groups_map)} group(s)).")
+        if has_token_key:
+            notes.append("Instant SSO active using Login Token Key.")
+        elif authcookie_ok:
+            notes.append("Automatic SSO active via MeshCentral live auth cookie (no manual CLI key needed!).")
+    elif connect_error:
+        notes.append(f"Live connection note: {connect_error}")
+    elif not row.server_url:
+        notes.append("Enter your MeshCentral Server URL, Username, and Password, then click Auto-Setup again.")
+
+    ok = bool(connected or local_info["found"])
+    return JSONResponse({
+        "success": ok,
+        "enabled": bool(row.enabled),
+        "server_url": row.server_url or "",
+        "login_user_id": row.login_user_id or "",
+        "login_token_key": autofilled_key or "",
+        "has_login_token_key": has_token_key,
+        "sso_ready": bool(has_token_key or authcookie_ok),
+        "sso_mode": sso_mode,
+        "local_found": bool(local_info["found"]),
+        "config_updated": bool(local_info["config_updated"]),
+        "default_mesh_id": row.default_mesh_id or "",
+        "default_mesh_name": row.default_mesh_name or "",
+        "groups": [{"mesh_id": mid, "mesh_name": mname} for mid, mname in groups_map.items()],
+        "devices": devices_found,
+        "online": online_found,
+        "message": " ".join(notes) if notes else (connect_error or "Auto-setup completed."),
+    })
+
+
+@router.post("/remote/settings/generate-key")
+async def web_remote_settings_generate_key(request: Request, db: AsyncSession = Depends(get_session)):
+    """Generate a MeshCentral-compatible loginTokenKey right inside the Settings UI."""
+    user, redirect = await _require_workspace_admin(request, db)
+    if redirect:
+        return JSONResponse({"success": False, "error": "Authentication required"}, status_code=401)
+    return JSONResponse({"success": True, "login_token_key": generate_random_login_token_key()})
+
+
+# ---------------------------------------------------------------------------
+# Client Installer Downloads & Expiring Share Links (5-15 min)
+# ---------------------------------------------------------------------------
+
+async def _resolve_mesh_group(
+    db: AsyncSession,
+    workspace_id: int,
+    mc_settings: MeshCentralSettings,
+    requested_mesh_id: Optional[str],
+) -> tuple[str, str]:
+    """Resolve a valid MeshCentral group ID + name from request, DB, or live server."""
+    if requested_mesh_id and requested_mesh_id.strip():
+        mid = requested_mesh_id.strip()
+        normalize_mesh_id(mid)
+        dev = (
+            await db.execute(
+                select(MeshCentralDevice)
+                .where(
+                    MeshCentralDevice.workspace_id == workspace_id,
+                    MeshCentralDevice.mesh_id == mid,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        mname = (dev.mesh_name if dev and dev.mesh_name else None) or (
+            mc_settings.default_mesh_name if mc_settings.default_mesh_id == mid else None
+        ) or "Client PCs"
+        return mid, mname
+
+    if mc_settings.default_mesh_id:
+        return mc_settings.default_mesh_id, mc_settings.default_mesh_name or "Client PCs"
+
+    dev = (
+        await db.execute(
+            select(MeshCentralDevice)
+            .where(
+                MeshCentralDevice.workspace_id == workspace_id,
+                MeshCentralDevice.mesh_id.is_not(None),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if dev and dev.mesh_id:
+        return dev.mesh_id, dev.mesh_name or dev.client_name or "Client PCs"
+
+    # Last resort: query MeshCentral live for groups (or auto-create "Client PCs")
+    meshes, _ = await fetch_meshcentral_inventory(mc_settings, timeout=10.0)
+    if not meshes:
+        created = await create_meshcentral_group(mc_settings, "Client PCs", "Managed via CEM")
+        mc_settings.default_mesh_id = created["mesh_id"]
+        mc_settings.default_mesh_name = created["mesh_name"]
+        await db.commit()
+        return created["mesh_id"], created["mesh_name"]
+    first_id, first_name = next(iter(meshes.items()))
+    mc_settings.default_mesh_id = first_id
+    mc_settings.default_mesh_name = first_name
+    await db.commit()
+    return first_id, first_name
+
+
+@router.get("/remote/groups")
+async def web_remote_groups(request: Request, db: AsyncSession = Depends(get_session)):
+    """Return available MeshCentral device groups for installer & invite creation."""
+    user, redirect = await _require_workspace_user(request, db)
+    if redirect:
+        return JSONResponse({"success": False, "error": "Authentication required"}, status_code=401)
+
+    mc_settings = await _get_or_none_settings(db, user.workspace_id)
+    groups: dict[str, str] = {}
+    if mc_settings and mc_settings.default_mesh_id:
+        groups[mc_settings.default_mesh_id] = mc_settings.default_mesh_name or "Client PCs"
+
+    devs = (
+        await db.execute(
+            select(MeshCentralDevice).where(MeshCentralDevice.workspace_id == user.workspace_id)
+        )
+    ).scalars().all()
+    for d in devs:
+        if d.mesh_id and d.mesh_id not in groups:
+            groups[d.mesh_id] = d.mesh_name or d.client_name or d.mesh_id
+
+    if mc_settings and mc_settings.server_url:
+        try:
+            live_meshes, _ = await fetch_meshcentral_inventory(mc_settings, timeout=8.0)
+            groups.update(live_meshes)
+        except Exception:
+            pass
+
+    return JSONResponse({
+        "success": True,
+        "groups": [{"mesh_id": mid, "mesh_name": mname} for mid, mname in groups.items()],
+    })
+
+
+@router.post("/remote/groups/create")
+async def web_remote_groups_create(
+    request: Request,
+    name: str = Form(...),
+    description: str = Form(""),
+    db: AsyncSession = Depends(get_session),
+):
+    """Create a new MeshCentral device group directly from the Remote Support dashboard."""
+    user, redirect = await _require_workspace_user(request, db)
+    if redirect:
+        return JSONResponse({"success": False, "error": "Authentication required"}, status_code=401)
+
+    mc_settings = await _get_or_none_settings(db, user.workspace_id)
+    if not mc_settings or not mc_settings.server_url:
+        return JSONResponse({"success": False, "error": "MeshCentral is not configured yet."}, status_code=400)
+
+    try:
+        created = await create_meshcentral_group(mc_settings, name, description=description)
+        if not mc_settings.default_mesh_id:
+            mc_settings.default_mesh_id = created["mesh_id"]
+            mc_settings.default_mesh_name = created["mesh_name"]
+            await db.commit()
+        return JSONResponse({"success": True, **created})
+    except Exception as exc:
+        return JSONResponse({"success": False, "error": str(exc)}, status_code=502)
+
+
+@router.get("/remote/agent/download")
+async def web_remote_agent_download(
+    request: Request,
+    mesh_id: Optional[str] = Query(default=None),
+    platform: str = Query(default="windows64"),
+    install_mode: str = Query(default="install"),
+    db: AsyncSession = Depends(get_session),
+):
+    """Direct technician download of the pre-configured MeshAgent installer via CEM."""
+    user, redirect = await _require_workspace_user(request, db)
+    if redirect:
+        return redirect
+
+    mc_settings = await _get_or_none_settings(db, user.workspace_id)
+    if not mc_settings or not mc_settings.enabled or not mc_settings.server_url:
+        raise HTTPException(status_code=400, detail="MeshCentral is not configured and enabled.")
+    if platform not in AGENT_PLATFORMS:
+        raise HTTPException(status_code=400, detail="Unsupported platform.")
+    mode = "connect" if install_mode == "connect" else "install"
+
+    workspace = (
+        await db.execute(select(Workspace).where(Workspace.id == user.workspace_id))
+    ).scalar_one_or_none()
+    brand_name = (workspace.site_title or workspace.name) if workspace else "RemoteSupport"
+
+    try:
+        resolved_mesh_id, _ = await _resolve_mesh_group(db, user.workspace_id, mc_settings, mesh_id)
+        payload, filename, content_type = await proxy_agent_installer(
+            mc_settings,
+            resolved_mesh_id,
+            platform=platform,
+            install_mode=mode,
+            brand_name=brand_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.warning("Agent installer proxy failed for workspace %s: %s", user.workspace_id, exc)
+        raise HTTPException(status_code=502, detail=f"Could not fetch client installer: {exc}")
+
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.post("/remote/invites")
+async def web_remote_invite_create(
+    request: Request,
+    mesh_id: str = Form(""),
+    mesh_name: str = Form(""),
+    client_name: str = Form(""),
+    platform: str = Form("windows64"),
+    install_mode: str = Form("install"),
+    expires_minutes: int = Form(10),
+    db: AsyncSession = Depends(get_session),
+):
+    """Create a 5-15 minute expiring client download link hosted on this website."""
+    user, redirect = await _require_workspace_user(request, db)
+    if redirect:
+        return JSONResponse({"success": False, "error": "Authentication required"}, status_code=401)
+
+    mc_settings = await _get_or_none_settings(db, user.workspace_id)
+    if not mc_settings or not mc_settings.enabled or not mc_settings.server_url:
+        return JSONResponse(
+            {"success": False, "error": "Configure and enable MeshCentral in Settings first."},
+            status_code=400,
+        )
+
+    if platform not in AGENT_PLATFORMS:
+        return JSONResponse({"success": False, "error": "Unsupported platform."}, status_code=400)
+    mode = "connect" if install_mode == "connect" else "install"
+    ttl_minutes = max(1, min(30, int(expires_minutes or 10)))
+
+    try:
+        resolved_id, resolved_name = await _resolve_mesh_group(db, user.workspace_id, mc_settings, mesh_id)
+    except Exception as exc:
+        return JSONResponse(
+            {"success": False, "error": f"Select or create a Device Group first ({exc})."},
+            status_code=400,
+        )
+
+    now = datetime.utcnow()
+    invite = MeshCentralAgentInvite(
+        workspace_id=user.workspace_id,
+        token=secrets.token_urlsafe(24),
+        mesh_id=resolved_id,
+        mesh_name=(mesh_name or "").strip() or resolved_name,
+        client_name=(client_name or "").strip() or None,
+        platform=platform,
+        install_mode=mode,
+        created_by_id=user.id,
+        created_at=now,
+        expires_at=now + timedelta(minutes=ttl_minutes),
+        download_count=0,
+        max_downloads=5,
+        revoked=False,
+    )
+    db.add(invite)
+    await db.commit()
+    await db.refresh(invite)
+
+    base_origin = _request_public_origin(request)
+    return JSONResponse({
+        "success": True,
+        "invite": _serialize_invite(invite, base_origin, now),
+    })
+
+
+@router.post("/remote/invites/{invite_id}/revoke")
+async def web_remote_invite_revoke(
+    request: Request,
+    invite_id: int,
+    db: AsyncSession = Depends(get_session),
+):
+    user, redirect = await _require_workspace_user(request, db)
+    if redirect:
+        return JSONResponse({"success": False, "error": "Authentication required"}, status_code=401)
+
+    invite = (
+        await db.execute(
+            select(MeshCentralAgentInvite).where(
+                MeshCentralAgentInvite.id == invite_id,
+                MeshCentralAgentInvite.workspace_id == user.workspace_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not invite:
+        return JSONResponse({"success": False, "error": "Link not found"}, status_code=404)
+
+    invite.revoked = True
+    await db.commit()
+    return JSONResponse({"success": True, "id": invite.id})
+
+
+def _check_invite_validity(invite: Optional[MeshCentralAgentInvite], now: datetime) -> tuple[bool, int, str]:
+    if not invite:
+        return False, 0, "This support link is invalid or no longer exists."
+    if invite.revoked:
+        return False, 0, "This support link was revoked by your technician."
+    remaining = int((invite.expires_at - now).total_seconds())
+    if remaining <= 0:
+        return False, 0, "This download link has expired. For security, links are only valid for a few minutes."
+    if invite.download_count >= invite.max_downloads:
+        return False, 0, "This link has reached its maximum number of downloads."
+    return True, remaining, ""
+
+
+@router.get("/remote/get/{token}", response_class=HTMLResponse)
+async def web_remote_public_invite_page(
+    request: Request,
+    token: str,
+    db: AsyncSession = Depends(get_session),
+):
+    """Public branded client download page hosted on this website (expires automatically)."""
+    invite = (
+        await db.execute(
+            select(MeshCentralAgentInvite).where(MeshCentralAgentInvite.token == token)
+        )
+    ).scalar_one_or_none()
+    workspace = None
+    if invite:
+        workspace = (
+            await db.execute(select(Workspace).where(Workspace.id == invite.workspace_id))
+        ).scalar_one_or_none()
+
+    now = datetime.utcnow()
+    is_valid, remaining, reason = _check_invite_validity(invite, now)
+    platform_meta = AGENT_PLATFORMS.get(
+        invite.platform if invite else "windows64",
+        AGENT_PLATFORMS["windows64"],
+    )
+    site_title = (workspace.site_title or workspace.name) if workspace else "Remote Support"
+    primary_color = (workspace.primary_color if workspace and workspace.primary_color else "#dc2626")
+
+    status_code = 200 if is_valid else 410
+    return templates.TemplateResponse(
+        "remote/client_download.html",
+        {
+            "request": request,
+            "workspace": workspace,
+            "site_title": site_title,
+            "primary_color": primary_color,
+            "invite": invite,
+            "is_valid": is_valid,
+            "remaining_seconds": remaining,
+            "expired_reason": reason,
+            "platform_meta": platform_meta,
+        },
+        status_code=status_code,
+    )
+
+
+@router.get("/remote/get/{token}/download")
+async def web_remote_public_invite_download(
+    request: Request,
+    token: str,
+    db: AsyncSession = Depends(get_session),
+):
+    """Stream the client installer directly through this website while the token is unexpired."""
+    invite = (
+        await db.execute(
+            select(MeshCentralAgentInvite).where(MeshCentralAgentInvite.token == token)
+        )
+    ).scalar_one_or_none()
+
+    now = datetime.utcnow()
+    is_valid, _, reason = _check_invite_validity(invite, now)
+    if not is_valid or not invite:
+        raise HTTPException(status_code=410, detail=reason or "Link expired.")
+
+    mc_settings = await _get_or_none_settings(db, invite.workspace_id)
+    if not mc_settings or not mc_settings.enabled or not mc_settings.server_url:
+        raise HTTPException(status_code=503, detail="Remote support service is currently unavailable.")
+
+    workspace = (
+        await db.execute(select(Workspace).where(Workspace.id == invite.workspace_id))
+    ).scalar_one_or_none()
+    brand_name = (workspace.site_title or workspace.name) if workspace else "RemoteSupport"
+
+    try:
+        payload, filename, content_type = await proxy_agent_installer(
+            mc_settings,
+            invite.mesh_id,
+            platform=invite.platform,
+            install_mode=invite.install_mode,
+            brand_name=brand_name,
+        )
+    except Exception as exc:
+        logger.warning("Public invite download failed for token %s: %s", token[:8], exc)
+        raise HTTPException(status_code=502, detail="Could not retrieve installer from remote server.")
+
+    invite.download_count += 1
+    await db.commit()
+
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )

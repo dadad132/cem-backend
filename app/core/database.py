@@ -42,6 +42,12 @@ EMAIL_SETTINGS_WEEKLY_COLUMNS = (
     ("emailsettings", "weekly_report_include_tickets", "BOOLEAN NOT NULL DEFAULT 1"),
 )
 
+MESHCENTRAL_SETTINGS_EXTRA_COLUMNS = (
+    ("meshcentralsettings", "default_mesh_id", "VARCHAR"),
+    ("meshcentralsettings", "default_mesh_name", "VARCHAR"),
+    ("meshcentralsettings", "local_install_path", "VARCHAR"),
+)
+
 # SQLite uses StaticPool by default with aiosqlite, so we don't set pool parameters
 # For production with PostgreSQL, you would add: pool_size=10, max_overflow=20
 engine: AsyncEngine = create_async_engine(
@@ -133,6 +139,7 @@ async def init_models() -> None:
                 ("user", "default_landing_page", "VARCHAR"),
                 *QUOTATION_COLUMNS,
                 *EMAIL_SETTINGS_WEEKLY_COLUMNS,
+                *MESHCENTRAL_SETTINGS_EXTRA_COLUMNS,
             ):
                 try:
                     res = await conn.exec_driver_sql(f'PRAGMA table_info("{table}")')

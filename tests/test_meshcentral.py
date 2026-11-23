@@ -445,6 +445,194 @@ async def test_site_settings_includes_meshcentral_form_and_roundtrip(seeded):
     assert "MeshCentral Remote Access" in html
     assert "https://mesh.site-settings.test" in html
     assert "Save MeshCentral Settings" in html
+    assert "Auto-Setup & Fill" in html
     assert "SecretPass99" not in html
     assert key_hex not in html
+
+
+@pytest.mark.asyncio
+async def test_local_autodetect_updates_config_and_autofill_settings(seeded, tmp_path, monkeypatch):
+    from app.web.meshcentral_routes import (
+        web_remote_settings_autofill,
+        web_remote_settings_generate_key,
+    )
+
+    db, ws1, _ws2, admin, tech, _other = seeded
+
+    # Seed a fake local MeshCentral directory with commented config.json
+    mc_dir = tmp_path / "meshcentral"
+    data_dir = mc_dir / "meshcentral-data"
+    data_dir.mkdir(parents=True)
+    cfg_file = data_dir / "config.json"
+    cfg_file.write_text(
+        '// MeshCentral config\n{"settings": {"cert": "mesh.hubconnect.co.za", "port": 443}}\n',
+        encoding="utf-8",
+    )
+
+    local = await mc.autodetect_local_meshcentral(str(mc_dir))
+    assert local["found"] is True
+    assert local["config_updated"] is True
+    assert local["suggested_url"] == "https://mesh.hubconnect.co.za"
+    assert (data_dir / "config.json.bak").exists()
+    updated_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert updated_cfg["settings"]["allowFraming"] is True
+    assert updated_cfg["settings"]["AllowLoginToken"] is True
+
+    # Non-admin blocked from autofill & generate-key
+    with pytest.raises(HTTPException) as exc403:
+        await web_remote_settings_autofill(_request(tech.id), db=db)
+    assert exc403.value.status_code == 403
+
+    gen_resp = await web_remote_settings_generate_key(_request(admin.id), db=db)
+    gen_data = json.loads(gen_resp.body)
+    assert gen_data["success"] is True
+    assert len(gen_data["login_token_key"]) == 160
+
+    # Mock live MeshCentral WebSocket inventory + authcookie for autofill
+    async def fake_inv(settings_row, timeout=10.0):
+        return ({"mesh//GRP1": "Acme Clients"}, [{"node_id": "N1", "is_online": True}])
+
+    async def fake_cookie(settings_row, timeout=6.0):
+        return "LIVE_SIGNED_COOKIE_ABC"
+
+    monkeypatch.setattr("app.web.meshcentral_routes.fetch_meshcentral_inventory", fake_inv)
+    monkeypatch.setattr("app.web.meshcentral_routes.fetch_meshcentral_auth_cookie", fake_cookie)
+
+    resp = await web_remote_settings_autofill(
+        _request(admin.id, "/web/remote/settings/autofill"),
+        server_url="",
+        domain="",
+        username="admin",
+        password="AdminPassword!",
+        verify_ssl="1",
+        local_install_path=str(mc_dir),
+        db=db,
+    )
+    payload = json.loads(resp.body)
+    assert payload["success"] is True
+    assert payload["enabled"] is True
+    assert payload["server_url"] == "https://mesh.hubconnect.co.za"
+    assert payload["sso_ready"] is True
+    assert payload["sso_mode"] == "authcookie"
+    assert payload["default_mesh_id"] == "mesh//GRP1"
+
+    # Verify build_embed_url_async uses live authcookie automatically when loginTokenKey is blank
+    monkeypatch.setattr("app.core.meshcentral.fetch_meshcentral_auth_cookie", fake_cookie)
+    saved = (
+        await db.execute(select(MeshCentralSettings).where(MeshCentralSettings.workspace_id == ws1.id))
+    ).scalar_one()
+    embed = await mc.build_embed_url_async(saved, "node//PC123", mode="desktop")
+    assert embed["sso_active"] is True
+    assert embed.get("sso_mode") == "authcookie"
+    assert "auth=LIVE_SIGNED_COOKIE_ABC" in embed["url"]
+
+
+@pytest.mark.asyncio
+async def test_agent_direct_download_and_expiring_client_invite_lifecycle(seeded, monkeypatch):
+    from datetime import datetime, timedelta
+    from app.models.meshcentral import MeshCentralAgentInvite
+    from app.web.meshcentral_routes import (
+        web_remote_agent_download,
+        web_remote_invite_create,
+        web_remote_invite_revoke,
+        web_remote_public_invite_download,
+        web_remote_public_invite_page,
+    )
+
+    db, ws1, _ws2, admin, tech, other_admin = seeded
+
+    db.add(
+        MeshCentralSettings(
+            workspace_id=ws1.id,
+            enabled=True,
+            server_url="https://mesh.hubconnect.co.za",
+            username="admin",
+            password_encrypted=mc.encrypt_secret("Pass123"),
+            default_mesh_id="mesh//HUBGROUP1",
+            default_mesh_name="HubConnect Clients",
+        )
+    )
+    await db.commit()
+
+    async def fake_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0):
+        return b"MZ-FAKE-MESHAGENT-BINARY", f"Acme-IT-Support-{platform}.exe", "application/octet-stream"
+
+    monkeypatch.setattr("app.web.meshcentral_routes.proxy_agent_installer", fake_proxy)
+
+    # 1. Technician direct download streams installer cleanly with no-store
+    direct = await web_remote_agent_download(
+        _request(tech.id, "/web/remote/agent/download"),
+        mesh_id="mesh//HUBGROUP1",
+        platform="windows64",
+        install_mode="install",
+        db=db,
+    )
+    assert direct.status_code == 200
+    assert direct.body == b"MZ-FAKE-MESHAGENT-BINARY"
+    assert "attachment; filename=" in direct.headers["content-disposition"]
+    assert direct.headers["cache-control"] == "no-store"
+
+    # 2. Technician creates a 5-minute expiring link hosted on tickets.hubconnect.co.za
+    req = _request(tech.id, "/web/remote/invites")
+    req.url = SimpleNamespace(path="/web/remote/invites", scheme="https", netloc="tickets.hubconnect.co.za")
+    inv_resp = await web_remote_invite_create(
+        req,
+        mesh_id="mesh//HUBGROUP1",
+        mesh_name="HubConnect Clients",
+        client_name="Sarah — Reception",
+        platform="windows64",
+        install_mode="connect",
+        expires_minutes=5,
+        db=db,
+    )
+    inv_data = json.loads(inv_resp.body)
+    assert inv_data["success"] is True
+    invite_info = inv_data["invite"]
+    token = invite_info["token"]
+    assert invite_info["share_url"] == f"https://tickets.hubconnect.co.za/web/remote/get/{token}"
+    assert 240 <= invite_info["remaining_seconds"] <= 300
+
+    # 3. Client (unauthenticated!) opens branded download page & downloads installer
+    pub_page = await web_remote_public_invite_page(_request(None, f"/web/remote/get/{token}"), token, db=db)
+    assert pub_page.status_code == 200
+    pub_html = bytes(pub_page.body).decode()
+    assert "Sarah — Reception" in pub_html
+    assert "Download Remote Support Tool" in pub_html
+    assert "mesh.hubconnect.co.za" not in pub_html  # Client stays 100% on CEM website!
+
+    pub_dl = await web_remote_public_invite_download(_request(None, f"/web/remote/get/{token}/download"), token, db=db)
+    assert pub_dl.status_code == 200
+    assert pub_dl.body == b"MZ-FAKE-MESHAGENT-BINARY"
+
+    inv_row = (
+        await db.execute(select(MeshCentralAgentInvite).where(MeshCentralAgentInvite.token == token))
+    ).scalar_one()
+    assert inv_row.download_count == 1
+
+    # 4. Cross-tenant isolation: rival workspace cannot revoke Acme's link
+    rival_revoke = await web_remote_invite_revoke(_request(other_admin.id), inv_row.id, db=db)
+    assert rival_revoke.status_code == 404
+
+    # 5. Once expired, both page and download return HTTP 410 Gone
+    inv_row.expires_at = datetime.utcnow() - timedelta(seconds=5)
+    await db.commit()
+
+    exp_page = await web_remote_public_invite_page(_request(None, f"/web/remote/get/{token}"), token, db=db)
+    assert exp_page.status_code == 410
+    assert "expired" in bytes(exp_page.body).decode().lower()
+
+    with pytest.raises(HTTPException) as exc410:
+        await web_remote_public_invite_download(_request(None, f"/web/remote/get/{token}/download"), token, db=db)
+    assert exc410.value.status_code == 410
+
+    # 6. Revoking a fresh invite immediately invalidates it
+    inv_row.expires_at = datetime.utcnow() + timedelta(minutes=10)
+    await db.commit()
+    rev_resp = await web_remote_invite_revoke(_request(tech.id), inv_row.id, db=db)
+    assert rev_resp.status_code == 200
+
+    with pytest.raises(HTTPException) as exc_revoked:
+        await web_remote_public_invite_download(_request(None, f"/web/remote/get/{token}/download"), token, db=db)
+    assert exc_revoked.value.status_code == 410
+
 

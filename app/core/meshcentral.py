@@ -17,8 +17,11 @@ import json
 import logging
 import os
 import re
+import secrets
+import shutil
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
@@ -47,8 +50,46 @@ VIEW_MODE_BY_CODE: Dict[int, str] = {code: name for name, code in VIEW_MODE_MAP.
 # Bitmask: 1=header, 2=tabs, 4=footer, 8=title, 16=left toolbar, 32=back buttons
 HIDE_CHROME_BITMASK = 63
 
+# Supported MeshAgent client installers proxied through CEM
+AGENT_PLATFORMS: Dict[str, Dict[str, Any]] = {
+    "windows64": {
+        "label": "Windows 64-bit (.exe)",
+        "short_label": "Windows 64-bit",
+        "agent_id": 4,
+        "ext": ".exe",
+        "content_type": "application/octet-stream",
+        "icon": "fab fa-windows",
+    },
+    "windows32": {
+        "label": "Windows 32-bit (.exe)",
+        "short_label": "Windows 32-bit",
+        "agent_id": 3,
+        "ext": ".exe",
+        "content_type": "application/octet-stream",
+        "icon": "fab fa-windows",
+    },
+    "macos": {
+        "label": "macOS Universal (.pkg)",
+        "short_label": "macOS",
+        "agent_id": 10005,
+        "fallback_agent_id": 29,
+        "ext": ".pkg",
+        "content_type": "application/octet-stream",
+        "icon": "fab fa-apple",
+    },
+    "linux": {
+        "label": "Linux Installer (.sh)",
+        "short_label": "Linux",
+        "agent_id": None,
+        "ext": ".sh",
+        "content_type": "text/x-shellscript",
+        "icon": "fab fa-linux",
+    },
+}
+
 _DOMAIN_RE = re.compile(r"^[a-zA-Z0-9_-]{0,64}$")
 _NODE_ID_RE = re.compile(r"^[a-zA-Z0-9_@$/+=.-]{3,256}$")
+_HEX_KEY_RE = re.compile(r"\b([0-9a-fA-F]{64,256})\b")
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +165,25 @@ def normalize_node_id(raw: Optional[str]) -> str:
         if len(parts) == 3 and parts[2]:
             return parts[2]
     return value
+
+
+def normalize_mesh_id(raw: Optional[str]) -> str:
+    """Normalize a MeshCentral group ID (`mesh//<id>`, `mesh/<domain>/<id>`, or `<id>`)."""
+    if not raw or not isinstance(raw, str):
+        raise ValueError("Device Group (Mesh) ID is required.")
+    value = raw.strip()
+    if not _NODE_ID_RE.match(value):
+        raise ValueError("Invalid MeshCentral Group ID format.")
+    if value.startswith("mesh/"):
+        parts = value.split("/", 2)
+        if len(parts) == 3 and parts[2]:
+            return parts[2]
+    return value
+
+
+def generate_random_login_token_key() -> str:
+    """Generate a MeshCentral-compatible 80-byte (160 hex char) loginTokenKey."""
+    return secrets.token_hex(80)
 
 
 def build_login_user_id(
@@ -568,3 +628,419 @@ async def sync_workspace_devices(
         "updated": updated,
         "online": online_count,
     }
+
+
+# ---------------------------------------------------------------------------
+# Automatic Live Auth Cookie SSO, Group Creation & Local Auto-Configuration
+# ---------------------------------------------------------------------------
+
+async def fetch_meshcentral_auth_cookie(
+    settings_row: MeshCentralSettings,
+    timeout: float = 8.0,
+) -> Optional[str]:
+    """Request a short-lived signed auth cookie from MeshCentral `/control.ashx`.
+
+    Allows automatic passwordless SSO into client PCs using only the configured
+    MeshCentral Server URL + Username + Password, without requiring a manual CLI
+    `--loginTokenKey` copy-paste.
+    """
+    ws_url, headers = build_control_ws_url(settings_row)
+    ssl_param: Any = None if settings_row.verify_ssl else False
+    client_timeout = aiohttp.ClientTimeout(total=timeout)
+
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        async with session.ws_connect(
+            ws_url,
+            headers=headers,
+            ssl=ssl_param,
+            heartbeat=10.0,
+            max_msg_size=4 * 1024 * 1024,
+        ) as ws:
+            await ws.send_json({"action": "authcookie"})
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    msg = await ws.receive(timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                    except ValueError:
+                        continue
+                    if not isinstance(data, dict):
+                        continue
+                    action = data.get("action")
+                    if action == "close":
+                        return None
+                    if action == "authcookie" and data.get("cookie"):
+                        return str(data["cookie"])
+                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    break
+    return None
+
+
+async def build_embed_url_async(
+    settings_row: MeshCentralSettings,
+    node_id: str,
+    mode: Optional[str] = None,
+    *,
+    hide_chrome: Optional[bool] = None,
+    include_login: bool = True,
+) -> Dict[str, Any]:
+    """Build an embedded session URL, automatically falling back to live `authcookie` SSO."""
+    embed = build_embed_url(
+        settings_row,
+        node_id,
+        mode=mode,
+        hide_chrome=hide_chrome,
+        include_login=include_login,
+    )
+    if embed["sso_active"] or not include_login:
+        return embed
+
+    # No local loginTokenKey saved: try minting a live auth cookie via /control.ashx
+    if settings_row.username and decrypt_secret(settings_row.password_encrypted):
+        try:
+            cookie = await fetch_meshcentral_auth_cookie(settings_row, timeout=6.0)
+            if cookie:
+                params: List[Tuple[str, str]] = [
+                    ("auth", cookie),
+                    ("gotonode", embed["node_id"]),
+                    ("viewmode", str(embed["viewmode"])),
+                ]
+                if embed["hide_chrome"]:
+                    params.append(("hide", str(HIDE_CHROME_BITMASK)))
+                base = _base_with_domain(settings_row.server_url or "", settings_row.domain)
+                embed["url"] = f"{base}?{urlencode(params, safe='@$')}"
+                embed["sso_active"] = True
+                embed["sso_mode"] = "authcookie"
+        except Exception as exc:
+            logger.debug("Live MeshCentral authcookie fallback skipped: %s", exc)
+    return embed
+
+
+async def create_meshcentral_group(
+    settings_row: MeshCentralSettings,
+    name: str,
+    description: str = "",
+    timeout: float = 10.0,
+) -> Dict[str, str]:
+    """Create a new Agent-Only device group (mesh) directly on the MeshCentral server."""
+    clean_name = (name or "").strip()
+    if not clean_name:
+        raise ValueError("Group name is required.")
+
+    ws_url, headers = build_control_ws_url(settings_row)
+    ssl_param: Any = None if settings_row.verify_ssl else False
+    client_timeout = aiohttp.ClientTimeout(total=timeout)
+
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        async with session.ws_connect(
+            ws_url,
+            headers=headers,
+            ssl=ssl_param,
+            heartbeat=10.0,
+            max_msg_size=8 * 1024 * 1024,
+        ) as ws:
+            await ws.send_json({
+                "action": "createmesh",
+                "meshname": clean_name,
+                "meshtype": 2,  # 2 = Agent-only standard device group
+                "desc": (description or "").strip(),
+            })
+            await asyncio.sleep(0.25)
+            await ws.send_json({"action": "meshes"})
+
+            deadline = time.monotonic() + timeout
+            created_id: Optional[str] = None
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    msg = await ws.receive(timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                    except ValueError:
+                        continue
+                    if not isinstance(data, dict):
+                        continue
+                    action = data.get("action")
+                    if action == "close":
+                        cause = data.get("cause") or data.get("msg") or "Authentication failed"
+                        raise RuntimeError(f"MeshCentral closed the connection: {cause}")
+                    if action == "createmesh" and data.get("meshid"):
+                        created_id = str(data["meshid"])
+                        break
+                    if action == "meshes":
+                        for mesh in data.get("meshes") or []:
+                            if (mesh.get("name") or "").strip().lower() == clean_name.lower() and mesh.get("_id"):
+                                created_id = str(mesh["_id"])
+                                break
+                        if created_id:
+                            break
+                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    break
+
+    if not created_id:
+        raise RuntimeError(f"MeshCentral did not confirm creation of group '{clean_name}'.")
+    return {"mesh_id": created_id, "mesh_name": clean_name}
+
+
+def _strip_json_comments(text: str) -> str:
+    """Allow MeshCentral config.json files that include // or /* */ comments."""
+    out: List[str] = []
+    i = 0
+    n = len(text)
+    in_str = False
+    escape = False
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+        else:
+            if ch == '"':
+                in_str = True
+                out.append(ch)
+                i += 1
+            elif ch == "/" and i + 1 < n and text[i + 1] == "/":
+                i += 2
+                while i < n and text[i] not in ("\n", "\r"):
+                    i += 1
+            elif ch == "/" and i + 1 < n and text[i + 1] == "*":
+                i += 2
+                while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                    i += 1
+                i += 2
+            else:
+                out.append(ch)
+                i += 1
+    return "".join(out)
+
+
+async def autodetect_local_meshcentral(custom_path: Optional[str] = None) -> Dict[str, Any]:
+    """Detect a MeshCentral install on this server, enable framing/tokens, and read loginTokenKey."""
+    candidates: List[Path] = []
+    if custom_path and custom_path.strip():
+        candidates.append(Path(custom_path.strip()).expanduser())
+    env_dir = os.getenv("MESHCENTRAL_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir).expanduser())
+    candidates.extend([
+        Path("/opt/meshcentral"),
+        Path("/usr/local/meshcentral"),
+        Path("/srv/meshcentral"),
+        Path("/var/lib/meshcentral"),
+        Path.home() / "meshcentral",
+    ])
+
+    found_dir: Optional[Path] = None
+    config_file: Optional[Path] = None
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        cfg = candidate / "meshcentral-data" / "config.json"
+        if cfg.is_file():
+            found_dir = candidate
+            config_file = cfg
+            break
+
+    if not found_dir or not config_file:
+        return {
+            "found": False,
+            "path": None,
+            "config_updated": False,
+            "login_token_key": None,
+            "suggested_url": None,
+            "notes": [],
+        }
+
+    notes: List[str] = []
+    config_updated = False
+    suggested_url: Optional[str] = None
+
+    try:
+        raw_text = config_file.read_text(encoding="utf-8")
+        cfg_data = json.loads(_strip_json_comments(raw_text))
+        if isinstance(cfg_data, dict):
+            mc_sec = cfg_data.setdefault("settings", {})
+            if isinstance(mc_sec, dict):
+                changed = False
+                if mc_sec.get("allowFraming") is not True:
+                    mc_sec["allowFraming"] = True
+                    changed = True
+                if mc_sec.get("AllowLoginToken") is not True and mc_sec.get("allowLoginToken") is not True:
+                    mc_sec["AllowLoginToken"] = True
+                    changed = True
+                if changed:
+                    backup = config_file.with_suffix(".json.bak")
+                    if not backup.exists():
+                        shutil.copy2(config_file, backup)
+                    config_file.write_text(json.dumps(cfg_data, indent=2) + "\n", encoding="utf-8")
+                    config_updated = True
+                    notes.append("Enabled allowFraming and AllowLoginToken in local meshcentral-data/config.json.")
+                cert_host = mc_sec.get("cert") or mc_sec.get("Cert")
+                port = mc_sec.get("port") or mc_sec.get("Port") or 443
+                if isinstance(cert_host, str) and cert_host.strip() and not cert_host.startswith("_"):
+                    if int(port) == 443:
+                        suggested_url = f"https://{cert_host.strip()}"
+                    else:
+                        suggested_url = f"https://{cert_host.strip()}:{int(port)}"
+    except Exception as exc:
+        notes.append(f"Could not edit local config.json: {exc}")
+
+    login_token_key: Optional[str] = None
+    mc_entry = found_dir / "node_modules" / "meshcentral"
+    node_bin = shutil.which("node")
+    if node_bin and mc_entry.exists():
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                node_bin,
+                str(mc_entry),
+                "--loginTokenKey",
+                cwd=str(found_dir),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+            output = stdout.decode("utf-8", errors="ignore")
+            match = _HEX_KEY_RE.search(output)
+            if match:
+                login_token_key = match.group(1)
+                notes.append("Auto-retrieved loginTokenKey from local MeshCentral.")
+        except Exception as exc:
+            notes.append(f"Could not run node --loginTokenKey locally: {exc}")
+
+    return {
+        "found": True,
+        "path": str(found_dir),
+        "config_updated": config_updated,
+        "login_token_key": login_token_key,
+        "suggested_url": suggested_url,
+        "notes": notes,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Client Installer Proxy (everything stays on our website)
+# ---------------------------------------------------------------------------
+
+def _safe_brand_slug(brand_name: Optional[str]) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "-", (brand_name or "RemoteSupport").strip()).strip("-")
+    return (cleaned or "RemoteSupport")[:32]
+
+
+def build_agent_download_url(
+    settings_row: MeshCentralSettings,
+    mesh_id: str,
+    platform: str = "windows64",
+    install_mode: str = "install",
+    agent_id_override: Optional[int] = None,
+) -> str:
+    """Build the upstream MeshCentral `/meshagents` URL for a device group and OS."""
+    if not settings_row.server_url:
+        raise ValueError("MeshCentral server URL is not configured.")
+    spec = AGENT_PLATFORMS.get(platform)
+    if not spec:
+        raise ValueError(f"Unsupported installer platform: {platform}")
+    clean_mesh = normalize_mesh_id(mesh_id)
+    base = _base_with_domain(settings_row.server_url, settings_row.domain)
+    if platform == "linux":
+        return f"{base}meshagents?script=1"
+
+    agent_id = agent_id_override if agent_id_override is not None else spec["agent_id"]
+    install_flags = 2 if install_mode == "connect" else 0
+    query = urlencode(
+        {"id": str(agent_id), "meshid": clean_mesh, "installflags": str(install_flags)},
+        safe="@$",
+    )
+    return f"{base}meshagents?{query}"
+
+
+async def proxy_agent_installer(
+    settings_row: MeshCentralSettings,
+    mesh_id: str,
+    platform: str = "windows64",
+    install_mode: str = "install",
+    brand_name: str = "RemoteSupport",
+    timeout: float = 30.0,
+) -> Tuple[bytes, str, str]:
+    """Download the client MeshAgent installer from MeshCentral to stream through CEM."""
+    spec = AGENT_PLATFORMS.get(platform)
+    if not spec:
+        raise ValueError(f"Unsupported installer platform: {platform}")
+    clean_mesh = normalize_mesh_id(mesh_id)
+    slug = _safe_brand_slug(brand_name)
+    plat_suffix = {
+        "windows64": "Windows64",
+        "windows32": "Windows32",
+        "macos": "macOS",
+        "linux": "Linux",
+    }.get(platform, platform)
+    filename = f"{slug}-Support-{plat_suffix}{spec['ext']}"
+
+    if platform == "linux":
+        server_base = _base_with_domain(settings_row.server_url or "", settings_row.domain).rstrip("/")
+        script_url = f"{server_base}/meshagents?script=1"
+        insecure_flag = " -k" if not settings_row.verify_ssl else ""
+        script = (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f'echo "Downloading {brand_name} Remote Support agent..."\n'
+            f'TMP_SCRIPT="$(mktemp /tmp/meshinstall.XXXXXX.sh)"\n'
+            f'trap \'rm -f "$TMP_SCRIPT"\' EXIT\n'
+            f'curl -fsSL{insecure_flag} "{script_url}" -o "$TMP_SCRIPT"\n'
+            'chmod 755 "$TMP_SCRIPT"\n'
+            f'sudo "$TMP_SCRIPT" "{server_base}" "{clean_mesh}"\n'
+        )
+        return script.encode("utf-8"), filename, spec["content_type"]
+
+    ssl_param: Any = None if settings_row.verify_ssl else False
+    headers: Dict[str, str] = {}
+    password = decrypt_secret(settings_row.password_encrypted)
+    if settings_row.username and password:
+        u_b64 = base64.b64encode(settings_row.username.strip().encode("utf-8")).decode("ascii")
+        p_b64 = base64.b64encode(password.encode("utf-8")).decode("ascii")
+        headers["x-meshauth"] = f"{u_b64},{p_b64}"
+
+    agent_ids = [spec["agent_id"]]
+    if spec.get("fallback_agent_id"):
+        agent_ids.append(spec["fallback_agent_id"])
+
+    last_error = "Could not fetch installer from MeshCentral."
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+        for aid in agent_ids:
+            url = build_agent_download_url(
+                settings_row,
+                clean_mesh,
+                platform=platform,
+                install_mode=install_mode,
+                agent_id_override=aid,
+            )
+            async with session.get(url, headers=headers, ssl=ssl_param) as resp:
+                if resp.status == 200:
+                    payload = await resp.read()
+                    if payload:
+                        return payload, filename, spec["content_type"]
+                    last_error = "MeshCentral returned an empty installer file."
+                else:
+                    last_error = f"MeshCentral returned HTTP {resp.status} while fetching the client installer."
+
+    raise RuntimeError(last_error)

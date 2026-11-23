@@ -75,6 +75,7 @@ TENANT_SCOPE: Dict[str, Tuple] = {
     'kbresolvedcase': ('direct',),
     'lead': ('direct',),
     'meeting': ('direct',),
+    'meshcentralagentinvite': ('direct',),
     'meshcentraldevice': ('direct',),
     'meshcentralsessionlog': ('direct',),
     'meshcentralsettings': ('direct',),
@@ -145,6 +146,7 @@ FILE_COLUMNS: Dict[str, List[str]] = {
 UNIQUE_TEXT_COLUMNS: Dict[str, List[str]] = {
     'user': ['username'],
     'ticket': ['ticket_number'],
+    'meshcentralagentinvite': ['token'],
 }
 
 _BLOB_PREFIX = '__b64__:'

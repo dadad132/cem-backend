@@ -532,6 +532,7 @@
       <div id="meshcentral-settings" class="bg-white rounded-xl border border-slate-200 overflow-hidden"
            x-data="{
              mcTesting: false,
+             mcAutofilling: false,
              mcTestResult: null,
              mcTestOk: false,
              mcShowGuide: false,
@@ -543,14 +544,60 @@
                  const res = await fetch('/web/remote/settings/test', { method: 'POST' });
                  const data = await res.json();
                  this.mcTestOk = Boolean(data.success);
+                 const ssoLabel = data.sso_mode === 'token_key' ? 'Token Key SSO' : (data.sso_mode === 'authcookie' ? 'Auto Live SSO' : 'Not configured');
                  this.mcTestResult = data.success
-                   ? `Connected! Found ${data.devices} device(s) (${data.online} online) across ${data.groups} group(s). SSO: ${data.sso_ready ? 'Enabled' : 'Not configured yet'}.`
+                   ? `Connected! Found ${data.devices} device(s) (${data.online} online) across ${data.groups} group(s). SSO: ${ssoLabel}.`
                    : (data.error || 'Connection test failed.');
                } catch (err) {
                  this.mcTestOk = false;
                  this.mcTestResult = 'Could not reach server to test MeshCentral connection.';
                } finally {
                  this.mcTesting = false;
+               }
+             },
+             async autofillMeshCentral() {
+               if (this.mcAutofilling) return;
+               this.mcAutofilling = true;
+               this.mcTestResult = null;
+               try {
+                 const form = this.$refs.mcForm;
+                 const fd = new FormData(form);
+                 const res = await fetch('/web/remote/settings/autofill', { method: 'POST', body: fd });
+                 const data = await res.json();
+                 this.mcTestOk = Boolean(data.success);
+                 this.mcTestResult = data.message || data.error || 'Auto-setup finished.';
+                 if (data.server_url && form.querySelector('[name=server_url]')) {
+                   form.querySelector('[name=server_url]').value = data.server_url;
+                 }
+                 if (data.login_token_key && form.querySelector('[name=login_token_key]')) {
+                   form.querySelector('[name=login_token_key]').value = data.login_token_key;
+                 }
+                 if (data.enabled && form.querySelector('[name=enabled]')) {
+                   form.querySelector('[name=enabled]').checked = true;
+                 }
+               } catch (err) {
+                 this.mcTestOk = false;
+                 this.mcTestResult = 'Could not run auto-setup right now.';
+               } finally {
+                 this.mcAutofilling = false;
+               }
+             },
+             async generateTokenKey() {
+               try {
+                 const res = await fetch('/web/remote/settings/generate-key', { method: 'POST' });
+                 const data = await res.json();
+                 if (data.success && data.login_token_key) {
+                   const input = this.$refs.mcForm.querySelector('[name=login_token_key]');
+                   if (input) {
+                     input.type = 'text';
+                     input.value = data.login_token_key;
+                   }
+                   this.mcTestOk = true;
+                   this.mcTestResult = 'Generated a new Login Token Key and filled the field. Click Save MeshCentral Settings to store it.';
+                 }
+               } catch (err) {
+                 this.mcTestOk = false;
+                 this.mcTestResult = 'Could not generate key.';
                }
              }
            }">
@@ -578,7 +625,7 @@
               <p class="text-sm font-semibold text-green-800">MeshCentral is active — {{ mc_settings.server_url }}</p>
               <p class="text-xs text-green-700 mt-0.5">
                 Technicians can connect from <strong>Support → Remote Support</strong>.
-                {% if mc_has_login_token_key %}Instant SSO auto-login is enabled.{% else %}Add a <code>loginTokenKey</code> below for passwordless client login.{% endif %}
+                {% if mc_has_login_token_key %}Instant SSO auto-login is enabled via Login Token Key.{% elif mc_has_password and mc_settings.username %}Automatic live SSO is active via your MeshCentral credentials.{% else %}Click <strong>Auto-Setup &amp; Fill</strong> below to enable passwordless client login.{% endif %}
               </p>
             </div>
           </div>
@@ -592,7 +639,7 @@
           </div>
           {% endif %}
 
-          <form method="post" action="/web/remote/settings/save" class="space-y-4">
+          <form x-ref="mcForm" method="post" action="/web/remote/settings/save" class="space-y-4">
             <input type="hidden" name="return_to" value="/web/admin/site-settings">
 
             <div class="flex items-center justify-between bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5">
@@ -666,14 +713,21 @@
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label class="block text-sm font-medium text-slate-700 mb-1">
-                  Login Token Key (<code class="text-xs">--loginTokenKey</code>)
-                  {% if mc_has_login_token_key %}<span class="text-xs text-emerald-600 font-semibold">(saved)</span>{% endif %}
-                </label>
+                <div class="flex items-center justify-between gap-2 mb-1">
+                  <label class="block text-sm font-medium text-slate-700">
+                    Login Token Key <span class="text-xs text-slate-400 font-normal">(auto-handled if blank)</span>
+                    {% if mc_has_login_token_key %}<span class="text-xs text-emerald-600 font-semibold">(saved)</span>{% endif %}
+                  </label>
+                  <button type="button" @click="generateTokenKey"
+                          class="text-xs font-semibold text-blue-600 hover:underline">
+                    Generate
+                  </button>
+                </div>
                 <input type="password" name="login_token_key"
-                       placeholder="{{ 'Leave blank to keep saved key' if mc_has_login_token_key else 'Paste hex key for auto-login' }}"
+                       placeholder="{{ 'Leave blank to keep saved key' if mc_has_login_token_key else 'Auto-filled via Auto-Setup, or leave blank for live SSO' }}"
                        autocomplete="new-password"
                        class="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg font-mono text-xs">
+                <p class="text-[11px] text-slate-500 mt-1">Click <strong>Auto-Setup &amp; Fill</strong> below — CEM auto-detects local MeshCentral or uses automatic live SSO with your username &amp; password.</p>
                 {% if mc_has_login_token_key %}
                 <label class="inline-flex items-center gap-1.5 mt-1 text-xs text-slate-500 cursor-pointer">
                   <input type="checkbox" name="clear_login_token_key" value="1" class="rounded border-slate-300">
@@ -715,7 +769,12 @@
                    x-text="mcTestResult"></div>
             </template>
 
-            <div class="flex flex-wrap gap-3 pt-1">
+            <div class="flex flex-wrap gap-2.5 pt-1">
+              <button type="button" @click="autofillMeshCentral" :disabled="mcAutofilling"
+                      class="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg transition text-sm font-semibold flex items-center gap-2 shadow-sm disabled:opacity-60">
+                <i class="fas fa-wand-magic-sparkles" :class="mcAutofilling ? 'fa-spin' : ''"></i>
+                <span x-text="mcAutofilling ? 'Configuring...' : 'Auto-Setup & Fill'"></span>
+              </button>
               <button type="submit"
                       class="flex-1 py-2.5 px-4 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white font-semibold rounded-lg transition flex items-center justify-center gap-2 shadow-sm text-sm">
                 <i class="fas fa-desktop"></i>

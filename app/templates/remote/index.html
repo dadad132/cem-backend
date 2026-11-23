@@ -4,17 +4,167 @@
 {% block content %}
 <style>[x-cloak] { display: none !important; }</style>
 <script id="remote-devices-data" type="application/json">{{ devices_payload | tojson }}</script>
+<script id="remote-groups-data" type="application/json">{{ mesh_groups | tojson }}</script>
+<script id="remote-invites-data" type="application/json">{{ invites_payload | tojson }}</script>
 <div class="space-y-6"
      x-data="{
        devices: JSON.parse(document.getElementById('remote-devices-data').textContent || '[]'),
+       meshGroups: JSON.parse(document.getElementById('remote-groups-data').textContent || '[]'),
+       invites: JSON.parse(document.getElementById('remote-invites-data').textContent || '[]'),
        search: '',
        statusFilter: 'all',
        selectedGroup: 'all',
        viewMode: 'grid',
        showAddModal: false,
+       showInstallModal: false,
        syncing: false,
        toast: null,
        toastType: 'success',
+       // Client installer & expiring link state
+       installMeshId: '',
+       installClientName: '',
+       installPlatform: 'windows64',
+       installMode: 'install',
+       installExpiry: 10,
+       creatingInvite: false,
+       latestInvite: null,
+       showNewGroupInput: false,
+       newGroupName: '',
+       creatingGroup: false,
+       loadingGroups: false,
+       init() {
+         if (this.meshGroups.length > 0) {
+           this.installMeshId = this.meshGroups[0].mesh_id;
+         }
+         setInterval(() => {
+           this.invites.forEach(inv => {
+             if (inv.remaining_seconds > 0 && inv.is_active) {
+               inv.remaining_seconds -= 1;
+               if (inv.remaining_seconds <= 0) inv.is_active = false;
+             }
+           });
+           if (this.latestInvite && this.latestInvite.remaining_seconds > 0 && this.latestInvite.is_active) {
+             this.latestInvite.remaining_seconds -= 1;
+             if (this.latestInvite.remaining_seconds <= 0) this.latestInvite.is_active = false;
+           }
+         }, 1000);
+       },
+       formatTimer(secs) {
+         const s = Math.max(0, Number(secs) || 0);
+         const m = String(Math.floor(s / 60)).padStart(2, '0');
+         const r = String(s % 60).padStart(2, '0');
+         return `${m}:${r}`;
+       },
+       async openInstallModal() {
+         this.showInstallModal = true;
+         if (!this.loadingGroups) {
+           this.loadingGroups = true;
+           try {
+             const res = await fetch('/web/remote/groups');
+             const data = await res.json();
+             if (data.success && Array.isArray(data.groups)) {
+               this.meshGroups = data.groups;
+               if (!this.installMeshId && this.meshGroups.length > 0) {
+                 this.installMeshId = this.meshGroups[0].mesh_id;
+               }
+             }
+           } catch (e) {} finally {
+             this.loadingGroups = false;
+           }
+         }
+       },
+       selectedMeshName() {
+         const found = this.meshGroups.find(g => g.mesh_id === this.installMeshId);
+         return found ? found.mesh_name : '';
+       },
+       directDownloadUrl() {
+         const params = new URLSearchParams({
+           platform: this.installPlatform,
+           install_mode: this.installMode,
+         });
+         if (this.installMeshId) params.set('mesh_id', this.installMeshId);
+         return `/web/remote/agent/download?${params.toString()}`;
+       },
+       async createGroupNow() {
+         const name = this.newGroupName.trim();
+         if (!name || this.creatingGroup) return;
+         this.creatingGroup = true;
+         try {
+           const fd = new FormData();
+           fd.append('name', name);
+           const res = await fetch('/web/remote/groups/create', { method: 'POST', body: fd });
+           const data = await res.json();
+           if (data.success) {
+             this.meshGroups.unshift({ mesh_id: data.mesh_id, mesh_name: data.mesh_name });
+             this.installMeshId = data.mesh_id;
+             this.newGroupName = '';
+             this.showNewGroupInput = false;
+             this.notify(`Created client group '${data.mesh_name}'.`, 'success');
+           } else {
+             this.notify(data.error || 'Could not create group.', 'error');
+           }
+         } catch (e) {
+           this.notify('Could not reach server to create group.', 'error');
+         } finally {
+           this.creatingGroup = false;
+         }
+       },
+       async generateClientLink() {
+         if (this.creatingInvite) return;
+         this.creatingInvite = true;
+         try {
+           const fd = new FormData();
+           fd.append('mesh_id', this.installMeshId || '');
+           fd.append('mesh_name', this.selectedMeshName());
+           fd.append('client_name', this.installClientName.trim());
+           fd.append('platform', this.installPlatform);
+           fd.append('install_mode', this.installMode);
+           fd.append('expires_minutes', String(this.installExpiry));
+           const res = await fetch('/web/remote/invites', { method: 'POST', body: fd });
+           const data = await res.json();
+           if (data.success && data.invite) {
+             this.latestInvite = { ...data.invite };
+             this.invites.unshift(data.invite);
+             this.notify(`Created ${this.installExpiry}-minute client download link!`, 'success');
+           } else {
+             this.notify(data.error || 'Could not generate download link.', 'error');
+           }
+         } catch (e) {
+           this.notify('Could not reach server to create link.', 'error');
+         } finally {
+           this.creatingInvite = false;
+         }
+       },
+       async revokeInvite(inv) {
+         try {
+           const res = await fetch(`/web/remote/invites/${inv.id}/revoke`, { method: 'POST' });
+           const data = await res.json();
+           if (data.success) {
+             inv.revoked = true;
+             inv.is_active = false;
+             inv.remaining_seconds = 0;
+             if (this.latestInvite && this.latestInvite.id === inv.id) {
+               this.latestInvite.revoked = true;
+               this.latestInvite.is_active = false;
+             }
+             this.notify('Download link revoked.', 'success');
+           }
+         } catch (e) {
+           this.notify('Could not revoke link.', 'error');
+         }
+       },
+       async copyText(text, label = 'Link copied to clipboard!') {
+         try {
+           await navigator.clipboard.writeText(text);
+           this.notify(label, 'success');
+         } catch (e) {
+           this.notify('Please select and copy the link manually.', 'error');
+         }
+       },
+       clientShareMessage(inv) {
+         const mins = Math.max(1, Math.ceil((inv.remaining_seconds || 60) / 60));
+         return `Hi, please click this secure support link (valid for ${mins} min) to download our Remote Support tool so I can assist you: ${inv.share_url}`;
+       },
        get filteredDevices() {
          const q = this.search.trim().toLowerCase();
          return this.devices.filter(d => {
@@ -110,6 +260,14 @@
       </div>
 
       <div class="flex flex-wrap items-center gap-2.5">
+        {% if is_configured %}
+        <button type="button" @click="openInstallModal"
+                class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-semibold transition shadow-sm">
+          <i class="fas fa-download"></i>
+          <span>Install on Client PC</span>
+        </button>
+        {% endif %}
+
         {% if is_configured and has_sync_creds %}
         <button type="button" @click="syncNow" :disabled="syncing"
                 class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 text-white text-sm font-semibold transition disabled:opacity-60">
@@ -526,6 +684,193 @@
       </div>
 
     </section>
+  </div>
+
+  <!-- Client PC Installer & Expiring Download Link Modal -->
+  <div x-show="showInstallModal" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 overflow-y-auto"
+       @click.self="showInstallModal = false"
+       @keydown.escape.window="showInstallModal = false">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden my-8">
+      <div class="bg-slate-900 px-6 py-4 flex items-center justify-between text-white">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-lg bg-emerald-500/20 text-emerald-300 flex items-center justify-center">
+            <i class="fas fa-download"></i>
+          </div>
+          <div>
+            <h3 class="font-bold text-base">Install on Client PC &amp; Share Expiring Link</h3>
+            <p class="text-xs text-slate-300">Download the client tool directly or send a 5–15 minute link hosted right on this website.</p>
+          </div>
+        </div>
+        <button type="button" @click="showInstallModal = false" class="text-slate-400 hover:text-white">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+
+      <div class="p-6 space-y-5 max-h-[80vh] overflow-y-auto">
+        <!-- Group + Client Name -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <div class="flex items-center justify-between mb-1">
+              <label class="block text-sm font-medium text-slate-700">Device Group</label>
+              <button type="button" @click="showNewGroupInput = !showNewGroupInput"
+                      class="text-xs font-semibold text-blue-600 hover:underline">
+                <span x-text="showNewGroupInput ? 'Cancel' : '+ New Group'"></span>
+              </button>
+            </div>
+            <select x-model="installMeshId"
+                    class="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg text-sm bg-white">
+              <option value="" x-show="meshGroups.length === 0">Auto-select / Create default group</option>
+              <template x-for="g in meshGroups" :key="g.mesh_id">
+                <option :value="g.mesh_id" x-text="g.mesh_name"></option>
+              </template>
+            </select>
+            <div x-show="showNewGroupInput" class="mt-2 flex gap-2">
+              <input type="text" x-model="newGroupName" placeholder="e.g. Acme Corp PCs"
+                     class="flex-1 px-3 py-1.5 border border-slate-300 rounded-lg text-xs">
+              <button type="button" @click="createGroupNow" :disabled="creatingGroup"
+                      class="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold">
+                <span x-text="creatingGroup ? '...' : 'Create'"></span>
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-slate-700 mb-1">Client / User Name (optional)</label>
+            <input type="text" x-model="installClientName" list="client-companies-list"
+                   placeholder="e.g. Sarah — Reception PC"
+                   class="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg text-sm">
+          </div>
+        </div>
+
+        <!-- Platform + Mode + Expiry -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-slate-700 mb-1">Client OS</label>
+            <select x-model="installPlatform" class="w-full px-3 py-2.5 border border-slate-300 rounded-lg text-sm bg-white">
+              <option value="windows64">Windows 64-bit (.exe)</option>
+              <option value="windows32">Windows 32-bit (.exe)</option>
+              <option value="macos">macOS Universal (.pkg)</option>
+              <option value="linux">Linux Installer (.sh)</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-slate-700 mb-1">Install Mode</label>
+            <select x-model="installMode" class="w-full px-3 py-2.5 border border-slate-300 rounded-lg text-sm bg-white">
+              <option value="install">Permanent Agent (Install)</option>
+              <option value="connect">Quick Support (One-Time)</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-slate-700 mb-1">Link Expires After</label>
+            <div class="grid grid-cols-3 gap-1.5">
+              <button type="button" @click="installExpiry = 5"
+                      class="py-2 rounded-lg text-xs font-semibold border transition"
+                      :class="installExpiry === 5 ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'">
+                5 min
+              </button>
+              <button type="button" @click="installExpiry = 10"
+                      class="py-2 rounded-lg text-xs font-semibold border transition"
+                      :class="installExpiry === 10 ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'">
+                10 min
+              </button>
+              <button type="button" @click="installExpiry = 15"
+                      class="py-2 rounded-lg text-xs font-semibold border transition"
+                      :class="installExpiry === 15 ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'">
+                15 min
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Primary Actions: Direct Download OR Create Expiring Link -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+          <button type="button" @click="generateClientLink" :disabled="creatingInvite"
+                  class="py-3 px-4 rounded-xl bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white text-sm font-semibold shadow-sm transition flex items-center justify-center gap-2 disabled:opacity-60">
+            <i class="fas fa-link"></i>
+            <span x-text="creatingInvite ? 'Generating Link...' : `Create ${installExpiry}-Min Client Link`"></span>
+          </button>
+          <a :href="directDownloadUrl()"
+             class="py-3 px-4 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-sm font-semibold transition flex items-center justify-center gap-2">
+            <i class="fas fa-download text-emerald-600"></i>
+            <span>Download Installer Now</span>
+          </a>
+        </div>
+
+        <!-- Newly Created Link Card -->
+        <template x-if="latestInvite">
+          <div class="rounded-xl border-2 p-4 space-y-3"
+               :class="latestInvite.is_active ? 'bg-emerald-50 border-emerald-300' : 'bg-slate-50 border-slate-200'">
+            <div class="flex items-center justify-between gap-2">
+              <div class="flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full"
+                      :class="latestInvite.is_active ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'"></span>
+                <p class="text-sm font-bold text-slate-900"
+                   x-text="latestInvite.is_active ? 'Client Download Link Ready' : 'Link Expired / Revoked'"></p>
+              </div>
+              <span class="font-mono text-xs font-bold px-2.5 py-1 rounded-lg bg-white border border-slate-200"
+                    :class="latestInvite.is_active ? 'text-emerald-700' : 'text-slate-500'"
+                    x-text="latestInvite.is_active ? `Expires in ${formatTimer(latestInvite.remaining_seconds)}` : 'Expired'"></span>
+            </div>
+            <div class="flex items-center gap-2">
+              <input type="text" readonly :value="latestInvite.share_url"
+                     class="flex-1 px-3 py-2 rounded-lg bg-white border border-slate-300 font-mono text-xs text-slate-800">
+              <button type="button" @click="copyText(latestInvite.share_url, 'Download link copied!')"
+                      class="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex-shrink-0">
+                <i class="fas fa-copy mr-1"></i>Copy Link
+              </button>
+            </div>
+            <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <button type="button" @click="copyText(clientShareMessage(latestInvite), 'Ready-to-send client message copied!')"
+                      class="font-semibold text-blue-700 hover:underline">
+                <i class="fas fa-comment-dots mr-1"></i>Copy ready-to-send WhatsApp / Email message
+              </button>
+              <button type="button" x-show="latestInvite.is_active" @click="revokeInvite(latestInvite)"
+                      class="font-semibold text-red-600 hover:underline">
+                Revoke now
+              </button>
+            </div>
+          </div>
+        </template>
+
+        <!-- Recent Expiring Links -->
+        <div x-show="invites.length > 0" class="pt-3 border-t border-slate-200">
+          <h4 class="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2.5">Recent Expiring Links</h4>
+          <div class="space-y-2 max-h-44 overflow-y-auto">
+            <template x-for="inv in invites" :key="inv.id">
+              <div class="flex items-center justify-between gap-3 p-2.5 rounded-lg border text-xs"
+                   :class="inv.is_active ? 'bg-white border-slate-200' : 'bg-slate-50 border-slate-100 opacity-70'">
+                <div class="min-w-0">
+                  <p class="font-semibold text-slate-800 truncate">
+                    <span x-text="inv.client_name || inv.mesh_name || 'Client PC'"></span>
+                    <span class="text-slate-400 font-normal">· <span x-text="inv.platform_label"></span></span>
+                  </p>
+                  <p class="text-slate-500">
+                    <span x-show="inv.is_active" class="text-emerald-700 font-mono font-semibold"
+                          x-text="`Expires in ${formatTimer(inv.remaining_seconds)}`"></span>
+                    <span x-show="!inv.is_active" class="text-slate-400 font-semibold"
+                          x-text="inv.revoked ? 'Revoked' : 'Expired'"></span>
+                    · Downloads: <span x-text="inv.download_count"></span>/<span x-text="inv.max_downloads"></span>
+                  </p>
+                </div>
+                <div class="flex items-center gap-1.5 flex-shrink-0">
+                  <button type="button" x-show="inv.is_active"
+                          @click="copyText(inv.share_url, 'Link copied!')"
+                          class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold">
+                    Copy
+                  </button>
+                  <button type="button" x-show="inv.is_active"
+                          @click="revokeInvite(inv)"
+                          class="px-2.5 py-1 rounded-md text-red-600 hover:bg-red-50 font-semibold">
+                    Revoke
+                  </button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Add Client PC Modal -->
