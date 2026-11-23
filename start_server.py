@@ -20,6 +20,7 @@ if hasattr(sys.stdout, 'reconfigure'):
 project_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(project_root))
 
+from app.core.config import get_settings
 from app.core.network import get_local_ip, get_all_local_ips, get_public_ip
 from app.core.backup import backup_manager
 
@@ -93,8 +94,12 @@ def start_server(host=None, port=8000, use_public_ip=True):
     print(f"Binding to: {host}")
     print(f"Port: {port}")
     
+    settings = get_settings()
+
     if use_public_ip and host == '0.0.0.0':
         print(f"\n[PUBLIC ACCESS]")
+        if settings.app_domain:
+            print(f"   {settings.public_base_url}")
         print(f"   http://{display_ip}:{port}")
         print(f"\n[LOCAL ACCESS]")
         local_ip = get_local_ip()
@@ -129,6 +134,8 @@ def start_server(host=None, port=8000, use_public_ip=True):
         workers=1,  # Single worker for SQLite (SQLite doesn't support concurrent writes)
         limit_concurrency=100,  # Limit concurrent connections
         timeout_keep_alive=30,  # Reduce keepalive timeout
+        proxy_headers=True,
+        forwarded_allow_ips=settings.forwarded_allow_ips,
     )
 
 

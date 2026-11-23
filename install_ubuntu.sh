@@ -175,9 +175,12 @@ if [ ! -f ".env" ]; then
         RANDOM_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || echo "change-this-$(date +%s)")
         cat > .env << EOF
 # CRM Backend Configuration
+APP_DOMAIN=tickets.hubconnect.co.za
 APP_DEBUG=false
 APP_HOST=0.0.0.0
 APP_PORT=8000
+FORWARDED_ALLOW_IPS=127.0.0.1,::1
+ALLOWED_HOSTS=["tickets.hubconnect.co.za","localhost","127.0.0.1","*"]
 
 # Keep false for plain HTTP; set true only when SSL/HTTPS is configured
 APP_HTTPS_ONLY=false
@@ -239,7 +242,7 @@ After=network.target
 Type=simple
 User=$SERVICE_USER
 WorkingDirectory=$APP_DIR
-ExecStart=$PYTHON_PATH -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+ExecStart=$PYTHON_PATH -m uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=127.0.0.1,::1
 Restart=always
 RestartSec=10
 
@@ -256,7 +259,7 @@ After=network.target
 Type=simple
 User=$SERVICE_USER
 WorkingDirectory=$APP_DIR
-ExecStart=$PYTHON_PATH -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+ExecStart=$PYTHON_PATH -m uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=127.0.0.1,::1
 Restart=always
 RestartSec=10
 

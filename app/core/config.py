@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     app_name: str = Field("CRM Backend", alias="APP_NAME")
+    app_domain: str = Field("tickets.hubconnect.co.za", alias="APP_DOMAIN")
     debug: bool = Field(True, alias="APP_DEBUG")
     host: str = Field("0.0.0.0", alias="APP_HOST")
     port: int = Field(8000, alias="APP_PORT")
@@ -19,6 +20,11 @@ class Settings(BaseSettings):
     database_url: str = Field("sqlite+aiosqlite:///./data.db", alias="DATABASE_URL")
 
     cors_origins: List[str] = Field(default_factory=lambda: ["*"], alias="CORS_ORIGINS")
+    allowed_hosts: List[str] = Field(
+        default_factory=lambda: ["tickets.hubconnect.co.za", "localhost", "127.0.0.1", "*"],
+        alias="ALLOWED_HOSTS",
+    )
+    forwarded_allow_ips: str = Field("127.0.0.1,::1", alias="FORWARDED_ALLOW_IPS")
 
     # Set True only when HTTPS/SSL is configured on the server.
     # Keep False (default) for plain HTTP cloud deployments so session cookies work.
@@ -36,6 +42,15 @@ class Settings(BaseSettings):
     google_client_id: str = Field("", alias="GOOGLE_CLIENT_ID")
     google_client_secret: str = Field("", alias="GOOGLE_CLIENT_SECRET")
     google_redirect_uri: str = Field("http://localhost:8000/web/auth/google/callback", alias="GOOGLE_REDIRECT_URI")
+
+    @property
+    def public_base_url(self) -> str:
+        """Canonical public URL for this deployment based on APP_DOMAIN and APP_HTTPS_ONLY."""
+        scheme = "https" if self.https_only else "http"
+        domain = (self.app_domain or "localhost").strip().rstrip("/")
+        if domain.startswith(("http://", "https://")):
+            return domain
+        return f"{scheme}://{domain}"
 
     class Config:
         env_file = ".env"

@@ -6,6 +6,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 import os
@@ -197,6 +199,19 @@ app.add_middleware(
     secret_key=settings.secret_key,
     https_only=settings.https_only,  # Only True when HTTPS is configured; False for plain HTTP cloud
     same_site='lax'
+)
+
+# Restrict Host headers only when ALLOWED_HOSTS is explicitly locked down (no "*").
+# Default includes tickets.hubconnect.co.za alongside "*" so bare-IP fallback keeps working.
+if settings.allowed_hosts and "*" not in settings.allowed_hosts:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
+
+# Trust X-Forwarded-Proto / X-Forwarded-For from local reverse proxy (Nginx) so
+# HTTPS scheme, HSTS, guest portal URLs, and real client IPs work cleanly on
+# tickets.hubconnect.co.za even if uvicorn was launched without --proxy-headers.
+app.add_middleware(
+    ProxyHeadersMiddleware,
+    trusted_hosts=[h.strip() for h in settings.forwarded_allow_ips.split(",") if h.strip()] or ["127.0.0.1", "::1"],
 )
 
 # Import templates from web routes to get the enhanced version with workspace injection
