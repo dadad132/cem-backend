@@ -883,8 +883,8 @@ async def autodetect_local_meshcentral(custom_path: Optional[str] = None) -> Dic
             mc_sec = cfg_data.setdefault("settings", {})
             if isinstance(mc_sec, dict):
                 changed = False
-                if mc_sec.get("allowFraming") is not True:
-                    mc_sec["allowFraming"] = True
+                if mc_sec.get("allowFraming") is not True and mc_sec.get("AllowFraming") is not True:
+                    mc_sec["AllowFraming"] = True
                     changed = True
                 if mc_sec.get("AllowLoginToken") is not True and mc_sec.get("allowLoginToken") is not True:
                     mc_sec["AllowLoginToken"] = True

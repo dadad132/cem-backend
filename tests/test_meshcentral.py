@@ -475,8 +475,8 @@ async def test_local_autodetect_updates_config_and_autofill_settings(seeded, tmp
     assert local["suggested_url"] == "https://mesh.hubconnect.co.za"
     assert (data_dir / "config.json.bak").exists()
     updated_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
-    assert updated_cfg["settings"]["allowFraming"] is True
-    assert updated_cfg["settings"]["AllowLoginToken"] is True
+    assert updated_cfg["settings"].get("AllowFraming") is True or updated_cfg["settings"].get("allowFraming") is True
+    assert updated_cfg["settings"].get("AllowLoginToken") is True
 
     # Non-admin blocked from autofill & generate-key
     with pytest.raises(HTTPException) as exc403:
