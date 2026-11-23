@@ -18,9 +18,9 @@
            this.testOk = Boolean(data.success);
            const ssoLabel = data.sso_mode === 'token_key' ? 'Token Key SSO' : (data.sso_mode === 'authcookie' ? 'Auto Live SSO' : 'Not configured');
            if (data.success) {
-             this.testResult = `Connected! Found ${data.devices} device(s) (${data.online} online) across ${data.groups} group(s). SSO: ${ssoLabel}.`;
+             this.testResult = `${data.message || 'Connected!'} Found ${data.devices} device(s) (${data.online} online) across ${data.groups} group(s). SSO: ${ssoLabel}. ${data.hint || ''}`.trim();
            } else {
-             this.testResult = data.error || 'Connection test failed.';
+             this.testResult = `${data.error || 'Connection test failed.'} ${data.hint || ''}`.trim();
            }
          } catch (err) {
            this.testOk = false;
@@ -39,7 +39,7 @@
            const res = await fetch('/web/remote/settings/autofill', { method: 'POST', body: fd });
            const data = await res.json();
            this.testOk = Boolean(data.success);
-           this.testResult = data.message || data.error || 'Auto-setup finished.';
+           this.testResult = `${data.message || data.error || 'Auto-setup finished.'} ${data.hint || ''}`.trim();
            if (data.server_url && form.querySelector('[name=server_url]')) {
              form.querySelector('[name=server_url]').value = data.server_url;
            }
@@ -105,6 +105,16 @@
     <span>{{ flash_message }}</span>
   </div>
   {% endif %}
+
+  <!-- Localhost / production ergonomics -->
+  <div class="rounded-xl border border-blue-200 bg-blue-50 px-5 py-4 text-xs text-blue-900 space-y-1.5">
+    <p class="font-bold text-sm flex items-center gap-2"><i class="fas fa-circle-info text-blue-600"></i>Where are you opening this page?</p>
+    <ul class="list-disc pl-5 space-y-1">
+      <li>Testing on this server: use <code class="px-1 bg-white/70 rounded">http://127.0.0.1:8000/web/remote/settings</code> — Auto-Setup reads the local <code>meshcentral-data/cem-autolink.json</code>.</li>
+      <li>Live site: use <code class="px-1 bg-white/70 rounded">https://tickets.hubconnect.co.za/web/remote/settings</code>; the MeshCentral engine is published at <code class="px-1 bg-white/70 rounded">https://tickets.hubconnect.co.za:4433</code>.</li>
+      <li>The engine account created by <code>setup_meshcentral.sh</code> is lowercase <code class="px-1 bg-white/70 rounded">admin</code> (not <code>Admin</code>) unless you passed <code>--admin-user</code>. Auto-Setup fills it for you.</li>
+    </ul>
+  </div>
 
   <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
 

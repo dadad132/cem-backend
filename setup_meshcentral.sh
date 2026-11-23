@@ -46,6 +46,16 @@
 
 set -euo pipefail
 
+# This installer runs as root: never leave credentials or diagnostics readable
+# by other users, and never follow a pre-planted symlink at a predictable /tmp
+# path. Create the canonical log via mktemp + atomic replace (mv replaces the
+# symlink itself rather than writing through it).
+umask 077
+VERIFY_LOG="/tmp/meshcentral-user.log"
+_VERIFY_TMP=$(mktemp /tmp/meshcentral-verify.XXXXXX) || exit 1
+mv -f -- "$_VERIFY_TMP" "$VERIFY_LOG"
+chmod 600 "$VERIFY_LOG"
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 print_status() { echo -e "${GREEN}[✓]${NC} $1"; }
 print_error()  { echo -e "${RED}[✗]${NC} $1"; }
@@ -629,6 +639,136 @@ if [ "$MC_OK" -ne 1 ]; then
 fi
 print_status "MeshCentral engine is running"
 
+# ─── Self-verification: live group discovery over the loopback WebSocket ─────
+# A running HTTP listener alone is not proof that CEM can authenticate: a wrong
+# password, a disabled account, or a missing device group all look "up" until
+# the first installer click fails. Verify with meshctrl itself and fail loudly.
+MESHCTRL="$MC_DIR/node_modules/meshcentral/meshctrl.js"
+DEFAULT_GROUP_NAME="Client PCs"
+DEFAULT_MESH_ID=""
+DEFAULT_MESH_NAME=""
+GROUP_COUNT=0
+
+verify_failed() {
+    print_error "$1"
+    print_info "Last MeshCentral verification output (${VERIFY_LOG}):"
+    tail -n 40 "$VERIFY_LOG" 2>/dev/null | sed 's/^/    /' || true
+    print_info "Fix the cause above and re-run: sudo bash $0 --admin-pass '<password>'"
+    exit 1
+}
+
+# meshctrl prints a JSON object/array (sometimes after ANSI/preamble text) with
+# one entry per device group. Emit: <count>\n<matched mesh id>\n<matched name>.
+# Exit 2 on unparseable non-empty output so a parse failure is NEVER mistaken
+# for "zero groups" (which would create duplicate groups on every re-run).
+parse_device_groups() {
+python3 -c '
+import json, re, sys
+raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", sys.stdin.read()).strip()
+if not raw:
+    print(0); print(""); print("")
+    sys.exit(0)
+match = re.search(r"[\[{]", raw)
+data = None
+if match:
+    try:
+        data = json.loads(raw[match.start():])
+    except Exception:
+        data = None
+if data is None:
+    sys.stderr.write("unparseable meshctrl listdevicegroups output\n")
+    sys.exit(2)
+groups = []
+if isinstance(data, dict):
+    for key, value in data.items():
+        if isinstance(value, dict):
+            gid = str(value.get("id") or value.get("meshid") or key)
+            name = str(value.get("name") or key)
+        else:
+            gid, name = str(key), str(value)
+        groups.append((gid, name))
+elif isinstance(data, list):
+    for value in data:
+        if isinstance(value, dict):
+            gid = str(value.get("id") or value.get("meshid") or "")
+            name = str(value.get("name") or "")
+        else:
+            gid, name = "", str(value)
+        groups.append((gid, name))
+else:
+    sys.stderr.write("unexpected meshctrl group payload type\n")
+    sys.exit(2)
+# Prefer the canonical installer group, otherwise fall back to the first group.
+chosen = next((g for g in groups if g[1].strip().lower() == "client pcs"), None)
+if chosen is None and groups:
+    chosen = groups[0]
+print(len(groups))
+print(chosen[0] if chosen else "")
+print(chosen[1] if chosen else "")
+'
+}
+
+# meshctrl only supports flag-based auth; keep credentials out of the persisted
+# log even if an error path echoes its argv (the file is already mode 0600).
+log_meshctrl_output() {
+    MC_SECRET="$ADMIN_PASS" MC_TOKEN_SECRET="$LOGIN_TOKEN_KEY" python3 -c '
+import os, sys
+text = sys.stdin.read()
+for key in ("MC_SECRET", "MC_TOKEN_SECRET"):
+    secret = os.environ.get(key, "")
+    if secret:
+        text = text.replace(secret, "<redacted>")
+sys.stdout.write(text)
+' >>"$VERIFY_LOG"
+}
+
+refresh_groups() {
+    local output parsed count mid name
+    output=$(node "$MESHCTRL" "${MESHCTRL_ARGS[@]}" listdevicegroups 2>&1) || return 1
+    printf '%s\n' "$output" | log_meshctrl_output
+    parsed=$(printf '%s\n' "$output" | parse_device_groups) || return 2
+    count=$(printf '%s\n' "$parsed" | sed -n '1p')
+    mid=$(printf '%s\n' "$parsed" | sed -n '2p')
+    name=$(printf '%s\n' "$parsed" | sed -n '3p')
+    [[ "$count" =~ ^[0-9]+$ ]] || return 2
+    GROUP_COUNT="$count"
+    DEFAULT_MESH_ID="$mid"
+    DEFAULT_MESH_NAME="$name"
+    return 0
+}
+
+if [ ! -f "$MESHCTRL" ]; then
+    verify_failed "meshctrl.js not found at ${MESHCTRL}; cannot self-verify the engine."
+fi
+
+echo "--- MeshCentral self-verification $(date -u +%Y-%m-%dT%H:%M:%SZ) ---" >>"$VERIFY_LOG"
+MESHCTRL_ARGS=(--url "ws://127.0.0.1:${MC_PORT}" --loginuser "$ADMIN_USER" --loginpass "$ADMIN_PASS")
+if [ -n "$LOGIN_TOKEN_KEY" ]; then
+    MESHCTRL_ARGS+=(--loginkey "$LOGIN_TOKEN_KEY")
+fi
+
+if ! refresh_groups; then
+    # Some builds reject --loginkey together with a password; retry with the
+    # service account credentials alone before giving up.
+    MESHCTRL_ARGS=(--url "ws://127.0.0.1:${MC_PORT}" --loginuser "$ADMIN_USER" --loginpass "$ADMIN_PASS")
+    refresh_groups || verify_failed \
+        "meshctrl could not list device groups over ws://127.0.0.1:${MC_PORT}."
+fi
+
+if [ "$GROUP_COUNT" -eq 0 ]; then
+    print_info "No device groups found — creating '${DEFAULT_GROUP_NAME}' via meshctrl..."
+    group_output=$(node "$MESHCTRL" "${MESHCTRL_ARGS[@]}" adddevicegroup --name "$DEFAULT_GROUP_NAME" 2>&1) \
+        || verify_failed "meshctrl could not create the '${DEFAULT_GROUP_NAME}' device group."
+    printf '%s\n' "$group_output" | log_meshctrl_output
+    refresh_groups || verify_failed \
+        "meshctrl could not re-list device groups after creating '${DEFAULT_GROUP_NAME}'."
+fi
+
+if [ -z "$DEFAULT_MESH_ID" ]; then
+    verify_failed "No usable device group after verification; expected '${DEFAULT_GROUP_NAME}'."
+fi
+print_status "Verified live device group '${DEFAULT_MESH_NAME}' (${DEFAULT_MESH_ID})"
+
 # ─── Link CEM .env so CEM Auto-Setup finds /opt/meshcentral automatically ────
 CRM_DIR=$(awk -F= '/^WorkingDirectory=/{print $2}' /etc/systemd/system/crm-backend.service 2>/dev/null || true)
 if [ -n "$CRM_DIR" ] && [ -f "$CRM_DIR/.env" ]; then
@@ -659,6 +799,9 @@ MC_ADMIN_PASS="$ADMIN_PASS" \
 MC_LOGIN_KEY="$LOGIN_TOKEN_KEY" \
 MC_INSTALL_DIR="$MC_DIR" \
 MC_VERIFY_SSL="$USE_SSL" \
+MC_LOCAL_PORT="$MC_PORT" \
+MC_DEFAULT_MESH_ID="$DEFAULT_MESH_ID" \
+MC_DEFAULT_MESH_NAME="$DEFAULT_MESH_NAME" \
 python3 - "$AUTOLINK_FILE" << 'PYEOF'
 import json, os, sys
 payload = {
@@ -668,6 +811,9 @@ payload = {
     "login_token_key": os.environ.get("MC_LOGIN_KEY", ""),
     "local_install_path": os.environ["MC_INSTALL_DIR"],
     "verify_ssl": os.environ.get("MC_VERIFY_SSL", "1") == "1",
+    "local_port": int(os.environ.get("MC_LOCAL_PORT") or 4430),
+    "default_mesh_id": os.environ.get("MC_DEFAULT_MESH_ID", ""),
+    "default_mesh_name": os.environ.get("MC_DEFAULT_MESH_NAME", ""),
 }
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     json.dump(payload, fh, indent=2)
@@ -687,6 +833,8 @@ Password:        ${ADMIN_PASS}
 Login Token Key: ${LOGIN_TOKEN_KEY:-"(auto-handled by CEM Auto-Setup & Fill)"}
 Install Path:    ${MC_DIR}
 Config File:     ${CFG_FILE}
+Verified Group:  ${DEFAULT_MESH_NAME} (${DEFAULT_MESH_ID})
+Loopback:        ws://127.0.0.1:${MC_PORT}
 Direct Access:   LOCKED — redirects straight to ${SITE_ORIGIN}/web/remote
 EOF
 chmod 600 "$CRED_FILE"

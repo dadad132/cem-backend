@@ -928,6 +928,7 @@ async def diagnose_meshcentral_connection(
     report: Dict[str, Any] = {
         "ok": False,
         "auth_method": auth_method,
+        "meshes": {},
         "groups": 0,
         "devices": 0,
         "online": 0,
@@ -945,11 +946,17 @@ async def diagnose_meshcentral_connection(
             else actionable_meshcentral_error(exc, settings_row)
         )
         _kind, hint = classify_meshcentral_error(error, settings_row)
-        report.update({"error": redact_meshcentral_text(error), "hint": hint})
+        message = redact_meshcentral_text(error)
+        # The wrapped error already ends with "Hint: ..."; UIs render the
+        # structured `hint` field separately, so avoid printing it twice.
+        if ". Hint: " in message:
+            message = message.split(". Hint: ", 1)[0]
+        report.update({"error": message, "hint": hint})
         return report
 
     report.update({
         "ok": True,
+        "meshes": dict(meshes),
         "groups": len(meshes),
         "devices": len(devices),
         "online": sum(1 for device in devices if device.get("is_online")),

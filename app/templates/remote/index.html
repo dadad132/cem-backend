@@ -20,6 +20,11 @@
        syncing: false,
        toast: null,
        toastType: 'success',
+       // Inline modal feedback: the page-level toast sits BEHIND the z-50 modal,
+       // so every installer action must report here to stay visible inside it.
+       modalFeedback: '',
+       modalFeedbackType: 'success',
+       liveWarning: '',
        // Client installer & expiring link state
        installMeshId: '',
        installClientName: '',
@@ -55,20 +60,37 @@
          const r = String(s % 60).padStart(2, '0');
          return `${m}:${r}`;
        },
+       setModalFeedback(msg, type = 'success') {
+         this.modalFeedback = msg || '';
+         this.modalFeedbackType = type;
+         if (type === 'success' && msg) {
+           const shown = msg;
+           setTimeout(() => { if (this.modalFeedback === shown) this.modalFeedback = ''; }, 8000);
+         }
+       },
        async openInstallModal() {
          this.showInstallModal = true;
+         this.modalFeedback = '';
+         this.liveWarning = '';
          if (!this.loadingGroups) {
            this.loadingGroups = true;
            try {
              const res = await fetch('/web/remote/groups');
              const data = await res.json();
+             this.liveWarning = data.live_warning || '';
              if (data.success && Array.isArray(data.groups)) {
                this.meshGroups = data.groups;
                if (!this.installMeshId && this.meshGroups.length > 0) {
                  this.installMeshId = this.meshGroups[0].mesh_id;
                }
+               // The dedicated amber banner renders liveWarning; don't also
+               // copy it into modalFeedback or the message appears twice.
+             } else if (!data.success) {
+               this.setModalFeedback(data.error || 'Could not load device groups.', 'error');
              }
-           } catch (e) {} finally {
+           } catch (e) {
+             this.setModalFeedback('Could not load device groups. Check your connection and try again.', 'error');
+           } finally {
              this.loadingGroups = false;
            }
          }
@@ -99,12 +121,12 @@
              this.installMeshId = data.mesh_id;
              this.newGroupName = '';
              this.showNewGroupInput = false;
-             this.notify(`Created client group '${data.mesh_name}'.`, 'success');
+             this.setModalFeedback(`Created client group '${data.mesh_name}'.`, 'success');
            } else {
-             this.notify(data.error || 'Could not create group.', 'error');
+             this.setModalFeedback(`${data.error || 'Could not create group.'} ${data.hint || ''}`.trim(), 'error');
            }
          } catch (e) {
-           this.notify('Could not reach server to create group.', 'error');
+           this.setModalFeedback('Could not reach server to create group.', 'error');
          } finally {
            this.creatingGroup = false;
          }
@@ -125,12 +147,12 @@
            if (data.success && data.invite) {
              this.latestInvite = { ...data.invite };
              this.invites.unshift(data.invite);
-             this.notify(`Created ${this.installExpiry}-minute client download link!`, 'success');
+             this.setModalFeedback(`Created ${this.installExpiry}-minute client download link!`, 'success');
            } else {
-             this.notify(data.error || 'Could not generate download link.', 'error');
+             this.setModalFeedback(`${data.error || 'Could not generate download link.'} ${data.hint || ''}`.trim(), 'error');
            }
          } catch (e) {
-           this.notify('Could not reach server to create link.', 'error');
+           this.setModalFeedback('Could not reach server to create link.', 'error');
          } finally {
            this.creatingInvite = false;
          }
@@ -147,18 +169,20 @@
                this.latestInvite.revoked = true;
                this.latestInvite.is_active = false;
              }
-             this.notify('Download link revoked.', 'success');
+             this.setModalFeedback('Download link revoked.', 'success');
+           } else {
+             this.setModalFeedback(data.error || 'Could not revoke link.', 'error');
            }
          } catch (e) {
-           this.notify('Could not revoke link.', 'error');
+           this.setModalFeedback('Could not revoke link.', 'error');
          }
        },
        async copyText(text, label = 'Link copied to clipboard!') {
          try {
            await navigator.clipboard.writeText(text);
-           this.notify(label, 'success');
+           this.setModalFeedback(label, 'success');
          } catch (e) {
-           this.notify('Please select and copy the link manually.', 'error');
+           this.setModalFeedback('Please select and copy the link manually.', 'error');
          }
        },
        clientShareMessage(inv) {
@@ -712,6 +736,34 @@
           <i class="fas fa-times"></i>
         </button>
       </div>
+
+      <!-- Inline modal feedback: the page toast is hidden behind this z-50 overlay. -->
+      <template x-if="modalFeedback">
+        <div id="modalFeedback" role="alert" aria-live="assertive"
+             class="mx-6 mt-4 flex items-start gap-2.5 rounded-xl border px-4 py-3 text-sm font-semibold"
+             :class="modalFeedbackType === 'error' ? 'bg-red-50 border-red-300 text-red-800' : 'bg-emerald-50 border-emerald-300 text-emerald-800'">
+          <i class="fas mt-0.5" :class="modalFeedbackType === 'error' ? 'fa-circle-exclamation text-red-600' : 'fa-circle-check text-emerald-600'"></i>
+          <span class="flex-1 leading-relaxed" x-text="modalFeedback"></span>
+          <button type="button" @click="modalFeedback = ''" class="opacity-60 hover:opacity-100" aria-label="Dismiss message">
+            <i class="fas fa-times"></i>
+          </button>
+        </div>
+      </template>
+
+      <!-- Live MeshCentral reachability / empty-group guidance, visible inside the modal. -->
+      <template x-if="liveWarning">
+        <div role="status" class="mx-6 mt-3 flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-xs font-medium text-amber-800">
+          <i class="fas fa-triangle-exclamation mt-0.5 text-amber-600"></i>
+          <span x-text="liveWarning"></span>
+        </div>
+      </template>
+      <template x-if="meshGroups.length === 0">
+        <div class="mx-6 mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs text-slate-600">
+          <i class="fas fa-info-circle mr-1 text-blue-500"></i>
+          No device groups yet — create one with <strong>+ New Group</strong> above, or
+          {% if user.is_admin %}run <strong>Auto-Setup &amp; Fill</strong> in MeshCentral Setup to discover groups automatically.{% else %}ask a workspace administrator to run Auto-Setup.{% endif %}
+        </div>
+      </template>
 
       <div class="p-6 space-y-5 max-h-[80vh] overflow-y-auto">
         <!-- Group + Client Name -->

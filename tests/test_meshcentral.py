@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
@@ -30,9 +34,13 @@ from app.web.meshcentral_routes import (
     web_remote_device_delete,
     web_remote_device_notes,
     web_remote_device_pin,
+    web_remote_groups,
+    web_remote_groups_create,
     web_remote_session,
     web_remote_session_embed_url,
     web_remote_settings,
+    web_remote_settings_autofill,
+    web_remote_settings_generate_key,
     web_remote_settings_save,
     web_remote_settings_test,
     web_remote_sync,
@@ -504,15 +512,24 @@ async def test_local_autodetect_updates_config_and_autofill_settings(seeded, tmp
     assert gen_data["success"] is True
     assert len(gen_data["login_token_key"]) == 160
 
-    # Mock live MeshCentral WebSocket inventory + authcookie for autofill
-    async def fake_inv(settings_row, timeout=10.0):
-        return ({"mesh//GRP1": "Acme Clients"}, [{"node_id": "N1", "is_online": True}])
+    # Mock the hardened diagnostics report used by autofill (inventory + SSO discovery)
+    async def fake_diagnose(settings_row, timeout=10.0):
+        return {
+            "ok": True,
+            "auth_method": "x-meshauth",
+            "meshes": {"mesh//GRP1": "Acme Clients"},
+            "groups": 1,
+            "devices": 1,
+            "online": 1,
+            "sso_mode": "authcookie",
+            "error": None,
+            "hint": "Connected to https://mesh.hubconnect.co.za.",
+        }
 
     async def fake_cookie(settings_row, timeout=6.0):
         return "LIVE_SIGNED_COOKIE_ABC"
 
-    monkeypatch.setattr("app.web.meshcentral_routes.fetch_meshcentral_inventory", fake_inv)
-    monkeypatch.setattr("app.web.meshcentral_routes.fetch_meshcentral_auth_cookie", fake_cookie)
+    monkeypatch.setattr("app.web.meshcentral_routes.diagnose_meshcentral_connection", fake_diagnose)
 
     resp = await web_remote_settings_autofill(
         _request(admin.id, "/web/remote/settings/autofill"),
@@ -1177,6 +1194,7 @@ async def test_diagnose_connection_reports_success_noauth_and_dns_hints(monkeypa
     report = await mc.diagnose_meshcentral_connection(cfg)
     assert report["ok"] is False
     assert "noauth" in report["error"].lower()
+    assert "hint:" not in report["error"].lower()  # UIs append the structured hint
     hint = report["hint"].lower()
     assert "credential" in hint or "password" in hint
 
@@ -1247,6 +1265,213 @@ async def test_auto_import_seeds_default_group_and_local_port(seeded, tmp_path, 
 
     rival = await _cached_groups(db, ws2.id)
     assert rival == []
+
+
+# ---------------------------------------------------------------------------
+# Slice 2: hardened group routes, inline modal diagnostics & self-verifying setup
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_groups_route_returns_persisted_groups_and_live_warning_when_offline(seeded, monkeypatch):
+    db, ws1, _ws2, _admin, tech, _other = seeded
+    db.add(_mc_settings(workspace_id=ws1.id))
+    db.add(MeshCentralGroup(workspace_id=ws1.id, mesh_id="mesh//SAVED", name="Saved Clients"))
+    await db.commit()
+
+    async def offline(*_args, **_kwargs):
+        raise OSError("Name or service not known: tickets.hubconnect.co.za")
+
+    monkeypatch.setattr("app.web.meshcentral_routes.fetch_meshcentral_inventory", offline)
+    offline_resp = await web_remote_groups(_request(tech.id), db=db)
+    offline_data = json.loads(offline_resp.body)
+    assert offline_data["success"] is True
+    assert "mesh//SAVED" in {g["mesh_id"] for g in offline_data["groups"]}
+    warning = (offline_data.get("live_warning") or "").lower()
+    assert warning and ("not reachable" in warning or "offline" in warning)
+
+    async def online(*_args, **_kwargs):
+        return {"mesh//LIVE": "Live Group"}, []
+
+    monkeypatch.setattr("app.web.meshcentral_routes.fetch_meshcentral_inventory", online)
+    online_resp = await web_remote_groups(_request(tech.id), db=db)
+    online_data = json.loads(online_resp.body)
+    assert online_data["success"] is True
+    assert not online_data.get("live_warning")
+    assert {"mesh//SAVED", "mesh//LIVE"} <= {g["mesh_id"] for g in online_data["groups"]}
+    cached = {row.mesh_id for row in await _cached_groups(db, ws1.id)}
+    assert "mesh//LIVE" in cached  # live groups are upserted into MeshCentralGroup
+
+
+@pytest.mark.asyncio
+async def test_groups_create_persists_group_and_returns_actionable_errors(seeded, monkeypatch):
+    db, ws1, _ws2, admin, _tech, _other = seeded
+
+    # No MeshCentral settings yet: clear 400 with a hint, never a 500.
+    resp = await web_remote_groups_create(_request(admin.id), name="Acme Clients", db=db)
+    assert resp.status_code == 400
+    payload = json.loads(resp.body)
+    assert payload["success"] is False and payload["error"] and payload["hint"]
+
+    db.add(_mc_settings(workspace_id=ws1.id))
+    await db.commit()
+
+    blank = await web_remote_groups_create(_request(admin.id), name="   ", db=db)
+    assert blank.status_code == 400
+    assert json.loads(blank.body)["hint"]
+
+    async def noauth(*_args, **_kwargs):
+        raise RuntimeError("MeshCentral closed the connection: noauth")
+
+    monkeypatch.setattr("app.web.meshcentral_routes.create_meshcentral_group", noauth)
+    failed = await web_remote_groups_create(_request(admin.id), name="Acme Clients", db=db)
+    assert failed.status_code == 502
+    failure = json.loads(failed.body)
+    assert "noauth" in failure["error"].lower()
+    assert "hint" not in failure["error"].lower()  # structured hint is not duplicated
+    assert "credential" in failure["hint"].lower() or "password" in failure["hint"].lower()
+    assert await _cached_groups(db, ws1.id) == []
+
+    async def created(*_args, **_kwargs):
+        return {"mesh_id": "mesh//NEW", "mesh_name": "Acme Clients"}
+
+    monkeypatch.setattr("app.web.meshcentral_routes.create_meshcentral_group", created)
+    ok = await web_remote_groups_create(
+        _request(admin.id), name="Acme Clients", description="Managed by CEM", db=db
+    )
+    assert ok.status_code == 200
+    assert json.loads(ok.body)["success"] is True
+    rows = {row.mesh_id: row for row in await _cached_groups(db, ws1.id)}
+    assert rows["mesh//NEW"].name == "Acme Clients"
+    assert rows["mesh//NEW"].is_default is True
+    settings = (
+        await db.execute(select(MeshCentralSettings).where(MeshCentralSettings.workspace_id == ws1.id))
+    ).scalar_one()
+    assert settings.default_mesh_id == "mesh//NEW"
+
+
+@pytest.mark.asyncio
+async def test_sync_route_persists_groups_via_upsert(seeded, monkeypatch):
+    db, ws1, _ws2, _admin, tech, _other = seeded
+    db.add(_mc_settings(workspace_id=ws1.id))
+    await db.commit()
+
+    async def inventory(*_args, **_kwargs):
+        return {"mesh//SYNCED": "Synced Clients"}, []
+
+    monkeypatch.setattr(mc, "fetch_meshcentral_inventory", inventory)
+    resp = await web_remote_sync(_request(tech.id), db=db)
+    assert json.loads(resp.body)["success"] is True
+    assert "mesh//SYNCED" in {row.mesh_id for row in await _cached_groups(db, ws1.id)}
+
+
+@pytest.mark.asyncio
+async def test_install_modal_has_inline_feedback_banner_and_live_warning_note(seeded):
+    db, ws1, _ws2, admin, _tech, _other = seeded
+    page = await web_remote_dashboard(_request(admin.id), db=db)
+    html = bytes(page.body).decode()
+    modal_html = html.split('x-show="showInstallModal"', 1)[1].split("<!-- Add Client PC Modal -->", 1)[0]
+
+    assert 'id="modalFeedback"' in modal_html
+    assert 'x-text="modalFeedback"' in modal_html
+    assert "modalFeedbackType" in modal_html
+    assert 'role="alert"' in modal_html
+    assert "liveWarning" in modal_html
+    assert "data.live_warning" in html
+    assert "no device group" in modal_html.lower()
+    assert "setModalFeedback" in html  # group/link actions report inside the modal
+
+
+@pytest.mark.asyncio
+async def test_non_admin_settings_routes_blocked_and_admin_hints_present(seeded):
+    from app.web.routes import web_admin_site_settings
+
+    db, ws1, _ws2, admin, tech, _other = seeded
+    db.add(_mc_settings(
+        workspace_id=ws1.id,
+        enabled=True,
+        login_token_key_encrypted=mc.encrypt_secret(secrets.token_hex(32)),
+    ))
+    db.add(MeshCentralDevice(
+        workspace_id=ws1.id,
+        node_id="NODE123",
+        name="Reception PC",
+        mesh_id="mesh//GROUP",
+        mesh_name="Clients",
+    ))
+    await db.commit()
+
+    admin_only_calls = [
+        lambda: web_remote_settings(_request(tech.id), db=db),
+        lambda: web_remote_settings_save(_request(tech.id), db=db),
+        lambda: web_remote_settings_test(_request(tech.id), db=db),
+        lambda: web_remote_settings_autofill(_request(tech.id), db=db),
+        lambda: web_remote_settings_generate_key(_request(tech.id), db=db),
+    ]
+    for invoke in admin_only_calls:
+        with pytest.raises(HTTPException) as exc:
+            await invoke()
+        assert exc.value.status_code == 403
+
+    tech_dash = await web_remote_dashboard(_request(tech.id), db=db)
+    dash_html = bytes(tech_dash.body).decode()
+    tech_sess = await web_remote_session(_request(tech.id), 1, mode="desktop", db=db)
+    sess_html = bytes(tech_sess.body).decode()
+    for needle in (
+        "/web/remote/settings", "MeshCentral Setup", "config.json", "Pop Out", "Open Direct Tab",
+    ):
+        assert needle not in dash_html
+        assert needle not in sess_html
+
+    for page in (
+        await web_remote_settings(_request(admin.id), db=db),
+        await web_admin_site_settings(_request(admin.id), db=db),
+    ):
+        html = bytes(page.body).decode()
+        assert "http://127.0.0.1:8000" in html
+        assert "https://tickets.hubconnect.co.za:4433" in html
+        assert "lowercase" in html.lower()
+
+
+def test_setup_script_live_verification_guards_against_noauth_and_missing_groups():
+    script = (Path(__file__).resolve().parents[1] / "setup_meshcentral.sh").read_text(encoding="utf-8")
+    for needle in (
+        "meshctrl.js", "listdevicegroups", "adddevicegroup", '"Client PCs"',
+        "--loginuser", "--loginpass", "--loginkey", "--name",
+        "default_mesh_id", "default_mesh_name", '"local_port"', '"verify_ssl"',
+        "chmod 640", "/tmp/meshcentral-user.log", "resetaccount", "adminaccount",
+    ):
+        assert needle in script, f"setup_meshcentral.sh missing: {needle}"
+
+
+def test_setup_script_group_parser_handles_real_shapes_and_fails_closed():
+    """The installer must never mistake an unparseable reply for 'zero groups'."""
+    script = (Path(__file__).resolve().parents[1] / "setup_meshcentral.sh").read_text(encoding="utf-8")
+    match = re.search(r"parse_device_groups\(\) \{\npython3 -c '(.*?)'\n\}", script, re.DOTALL)
+    assert match, "Could not locate parse_device_groups() in setup_meshcentral.sh"
+    code = match.group(1)
+
+    def run(raw: str):
+        return subprocess.run(
+            [sys.executable, "-c", code], input=raw, text=True, capture_output=True
+        )
+
+    obj = run('{"mesh//A": {"name": "Client PCs"}, "mesh//B": {"name": "Other"}}')
+    assert obj.returncode == 0
+    assert obj.stdout.strip().splitlines()[:3] == ["2", "mesh//A", "Client PCs"]
+
+    arr = run('[{"id": "mesh//Z", "name": "Client PCs"}]')
+    assert arr.returncode == 0
+    assert arr.stdout.strip().splitlines()[:3] == ["1", "mesh//Z", "Client PCs"]
+
+    ansi = run('\x1b[0m[{"id": "mesh//Q", "name": "Client PCs"}]')
+    assert ansi.returncode == 0 and "mesh//Q" in ansi.stdout
+
+    empty = run("  \n")
+    assert empty.returncode == 0 and empty.stdout.strip().splitlines()[:1] == ["0"]
+
+    garbage = run("meshctrl: auth failed")
+    assert garbage.returncode == 2
+    assert "unparseable" in garbage.stderr.lower()
 
 
 

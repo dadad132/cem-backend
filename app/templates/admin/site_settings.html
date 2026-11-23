@@ -546,8 +546,8 @@
                  this.mcTestOk = Boolean(data.success);
                  const ssoLabel = data.sso_mode === 'token_key' ? 'Token Key SSO' : (data.sso_mode === 'authcookie' ? 'Auto Live SSO' : 'Not configured');
                  this.mcTestResult = data.success
-                   ? `Connected! Found ${data.devices} device(s) (${data.online} online) across ${data.groups} group(s). SSO: ${ssoLabel}.`
-                   : (data.error || 'Connection test failed.');
+                   ? `${data.message || 'Connected!'} Found ${data.devices} device(s) (${data.online} online) across ${data.groups} group(s). SSO: ${ssoLabel}. ${data.hint || ''}`.trim()
+                   : `${data.error || 'Connection test failed.'} ${data.hint || ''}`.trim();
                } catch (err) {
                  this.mcTestOk = false;
                  this.mcTestResult = 'Could not reach server to test MeshCentral connection.';
@@ -565,7 +565,7 @@
                  const res = await fetch('/web/remote/settings/autofill', { method: 'POST', body: fd });
                  const data = await res.json();
                  this.mcTestOk = Boolean(data.success);
-                 this.mcTestResult = data.message || data.error || 'Auto-setup finished.';
+                 this.mcTestResult = `${data.message || data.error || 'Auto-setup finished.'} ${data.hint || ''}`.trim();
                  if (data.server_url && form.querySelector('[name=server_url]')) {
                    form.querySelector('[name=server_url]').value = data.server_url;
                  }
@@ -638,6 +638,16 @@
             </div>
           </div>
           {% endif %}
+
+          <!-- Localhost / production ergonomics -->
+          <div class="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 mb-5 text-xs text-blue-900 space-y-1.5">
+            <p class="font-bold text-sm flex items-center gap-2"><i class="fas fa-circle-info text-blue-600"></i>Where are you opening this page?</p>
+            <ul class="list-disc pl-5 space-y-1">
+              <li>On this server: <code class="px-1 bg-white/70 rounded">http://127.0.0.1:8000/web/admin/site-settings</code> — Auto-Setup reads the local <code>meshcentral-data/cem-autolink.json</code>.</li>
+              <li>Live site: <code class="px-1 bg-white/70 rounded">https://tickets.hubconnect.co.za</code>; the MeshCentral engine is at <code class="px-1 bg-white/70 rounded">https://tickets.hubconnect.co.za:4433</code>.</li>
+              <li>The installer account is lowercase <code class="px-1 bg-white/70 rounded">admin</code> (not <code>Admin</code>) unless you override it. Auto-Setup fills these fields for you.</li>
+            </ul>
+          </div>
 
           <form x-ref="mcForm" method="post" action="/web/remote/settings/save" class="space-y-4">
             <input type="hidden" name="return_to" value="/web/admin/site-settings">

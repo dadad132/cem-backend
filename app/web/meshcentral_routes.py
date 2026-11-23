@@ -17,16 +17,14 @@ from app.core.meshcentral import (
     VIEW_MODE_MAP,
     auto_import_local_meshcentral_if_present,
     autodetect_local_meshcentral,
-    build_direct_url,
     build_embed_url,
     build_embed_url_async,
     build_login_user_id,
+    classify_meshcentral_error,
     create_meshcentral_group,
-    decrypt_secret,
     diagnose_meshcentral_connection,
     detect_os_family,
     encrypt_secret,
-    fetch_meshcentral_auth_cookie,
     fetch_meshcentral_inventory,
     generate_random_login_token_key,
     normalize_domain,
@@ -34,6 +32,7 @@ from app.core.meshcentral import (
     normalize_node_id,
     normalize_server_url,
     proxy_agent_installer,
+    redact_meshcentral_text,
     resolve_view_mode,
     sync_workspace_devices,
     upsert_workspace_groups,
@@ -100,6 +99,51 @@ async def _get_workspace_device(
             )
         )
     ).scalar_one_or_none()
+
+
+_DEFAULT_GROUP_NAME = "Client PCs"
+
+
+async def _persist_discovered_groups(
+    db: AsyncSession,
+    workspace_id: int,
+    settings_row: MeshCentralSettings,
+    meshes: dict[str, str],
+) -> Optional[tuple[str, str]]:
+    """Cache live groups, and remember the first (preferably Client PCs) as default."""
+    if not meshes:
+        return None
+    await upsert_workspace_groups(db, workspace_id, meshes)
+    choice: Optional[tuple[str, str]] = None
+    if not settings_row.default_mesh_id:
+        preferred = next(
+            ((mid, name) for mid, name in meshes.items() if _DEFAULT_GROUP_NAME.lower() in name.lower()),
+            None,
+        )
+        choice = preferred or next(iter(meshes.items()))
+        settings_row.default_mesh_id, settings_row.default_mesh_name = choice
+        # Keep the cached default flag unambiguous when a later discovery pass
+        # runs before a default was persisted in settings.
+        all_rows = (
+            await db.execute(
+                select(MeshCentralGroup).where(MeshCentralGroup.workspace_id == workspace_id)
+            )
+        ).scalars().all()
+        for cached in all_rows:
+            cached.is_default = cached.mesh_id == choice[0]
+    return choice
+
+
+def _remember_local_port(settings_row: MeshCentralSettings, autolink: Optional[dict]) -> None:
+    """Persist a valid loopback port discovered from cem-autolink.json."""
+    if not autolink or autolink.get("local_port") is None:
+        return
+    try:
+        port = int(autolink["local_port"])
+        if 1 <= port <= 65535:
+            settings_row.local_port = port
+    except (TypeError, ValueError):
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -197,8 +241,18 @@ async def web_remote_dashboard(request: Request, db: AsyncSession = Depends(get_
         )
     )
 
-    # Known MeshCentral device groups for 1-click installer & expiring client links
+    # Known MeshCentral device groups for 1-click installer & expiring client links:
+    # persisted rows first, then the saved default, then any groups seen on devices.
     mesh_group_map: dict[str, str] = {}
+    for group in (
+        await db.execute(
+            select(MeshCentralGroup)
+            .where(MeshCentralGroup.workspace_id == user.workspace_id)
+            .order_by(MeshCentralGroup.name.asc())
+        )
+    ).scalars().all():
+        if group.mesh_id:
+            mesh_group_map[group.mesh_id] = group.name or group.mesh_id
     if mc_settings and mc_settings.default_mesh_id:
         mesh_group_map[mc_settings.default_mesh_id] = mc_settings.default_mesh_name or "Default Client Group"
     for d in devices:
@@ -237,6 +291,7 @@ async def web_remote_dashboard(request: Request, db: AsyncSession = Depends(get_
             "devices_payload": devices_payload,
             "groups": groups,
             "mesh_groups": mesh_groups,
+            "default_mesh_id": (mc_settings.default_mesh_id if mc_settings else None) or "",
             "invites_payload": invites_payload,
             "agent_platforms": AGENT_PLATFORMS,
             "companies": companies,
@@ -416,6 +471,8 @@ async def web_remote_sync(request: Request, db: AsyncSession = Depends(get_sessi
         )
 
     try:
+        # sync_workspace_devices upserts both devices and their groups in the
+        # same transaction, so no extra group pass is needed here.
         summary = await sync_workspace_devices(db, user.workspace_id, mc_settings)
         return JSONResponse({"success": True, **summary})
     except Exception as exc:
@@ -705,8 +762,19 @@ async def web_remote_settings_test(request: Request, db: AsyncSession = Depends(
             "success": False,
             "error": report["error"],
             "hint": report["hint"],
+            "message": report["error"],
             "auth_method": report["auth_method"],
         }, status_code=502)
+
+    # A successful probe is also a discovery pass: keep groups/defaults in sync.
+    await _persist_discovered_groups(
+        db, user.workspace_id, mc_settings, dict(report.get("meshes") or {})
+    )
+    await db.commit()
+    message = (
+        f"Connected to {mc_settings.server_url}: {report['devices']} device(s) "
+        f"({report['online']} online) across {report['groups']} group(s)."
+    )
     return JSONResponse({
         "success": True,
         "groups": report["groups"],
@@ -715,6 +783,10 @@ async def web_remote_settings_test(request: Request, db: AsyncSession = Depends(
         "sso_ready": report["sso_mode"] != "none",
         "sso_mode": report["sso_mode"],
         "auth_method": report["auth_method"],
+        "default_mesh_id": mc_settings.default_mesh_id or "",
+        "default_mesh_name": mc_settings.default_mesh_name or "",
+        "local_port": mc_settings.local_port,
+        "message": message,
         "hint": report["hint"],
     })
 
@@ -831,13 +903,7 @@ async def web_remote_settings_autofill(
     elif "verify_ssl" in autolink:
         row.verify_ssl = bool(autolink["verify_ssl"])
 
-    if autolink.get("local_port") is not None:
-        try:
-            local_port = int(autolink["local_port"])
-            if 1 <= local_port <= 65535:
-                row.local_port = local_port
-        except (TypeError, ValueError):
-            pass
+    _remember_local_port(row, autolink)
 
     autofilled_key = local_info.get("login_token_key")
     if autofilled_key:
@@ -847,13 +913,15 @@ async def web_remote_settings_autofill(
     if derived_uid:
         row.login_user_id = derived_uid
 
-    # 3. Live WebSocket verification, group discovery, and automatic live SSO check
+    # 3. Live verification + group discovery through the hardened diagnostics helper.
+    # The same report drives the inline hint shown in both Settings UIs.
     groups_map: dict[str, str] = {}
     devices_found = 0
     online_found = 0
     connected = False
     authcookie_ok = False
     connect_error: Optional[str] = None
+    diagnostic_hint: Optional[str] = None
 
     has_creds = bool(
         row.server_url
@@ -864,28 +932,26 @@ async def web_remote_settings_autofill(
     )
     if has_creds:
         try:
-            groups_map, devices_list = await fetch_meshcentral_inventory(row, timeout=10.0)
-            connected = True
-            devices_found = len(devices_list)
-            online_found = sum(1 for d in devices_list if d.get("is_online"))
-            if not groups_map:
-                # Auto-create a default Client PCs group so technicians can download agents immediately
-                try:
-                    created_grp = await create_meshcentral_group(row, "Client PCs", "Managed via CEM")
-                    groups_map[created_grp["mesh_id"]] = created_grp["mesh_name"]
-                except Exception:
-                    pass
-            if groups_map and not row.default_mesh_id:
-                first_id, first_name = next(iter(groups_map.items()))
-                row.default_mesh_id = first_id
-                row.default_mesh_name = first_name
-            if groups_map:
-                await upsert_workspace_groups(db, user.workspace_id, groups_map)
-            if not row.login_token_key_encrypted and row.username and row.password_encrypted:
-                try:
-                    authcookie_ok = bool(await fetch_meshcentral_auth_cookie(row, timeout=6.0))
-                except Exception:
-                    authcookie_ok = False
+            report = await diagnose_meshcentral_connection(row, timeout=10.0)
+            connected = bool(report.get("ok"))
+            groups_map = dict(report.get("meshes") or {})
+            devices_found = int(report.get("devices") or 0)
+            online_found = int(report.get("online") or 0)
+            connect_error = report.get("error")
+            diagnostic_hint = report.get("hint")
+            authcookie_ok = report.get("sso_mode") == "authcookie"
+            if connected:
+                if not groups_map:
+                    # Auto-create a default Client PCs group so technicians can
+                    # download agents immediately after a fresh install.
+                    try:
+                        created_grp = await create_meshcentral_group(
+                            row, _DEFAULT_GROUP_NAME, "Managed via CEM"
+                        )
+                        groups_map[created_grp["mesh_id"]] = created_grp["mesh_name"]
+                    except Exception:
+                        pass
+                await _persist_discovered_groups(db, user.workspace_id, row, groups_map)
         except Exception as exc:
             connect_error = str(exc)
 
@@ -908,6 +974,8 @@ async def web_remote_settings_autofill(
         notes.append(f"Live connection note: {connect_error}")
     elif not row.server_url:
         notes.append("Enter your MeshCentral Server URL, Username, and Password, then click Auto-Setup again.")
+    if diagnostic_hint and not connected:
+        notes.append(diagnostic_hint)
 
     ok = bool(connected or local_info["found"])
     return JSONResponse({
@@ -923,10 +991,12 @@ async def web_remote_settings_autofill(
         "config_updated": bool(local_info["config_updated"]),
         "default_mesh_id": row.default_mesh_id or "",
         "default_mesh_name": row.default_mesh_name or "",
+        "local_port": row.local_port,
         "groups": [{"mesh_id": mid, "mesh_name": mname} for mid, mname in groups_map.items()],
         "devices": devices_found,
         "online": online_found,
         "message": " ".join(notes) if notes else (connect_error or "Auto-setup completed."),
+        "hint": diagnostic_hint or (connect_error or ""),
     })
 
 
@@ -1028,9 +1098,10 @@ async def web_remote_groups(request: Request, db: AsyncSession = Depends(get_ses
         return JSONResponse({"success": False, "error": "Authentication required"}, status_code=401)
 
     mc_settings = await _get_or_none_settings(db, user.workspace_id)
+    live_warning: Optional[str] = None
     groups: dict[str, str] = {}
     if mc_settings and mc_settings.default_mesh_id:
-        groups[mc_settings.default_mesh_id] = mc_settings.default_mesh_name or "Client PCs"
+        groups[mc_settings.default_mesh_id] = mc_settings.default_mesh_name or _DEFAULT_GROUP_NAME
 
     cached_groups = (
         await db.execute(
@@ -1050,19 +1121,30 @@ async def web_remote_groups(request: Request, db: AsyncSession = Depends(get_ses
         if d.mesh_id and d.mesh_id not in groups:
             groups[d.mesh_id] = d.mesh_name or d.client_name or d.mesh_id
 
-    if mc_settings and mc_settings.server_url:
+    if not mc_settings or not mc_settings.server_url:
+        live_warning = (
+            "MeshCentral is not configured yet — saved groups are shown. Ask a workspace "
+            "administrator to run Auto-Setup in MeshCentral Setup."
+        )
+    else:
         try:
             live_meshes, _ = await fetch_meshcentral_inventory(mc_settings, timeout=8.0)
             groups.update(live_meshes)
             if live_meshes:
                 await upsert_workspace_groups(db, user.workspace_id, live_meshes)
                 await db.commit()
-        except Exception:
-            pass
+        except Exception as exc:
+            _kind, hint = classify_meshcentral_error(exc, mc_settings)
+            live_warning = (
+                "MeshCentral is not reachable right now — showing saved groups only. "
+                f"{hint}"
+            )
+            logger.warning("MeshCentral group lookup failed for workspace %s: %s", user.workspace_id, exc)
 
     return JSONResponse({
         "success": True,
         "groups": [{"mesh_id": mid, "mesh_name": mname} for mid, mname in groups.items()],
+        "live_warning": live_warning,
     })
 
 
@@ -1078,22 +1160,40 @@ async def web_remote_groups_create(
     if redirect:
         return JSONResponse({"success": False, "error": "Authentication required"}, status_code=401)
 
+    clean_name = (name or "").strip()
+    if not clean_name:
+        return JSONResponse({
+            "success": False,
+            "error": "Group name is required.",
+            "hint": "Enter a name such as 'Client PCs' and try again.",
+        }, status_code=400)
+
     mc_settings = await _get_or_none_settings(db, user.workspace_id)
     if not mc_settings or not mc_settings.server_url:
-        return JSONResponse({"success": False, "error": "MeshCentral is not configured yet."}, status_code=400)
+        return JSONResponse({
+            "success": False,
+            "error": "MeshCentral is not configured yet.",
+            "hint": "Ask a workspace administrator to run Auto-Setup in MeshCentral Setup, then retry.",
+        }, status_code=400)
 
     try:
-        created = await create_meshcentral_group(mc_settings, name, description=description)
-        await upsert_workspace_groups(
-            db, user.workspace_id, {created["mesh_id"]: created["mesh_name"]}
+        created = await create_meshcentral_group(mc_settings, clean_name, description=description)
+        await _persist_discovered_groups(
+            db, user.workspace_id, mc_settings, {created["mesh_id"]: created["mesh_name"]}
         )
-        if not mc_settings.default_mesh_id:
-            mc_settings.default_mesh_id = created["mesh_id"]
-            mc_settings.default_mesh_name = created["mesh_name"]
         await db.commit()
         return JSONResponse({"success": True, **created})
     except Exception as exc:
-        return JSONResponse({"success": False, "error": str(exc)}, status_code=502)
+        _kind, hint = classify_meshcentral_error(exc, mc_settings)
+        error = redact_meshcentral_text(exc)
+        logger.warning("MeshCentral group creation failed for workspace %s: %s", user.workspace_id, error)
+        # Return the raw diagnosis and the hint as separate fields; templates
+        # append the hint themselves, so embedding it in `error` duplicates it.
+        return JSONResponse({
+            "success": False,
+            "error": error,
+            "hint": hint,
+        }, status_code=502)
 
 
 @router.get("/remote/agent/download")
