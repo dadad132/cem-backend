@@ -839,18 +839,143 @@ Direct Access:   LOCKED — redirects straight to ${SITE_ORIGIN}/web/remote
 EOF
 chmod 600 "$CRED_FILE"
 
+# ─── Ensure CEM Python deps, sync CEM DB from autolink, and restart CEM ──────
+CRM_SERVICE="crm-backend"
+if [ -n "${CRM_DIR:-}" ] && [ -d "$CRM_DIR" ]; then
+    CRM_PY=""
+    for cand in "$CRM_DIR/.venv/bin/python" "$CRM_DIR/venv/bin/python" "$(command -v python3 2>/dev/null || true)"; do
+        if [ -n "$cand" ] && [ -x "$cand" ]; then
+            CRM_PY="$cand"
+            break
+        fi
+    done
+
+    if [ -n "$CRM_PY" ]; then
+        if ! "$CRM_PY" -c "import aiohttp, cryptography" >/dev/null 2>&1; then
+            print_info "Installing missing MeshCentral Python dependencies (aiohttp, cryptography)..."
+            "$CRM_PY" -m pip install -q aiohttp cryptography || true
+        fi
+
+        print_info "Syncing verified MeshCentral settings & default group into CEM database..."
+        SYNC_SCRIPT="/tmp/cem-mesh-sync.$$.py"
+        cat > "$SYNC_SCRIPT" << 'PYEOF'
+import asyncio, json, sys
+from datetime import datetime
+from pathlib import Path
+
+crm_dir = Path(sys.argv[1])
+autolink_path = Path(sys.argv[2])
+sys.path.insert(0, str(crm_dir))
+
+from sqlalchemy import select
+from app.core.database import async_session_factory, init_models
+from app.core.meshcentral import (
+    build_login_user_id,
+    encrypt_secret,
+    normalize_server_url,
+    upsert_workspace_groups,
+)
+from app.models.meshcentral import MeshCentralSettings
+from app.models.workspace import Workspace
+
+data = json.loads(autolink_path.read_text(encoding="utf-8"))
+
+async def main() -> None:
+    await init_models()
+    async with async_session_factory() as db:
+        ws_ids = (await db.execute(select(Workspace.id))).scalars().all()
+        now = datetime.utcnow()
+        clean_url = normalize_server_url(data["server_url"])
+        username = (data.get("username") or "").strip() or None
+        password = (data.get("password") or "").strip() or None
+        token_key = (data.get("login_token_key") or "").strip() or None
+        local_port = int(data.get("local_port") or 4430)
+        def_mid = (data.get("default_mesh_id") or "").strip() or None
+        def_mname = (data.get("default_mesh_name") or "").strip() or None
+        verify_ssl = bool(data.get("verify_ssl", True))
+
+        for wid in ws_ids:
+            row = (
+                await db.execute(
+                    select(MeshCentralSettings).where(MeshCentralSettings.workspace_id == wid)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                row = MeshCentralSettings(workspace_id=wid, created_at=now)
+                db.add(row)
+            row.enabled = True
+            row.server_url = clean_url
+            row.domain = ""
+            row.username = username
+            if password:
+                row.password_encrypted = encrypt_secret(password)
+            if token_key:
+                row.login_token_key_encrypted = encrypt_secret(token_key)
+            row.login_user_id = build_login_user_id(username, "")
+            row.verify_ssl = verify_ssl
+            row.local_install_path = data.get("local_install_path") or "/opt/meshcentral"
+            row.local_port = local_port
+            if def_mid:
+                row.default_mesh_id = def_mid
+                row.default_mesh_name = def_mname or "Client PCs"
+            row.updated_at = now
+            if def_mid:
+                await upsert_workspace_groups(db, wid, {def_mid: def_mname or "Client PCs"})
+        await db.commit()
+
+asyncio.run(main())
+PYEOF
+        chmod 644 "$SYNC_SCRIPT"
+        SYNC_OK=0
+        if [ -n "${CRM_USER:-}" ] && [ "$CRM_USER" != "root" ] && id -u "$CRM_USER" >/dev/null 2>&1; then
+            su -s /bin/bash "$CRM_USER" -c \
+                "cd '$CRM_DIR' && MESHCENTRAL_DIR='$MC_DIR' '$CRM_PY' '$SYNC_SCRIPT' '$CRM_DIR' '$AUTOLINK_FILE'" \
+                && SYNC_OK=1 || SYNC_OK=0
+        else
+            (cd "$CRM_DIR" && MESHCENTRAL_DIR="$MC_DIR" "$CRM_PY" "$SYNC_SCRIPT" "$CRM_DIR" "$AUTOLINK_FILE") \
+                && SYNC_OK=1 || SYNC_OK=0
+        fi
+        rm -f "$SYNC_SCRIPT"
+        if [ "$SYNC_OK" -eq 1 ]; then
+            print_status "Synced MeshCentral settings & '${DEFAULT_MESH_NAME}' group directly into CEM database"
+        else
+            print_info "Could not pre-sync CEM DB (CEM will auto-import from ${AUTOLINK_FILE} on first visit)"
+        fi
+    fi
+fi
+
+# Restart CEM automatically so this script is truly 1-command end-to-end
+if systemctl list-unit-files 2>/dev/null | grep -q "^${CRM_SERVICE}\.service"; then
+    print_info "Restarting ${CRM_SERVICE}..."
+    systemctl restart "$CRM_SERVICE"
+    CRM_OK=0
+    for _ in $(seq 1 30); do
+        if curl -fsS --max-time 3 "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
+            CRM_OK=1
+            break
+        fi
+        sleep 1
+    done
+    if [ "$CRM_OK" -eq 1 ]; then
+        print_status "${CRM_SERVICE} restarted and healthy"
+    else
+        print_error "${CRM_SERVICE} did not respond on port 8000 after restart"
+        journalctl -u "$CRM_SERVICE" -n 20 --no-pager || true
+        exit 1
+    fi
+fi
+
 echo ""
 echo -e "${GREEN}=====================================================${NC}"
-echo -e "${GREEN}   MeshCentral Integrated Engine Ready!${NC}"
+echo -e "${GREEN}   All Done! MeshCentral + CEM Ready to Use!${NC}"
 echo -e "${GREEN}=====================================================${NC}\n"
 echo -e "${BLUE}Direct browser access to MeshCentral is LOCKED:${NC}"
 echo -e "  Anyone visiting ${SERVER_URL} directly is sent to ${GREEN}${SITE_ORIGIN}/web/remote${NC}"
 echo ""
-echo -e "${BLUE}Zero manual setup needed inside ${SITE_ORIGIN}:${NC}"
-echo -e "  1. Restart CEM:  ${YELLOW}sudo systemctl restart crm-backend${NC}"
-echo -e "  2. Open ${GREEN}${SITE_ORIGIN}/web/remote${NC} — CEM auto-imports all settings from"
-echo -e "     ${AUTOLINK_FILE} and turns on Remote Support automatically!"
+echo -e "${BLUE}Open your website right now (zero manual settings needed):${NC}"
+echo -e "  ${GREEN}${SITE_ORIGIN}/web/remote${NC}"
 echo ""
-echo -e "Credentials copy saved to: ${YELLOW}${CRED_FILE}${NC} (root-only)"
+echo -e "Verified Group:   ${GREEN}${DEFAULT_MESH_NAME}${NC} (${DEFAULT_MESH_ID})"
+echo -e "Credentials copy: ${YELLOW}${CRED_FILE}${NC} (root-only)"
 echo -e "Note: If your cloud VPS has an external firewall/security group, allow TCP port ${PUBLIC_PORT}."
 echo ""
