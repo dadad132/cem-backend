@@ -897,7 +897,13 @@ async def autodetect_local_meshcentral(custom_path: Optional[str] = None) -> Dic
                     config_updated = True
                     notes.append("Enabled allowFraming and AllowLoginToken in local meshcentral-data/config.json.")
                 cert_host = mc_sec.get("cert") or mc_sec.get("Cert")
-                port = mc_sec.get("port") or mc_sec.get("Port") or 443
+                port = (
+                    mc_sec.get("aliasPort")
+                    or mc_sec.get("AliasPort")
+                    or mc_sec.get("port")
+                    or mc_sec.get("Port")
+                    or 443
+                )
                 if isinstance(cert_host, str) and cert_host.strip() and not cert_host.startswith("_"):
                     if int(port) == 443:
                         suggested_url = f"https://{cert_host.strip()}"
