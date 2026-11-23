@@ -791,10 +791,14 @@ async def web_remote_settings_autofill(
     if local_info["found"] and local_info["path"]:
         row.local_install_path = local_info["path"]
 
-    # 2. Resolve URL, domain, credentials (form overrides saved DB, local autolink/config is fallback)
+    # 2. Resolve URL, domain, credentials.
+    # When local cem-autolink.json is present (from setup_meshcentral.sh) and the admin
+    # left form fields blank, refresh from autolink so re-running setup_meshcentral.sh
+    # immediately clears any stale URL/password/key in 1 click.
     autolink = local_info.get("autolink") or {}
     raw_url = (
         (server_url or "").strip()
+        or str(autolink.get("server_url") or "").strip()
         or row.server_url
         or local_info.get("suggested_url")
         or ""
@@ -813,16 +817,18 @@ async def web_remote_settings_autofill(
 
     if username and username.strip():
         row.username = username.strip()
-    elif not row.username and autolink.get("username"):
+    elif autolink.get("username"):
         row.username = str(autolink["username"]).strip()
 
     if password and password.strip():
         row.password_encrypted = encrypt_secret(password)
-    elif not row.password_encrypted and autolink.get("password"):
+    elif autolink.get("password"):
         row.password_encrypted = encrypt_secret(str(autolink["password"]))
 
     if verify_ssl is not None:
         row.verify_ssl = verify_ssl in ("1", "true", "on", "yes")
+    elif "verify_ssl" in autolink:
+        row.verify_ssl = bool(autolink["verify_ssl"])
 
     autofilled_key = local_info.get("login_token_key")
     if autofilled_key:
