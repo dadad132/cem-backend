@@ -6833,11 +6833,23 @@ async def web_admin_site_settings(
     success_message = request.session.pop('success_message', None)
     if not error_message:
         error_message = request.session.pop('error_message', None)
-    
+
+    mc_settings = None
+    try:
+        from app.models.meshcentral import MeshCentralSettings
+        mc_settings = (await db.execute(
+            select(MeshCentralSettings).where(MeshCentralSettings.workspace_id == user.workspace_id)
+        )).scalar_one_or_none()
+    except Exception:
+        mc_settings = None
+
     return templates.TemplateResponse('admin/site_settings.html', {
         'request': request,
         'user': user,
         'workspace': workspace,
+        'mc_settings': mc_settings,
+        'mc_has_password': bool(mc_settings and mc_settings.password_encrypted),
+        'mc_has_login_token_key': bool(mc_settings and mc_settings.login_token_key_encrypted),
         'server_zone': server_zone_name(),
         'server_now': local_now(),
         'success_message': success_message,

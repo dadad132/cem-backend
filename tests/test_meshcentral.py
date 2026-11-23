@@ -388,3 +388,63 @@ async def test_dashboard_device_lifecycle_sync_and_session_embedding(seeded, mon
     # Admin in same workspace can delete
     del_resp = await web_remote_device_delete(_request(admin.id), dev.id, db)
     assert del_resp.status_code == 303
+
+
+@pytest.mark.asyncio
+async def test_site_settings_includes_meshcentral_form_and_roundtrip(seeded):
+    from app.web.routes import web_admin_site_settings
+
+    db, ws1, _ws2, admin, _tech, _other = seeded
+    key_hex = secrets.token_hex(32)
+
+    req = _request(admin.id, "/web/remote/settings/save")
+    resp = await web_remote_settings_save(
+        req,
+        enabled="1",
+        server_url="https://mesh.site-settings.test",
+        domain="",
+        username="admin",
+        password="SecretPass99",
+        clear_password=None,
+        login_token_key=key_hex,
+        clear_login_token_key=None,
+        login_user_id="",
+        default_view_mode=11,
+        hide_mesh_chrome="1",
+        verify_ssl="1",
+        return_to="/web/admin/site-settings",
+        db=db,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/web/admin/site-settings"
+    assert "saved successfully" in req.session["success_message"].lower()
+
+    # Open-redirect protection: unknown return_to always falls back to /web/remote/settings
+    bad_req = _request(admin.id, "/web/remote/settings/save")
+    bad_resp = await web_remote_settings_save(
+        bad_req,
+        enabled="1",
+        server_url="https://mesh.site-settings.test",
+        domain="",
+        username="admin",
+        password="",
+        clear_password=None,
+        login_token_key="",
+        clear_login_token_key=None,
+        login_user_id="",
+        default_view_mode=11,
+        hide_mesh_chrome="1",
+        verify_ssl="1",
+        return_to="https://evil.example/phish",
+        db=db,
+    )
+    assert bad_resp.headers["location"] == "/web/remote/settings"
+
+    page = await web_admin_site_settings(_request(admin.id, "/web/admin/site-settings"), db)
+    html = bytes(page.body).decode()
+    assert "MeshCentral Remote Access" in html
+    assert "https://mesh.site-settings.test" in html
+    assert "Save MeshCentral Settings" in html
+    assert "SecretPass99" not in html
+    assert key_hex not in html
+

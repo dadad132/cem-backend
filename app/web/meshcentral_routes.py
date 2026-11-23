@@ -541,6 +541,19 @@ async def web_remote_settings(request: Request, db: AsyncSession = Depends(get_s
     )
 
 
+_ALLOWED_SETTINGS_RETURNS = frozenset({"/web/remote/settings", "/web/admin/site-settings"})
+
+
+def _settings_redirect(request: Request, return_to: Optional[str], message: str, ok: bool) -> RedirectResponse:
+    target = return_to if return_to in _ALLOWED_SETTINGS_RETURNS else "/web/remote/settings"
+    if target == "/web/admin/site-settings":
+        request.session["success_message" if ok else "error_message"] = message
+    else:
+        request.session["flash_message"] = message
+        request.session["flash_type"] = "success" if ok else "error"
+    return RedirectResponse(target, status_code=303)
+
+
 @router.post("/remote/settings/save")
 async def web_remote_settings_save(
     request: Request,
@@ -556,6 +569,7 @@ async def web_remote_settings_save(
     default_view_mode: int = Form(11),
     hide_mesh_chrome: Optional[str] = Form(None),
     verify_ssl: Optional[str] = Form(None),
+    return_to: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_session),
 ):
     user, redirect = await _require_workspace_admin(request, db)
@@ -568,20 +582,19 @@ async def web_remote_settings_save(
         try:
             clean_url = normalize_server_url(server_url)
         except ValueError as exc:
-            request.session["flash_message"] = str(exc)
-            request.session["flash_type"] = "error"
-            return RedirectResponse("/web/remote/settings", status_code=303)
+            return _settings_redirect(request, return_to, str(exc), ok=False)
     elif is_enabled:
-        request.session["flash_message"] = "Please enter your MeshCentral Server URL before enabling."
-        request.session["flash_type"] = "error"
-        return RedirectResponse("/web/remote/settings", status_code=303)
+        return _settings_redirect(
+            request,
+            return_to,
+            "Please enter your MeshCentral Server URL before enabling.",
+            ok=False,
+        )
 
     try:
         clean_domain = normalize_domain(domain)
     except ValueError as exc:
-        request.session["flash_message"] = str(exc)
-        request.session["flash_type"] = "error"
-        return RedirectResponse("/web/remote/settings", status_code=303)
+        return _settings_redirect(request, return_to, str(exc), ok=False)
 
     if default_view_mode not in VIEW_MODE_MAP.values():
         default_view_mode = 11
@@ -613,9 +626,7 @@ async def web_remote_settings_save(
         row.login_token_key_encrypted = encrypt_secret(login_token_key)
 
     await db.commit()
-    request.session["flash_message"] = "MeshCentral settings saved successfully."
-    request.session["flash_type"] = "success"
-    return RedirectResponse("/web/remote/settings", status_code=303)
+    return _settings_redirect(request, return_to, "MeshCentral settings saved successfully.", ok=True)
 
 
 @router.post("/remote/settings/test")
