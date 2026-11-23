@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+{% block title %}Remote: {{ device.name }} — {{ workspace.site_title if workspace and workspace.site_title else (workspace.name if workspace else 'CRM') }}{% endblock %}
+
+{% block content %}
+<style>[x-cloak] { display: none !important; }</style>
+<script id="remote-session-init" type="application/json">{{ {
+  "deviceId": device.id,
+  "mode": embed.mode,
+  "embedUrl": embed.url,
+  "directUrl": direct_url,
+  "notes": device.notes or "",
+  "clientName": device.client_name or device.mesh_name or ""
+} | tojson }}</script>
+<div class="space-y-4"
+     x-data="(() => {
+       const init = JSON.parse(document.getElementById('remote-session-init').textContent);
+       return {
+         deviceId: init.deviceId,
+         mode: init.mode,
+         embedUrl: init.embedUrl,
+         directUrl: init.directUrl,
+         loading: true,
+         switching: false,
+         showNotes: false,
+         showHelp: false,
+         notes: init.notes,
+         clientName: init.clientName,
+         savingNotes: false,
+         notesFeedback: '',
+         async switchMode(nextMode) {
+           if (this.switching) return;
+           this.switching = true;
+           this.loading = true;
+           try {
+             const res = await fetch(`/web/remote/session/${this.deviceId}/embed-url?mode=${encodeURIComponent(nextMode)}`);
+             const data = await res.json();
+             if (data.success) {
+               this.mode = data.mode;
+               this.embedUrl = data.embed_url;
+               this.directUrl = data.direct_url;
+               window.history.replaceState({}, '', `/web/remote/session/${this.deviceId}?mode=${encodeURIComponent(data.mode)}`);
+             }
+           } finally {
+             this.switching = false;
+           }
+         },
+         async reconnect() {
+           await this.switchMode(this.mode);
+         },
+         toggleFullscreen() {
+           const el = this.$refs.stage;
+           if (!document.fullscreenElement) {
+             el.requestFullscreen && el.requestFullscreen();
+           } else {
+             document.exitFullscreen && document.exitFullscreen();
+           }
+         },
+         async saveNotes() {
+           this.savingNotes = true;
+           this.notesFeedback = '';
+           try {
+             const form = new FormData();
+             form.append('notes', this.notes);
+             form.append('client_name', this.clientName);
+             const res = await fetch(`/web/remote/devices/${this.deviceId}/notes`, { method: 'POST', body: form });
+             const data = await res.json();
+             this.notesFeedback = data.success ? 'Saved!' : (data.error || 'Failed to save');
+           } catch (err) {
+             this.notesFeedback = 'Network error saving notes';
+           } finally {
+             this.savingNotes = false;
+           }
+         }
+       };
+     })()">
+
+  <!-- Custom CEM Remote Session Command Bar -->
+  <div class="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 rounded-2xl px-4 py-3 text-white shadow-lg">
+    <div class="flex flex-wrap items-center justify-between gap-3">
+
+      <!-- Left: Back + Device Identity -->
+      <div class="flex items-center gap-3 min-w-0">
+        <a href="/web/remote"
+           class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold text-white transition">
+          <i class="fas fa-arrow-left"></i>
+          <span>Fleet</span>
+        </a>
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full flex-shrink-0 {{ 'bg-emerald-400 animate-pulse' if device.is_online else 'bg-slate-400' }}"></span>
+            <h1 class="font-bold text-base truncate">{{ device.name }}</h1>
+            {% if device.client_name or device.mesh_name %}
+            <span class="hidden sm:inline-flex px-2 py-0.5 rounded-md bg-white/10 text-slate-200 text-xs font-medium">
+              {{ device.client_name or device.mesh_name }}
+            </span>
+            {% endif %}
+          </div>
+          <p class="text-xs text-slate-400 truncate">
+            {{ device.os_desc or 'Managed Client PC' }}{% if device.ip_address %} · <span class="font-mono">{{ device.ip_address }}</span>{% endif %}
+            {% if embed.sso_active %} · <span class="text-sky-300">Auto-Login SSO Active</span>{% endif %}
+          </p>
+        </div>
+      </div>
+
+      <!-- Center: Custom Mode Tabs (Desktop / Terminal / Files / Console / Info) -->
+      <div class="flex items-center gap-1 bg-black/30 rounded-xl p-1 border border-white/10">
+        {% for m in modes %}
+        <button type="button" @click="switchMode('{{ m.key }}')"
+                class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition"
+                :class="mode === '{{ m.key }}' ? 'bg-red-600 text-white shadow-sm' : 'text-slate-300 hover:text-white hover:bg-white/10'">
+          <i class="fas {{ m.icon }}"></i>
+          <span class="hidden md:inline">{{ m.label }}</span>
+        </button>
+        {% endfor %}
+      </div>
+
+      <!-- Right: Session Tools -->
+      <div class="flex items-center gap-1.5">
+        {% if sibling_devices %}
+        <div class="relative" x-data="{ open: false }" @click.outside="open = false">
+          <button type="button" @click="open = !open"
+                  class="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold text-white transition"
+                  title="Switch to another PC at this client">
+            <i class="fas fa-right-left"></i>
+          </button>
+          <div x-show="open" x-cloak
+               class="absolute right-0 mt-2 w-60 bg-white text-slate-800 rounded-xl shadow-xl border border-slate-200 py-1.5 z-40">
+            <p class="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">Switch Client PC</p>
+            {% for sib in sibling_devices %}
+            <a href="/web/remote/session/{{ sib.id }}?mode={{ embed.mode }}"
+               class="flex items-center justify-between px-3 py-2 text-xs hover:bg-slate-50 transition">
+              <span class="font-medium truncate">{{ sib.name }}</span>
+              <span class="w-2 h-2 rounded-full {{ 'bg-emerald-500' if sib.is_online else 'bg-slate-300' }}"></span>
+            </a>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+
+        <button type="button" @click="showNotes = !showNotes"
+                class="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold text-white transition"
+                :class="showNotes ? 'ring-2 ring-amber-400' : ''"
+                title="Technician Notes">
+          <i class="fas fa-note-sticky"></i>
+        </button>
+
+        <button type="button" @click="reconnect" :disabled="switching"
+                class="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold text-white transition"
+                title="Refresh SSO Token &amp; Reconnect">
+          <i class="fas fa-rotate" :class="switching ? 'fa-spin' : ''"></i>
+        </button>
+
+        <button type="button" @click="toggleFullscreen"
+                class="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold text-white transition"
+                title="Fullscreen">
+          <i class="fas fa-expand"></i>
+        </button>
+
+        <a :href="directUrl" target="_blank" rel="noopener noreferrer"
+           class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold text-white transition"
+           title="Open in new browser tab">
+          <i class="fas fa-arrow-up-right-from-square"></i>
+          <span class="hidden xl:inline">Pop Out</span>
+        </a>
+
+        <button type="button" @click="showHelp = !showHelp"
+                class="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold text-slate-300 hover:text-white transition"
+                title="Connection help">
+          <i class="fas fa-circle-question"></i>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Optional Troubleshooting Strip -->
+  <div x-show="showHelp" x-cloak
+       class="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-900 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+    <div>
+      <strong>Blank frame or login prompt?</strong>
+      Make sure your MeshCentral <code class="px-1 py-0.5 bg-amber-100 rounded">config.json</code> has
+      <code class="px-1 py-0.5 bg-amber-100 rounded">"allowFraming": true</code> and
+      <code class="px-1 py-0.5 bg-amber-100 rounded">"allowLoginToken": true</code>, and your
+      <code class="px-1 py-0.5 bg-amber-100 rounded">loginTokenKey</code> is saved in
+      <a href="/web/remote/settings" class="underline font-semibold">MeshCentral Setup</a>.
+    </div>
+    <a :href="directUrl" target="_blank" rel="noopener noreferrer"
+       class="flex-shrink-0 px-3 py-1.5 rounded-lg bg-amber-600 text-white font-semibold hover:bg-amber-700 transition">
+      Open Direct Tab
+    </a>
+  </div>
+
+  <!-- Live Embedded Remote Stage + Optional Notes Panel -->
+  <div class="flex flex-col lg:flex-row gap-4" style="height: calc(100vh - 11.5rem); min-height: 540px;">
+
+    <!-- Framed Live Client Viewport -->
+    <div x-ref="stage"
+         class="relative flex-1 bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 shadow-2xl">
+      <div x-show="loading"
+           class="absolute inset-0 z-10 bg-slate-950/85 flex flex-col items-center justify-center text-white gap-3 pointer-events-none">
+        <i class="fas fa-circle-notch fa-spin text-3xl text-red-500"></i>
+        <p class="text-sm font-medium text-slate-300">
+          Connecting to <span class="text-white font-bold">{{ device.name }}</span> (<span class="capitalize" x-text="mode"></span>)...
+        </p>
+      </div>
+
+      <iframe id="meshcentral-session-frame"
+              :src="embedUrl"
+              @load="loading = false"
+              class="w-full h-full border-0 bg-slate-950"
+              allow="clipboard-read; clipboard-write; fullscreen"
+              allowfullscreen
+              referrerpolicy="no-referrer"></iframe>
+    </div>
+
+    <!-- Slide-out Technician Notes Drawer -->
+    <aside x-show="showNotes" x-cloak
+           class="w-full lg:w-80 bg-white rounded-2xl border border-slate-200 p-5 flex flex-col justify-between shadow-lg">
+      <div class="space-y-4">
+        <div class="flex items-center justify-between">
+          <h2 class="font-bold text-slate-900 text-sm">Client PC Notes</h2>
+          <button type="button" @click="showNotes = false" class="text-slate-400 hover:text-slate-600">
+            <i class="fas fa-times"></i>
+          </button>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-600 mb-1">Client / Company Label</label>
+          <input type="text" x-model="clientName"
+                 class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-600 mb-1">Technician Notes</label>
+          <textarea x-model="notes" rows="7"
+                    placeholder="Record support notes, local admin tips, or maintenance windows..."
+                    class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"></textarea>
+        </div>
+        <div class="text-xs text-slate-500 space-y-1 bg-slate-50 rounded-lg p-3 border border-slate-100">
+          <p><span class="font-semibold text-slate-700">Node ID:</span> <span class="font-mono break-all">{{ device.node_id }}</span></p>
+          {% if device.hostname %}
+          <p><span class="font-semibold text-slate-700">Hostname:</span> {{ device.hostname }}</p>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="pt-4 space-y-2">
+        <p x-show="notesFeedback" class="text-xs font-semibold text-emerald-600" x-text="notesFeedback"></p>
+        <button type="button" @click="saveNotes" :disabled="savingNotes"
+                class="w-full py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold transition">
+          <span x-text="savingNotes ? 'Saving...' : 'Save Notes'"></span>
+        </button>
+      </div>
+    </aside>
+
+  </div>
+</div>
+{% endblock %}

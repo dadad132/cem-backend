@@ -1,0 +1,266 @@
+{% extends "base.html" %}
+{% block title %}MeshCentral Setup — {{ workspace.site_title if workspace and workspace.site_title else (workspace.name if workspace else 'CRM') }}{% endblock %}
+
+{% block content %}
+<div class="space-y-6"
+     x-data="{
+       testing: false,
+       testResult: null,
+       testOk: false,
+       async testConnection() {
+         if (this.testing) return;
+         this.testing = true;
+         this.testResult = null;
+         try {
+           const res = await fetch('/web/remote/settings/test', { method: 'POST' });
+           const data = await res.json();
+           this.testOk = Boolean(data.success);
+           if (data.success) {
+             this.testResult = `Connected! Found ${data.devices} device(s) (${data.online} online) across ${data.groups} group(s). SSO: ${data.sso_ready ? 'Enabled' : 'Not configured yet'}.`;
+           } else {
+             this.testResult = data.error || 'Connection test failed.';
+           }
+         } catch (err) {
+           this.testOk = false;
+           this.testResult = 'Could not reach server to run connection test.';
+         } finally {
+           this.testing = false;
+         }
+       }
+     }">
+
+  <!-- Header -->
+  <div class="bg-gradient-to-r from-slate-900 to-slate-800 rounded-2xl p-6 text-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+    <div class="flex items-center gap-4">
+      <div class="w-12 h-12 rounded-xl bg-white/10 flex items-center justify-center">
+        <i class="fas fa-sliders text-xl"></i>
+      </div>
+      <div>
+        <h1 class="text-2xl font-bold">MeshCentral Remote Access Setup</h1>
+        <p class="text-slate-300 text-sm mt-0.5">Connect your self-hosted MeshCentral server to log in to client PCs straight from the dashboard.</p>
+      </div>
+    </div>
+    <a href="/web/remote"
+       class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white text-slate-900 hover:bg-slate-100 text-sm font-semibold transition">
+      <i class="fas fa-arrow-left"></i>
+      Back to Remote Dashboard
+    </a>
+  </div>
+
+  <!-- Flash Message -->
+  {% if flash_message %}
+  <div class="flex items-center gap-3 rounded-xl px-5 py-3.5 border text-sm font-medium
+              {% if flash_type == 'error' %}bg-red-50 border-red-200 text-red-800{% else %}bg-emerald-50 border-emerald-200 text-emerald-800{% endif %}">
+    <i class="fas {% if flash_type == 'error' %}fa-circle-exclamation text-red-500{% else %}fa-circle-check text-emerald-500{% endif %}"></i>
+    <span>{{ flash_message }}</span>
+  </div>
+  {% endif %}
+
+  <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+    <!-- Left: Settings Form -->
+    <div class="lg:col-span-7">
+      <form method="post" action="/web/remote/settings/save" class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+          <h2 class="font-bold text-slate-900">Server &amp; SSO Configuration</h2>
+          <label class="inline-flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" name="enabled" value="1"
+                   {% if mc_settings and mc_settings.enabled %}checked{% endif %}
+                   class="w-4 h-4 rounded border-slate-300 text-red-600 focus:ring-red-500">
+            <span class="text-sm font-semibold text-slate-700">Enabled</span>
+          </label>
+        </div>
+
+        <div class="p-6 space-y-5">
+
+          <!-- Server URL + Optional Domain -->
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div class="sm:col-span-2">
+              <label class="block text-sm font-medium text-slate-700 mb-1.5">MeshCentral Server URL *</label>
+              <input type="url" name="server_url"
+                     value="{{ mc_settings.server_url if mc_settings and mc_settings.server_url else '' }}"
+                     placeholder="https://mesh.yourdomain.com"
+                     class="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg text-sm">
+              <p class="text-xs text-slate-500 mt-1">Must be reachable by technicians' browsers (HTTPS recommended).</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-slate-700 mb-1.5">Domain (optional)</label>
+              <input type="text" name="domain"
+                     value="{{ mc_settings.domain if mc_settings and mc_settings.domain else '' }}"
+                     placeholder="Default (blank)"
+                     class="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg text-sm">
+              <p class="text-xs text-slate-500 mt-1">Only if using multi-domain MeshCentral.</p>
+            </div>
+          </div>
+
+          <!-- Service Account for Live Device Sync -->
+          <div class="pt-4 border-t border-slate-100 space-y-4">
+            <div>
+              <h3 class="text-sm font-bold text-slate-900">1. Live Device Sync Credentials</h3>
+              <p class="text-xs text-slate-500 mt-0.5">Used server-side over <code class="px-1 bg-slate-100 rounded">/control.ashx</code> to pull client PCs &amp; online status into our dashboard.</p>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1.5">MeshCentral Username</label>
+                <input type="text" name="username"
+                       value="{{ mc_settings.username if mc_settings and mc_settings.username else '' }}"
+                       placeholder="admin"
+                       autocomplete="off"
+                       class="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg text-sm">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1.5">
+                  MeshCentral Password
+                  {% if has_password %}<span class="text-xs text-emerald-600 font-semibold">(saved)</span>{% endif %}
+                </label>
+                <input type="password" name="password"
+                       placeholder="{{ 'Leave blank to keep saved password' if has_password else 'Enter password' }}"
+                       autocomplete="new-password"
+                       class="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg text-sm">
+                {% if has_password %}
+                <label class="inline-flex items-center gap-1.5 mt-1.5 text-xs text-slate-500 cursor-pointer">
+                  <input type="checkbox" name="clear_password" value="1" class="rounded border-slate-300">
+                  Clear saved password
+                </label>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+
+          <!-- SSO Login Token Key -->
+          <div class="pt-4 border-t border-slate-100 space-y-4">
+            <div>
+              <h3 class="text-sm font-bold text-slate-900">2. Seamless Dashboard Login (SSO Token Key)</h3>
+              <p class="text-xs text-slate-500 mt-0.5">Allows technicians to click <strong>Desktop / Terminal / Files</strong> and log straight into the client PC without a second MeshCentral login screen.</p>
+            </div>
+
+            <div>
+              <label class="block text-sm font-medium text-slate-700 mb-1.5">
+                Login Token Key (<code class="text-xs">--loginTokenKey</code>)
+                {% if has_login_token_key %}<span class="text-xs text-emerald-600 font-semibold">(saved)</span>{% endif %}
+              </label>
+              <input type="password" name="login_token_key"
+                     placeholder="{{ 'Leave blank to keep saved key' if has_login_token_key else 'Paste hex output from node node_modules/meshcentral --loginTokenKey' }}"
+                     autocomplete="new-password"
+                     class="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg font-mono text-xs">
+              {% if has_login_token_key %}
+              <label class="inline-flex items-center gap-1.5 mt-1.5 text-xs text-slate-500 cursor-pointer">
+                <input type="checkbox" name="clear_login_token_key" value="1" class="rounded border-slate-300">
+                Clear saved loginTokenKey
+              </label>
+              {% endif %}
+            </div>
+
+            <div>
+              <label class="block text-sm font-medium text-slate-700 mb-1.5">Login User ID (optional override)</label>
+              <input type="text" name="login_user_id"
+                     value="{{ mc_settings.login_user_id if mc_settings and mc_settings.login_user_id else '' }}"
+                     placeholder="Auto-derived as user//<username> if blank"
+                     class="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg font-mono text-xs">
+            </div>
+          </div>
+
+          <!-- Viewer Preferences -->
+          <div class="pt-4 border-t border-slate-100 space-y-4">
+            <h3 class="text-sm font-bold text-slate-900">3. Embedded Dashboard Viewer</h3>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1.5">Default Launch Mode</label>
+                {% set dvm = mc_settings.default_view_mode if mc_settings else 11 %}
+                <select name="default_view_mode" class="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg text-sm">
+                  <option value="11" {% if dvm == 11 %}selected{% endif %}>Remote Desktop (11)</option>
+                  <option value="12" {% if dvm == 12 %}selected{% endif %}>Terminal / Shell (12)</option>
+                  <option value="13" {% if dvm == 13 %}selected{% endif %}>File Manager (13)</option>
+                  <option value="15" {% if dvm == 15 %}selected{% endif %}>Agent Console (15)</option>
+                  <option value="10" {% if dvm == 10 %}selected{% endif %}>Device Summary (10)</option>
+                </select>
+              </div>
+              <div class="flex flex-col justify-center space-y-2 pt-2">
+                <label class="inline-flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" name="hide_mesh_chrome" value="1"
+                         {% if not mc_settings or mc_settings.hide_mesh_chrome %}checked{% endif %}
+                         class="w-4 h-4 rounded border-slate-300 text-red-600">
+                  <span class="text-sm text-slate-700">Hide MeshCentral headers/menus (use CEM layout)</span>
+                </label>
+                <label class="inline-flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" name="verify_ssl" value="1"
+                         {% if not mc_settings or mc_settings.verify_ssl %}checked{% endif %}
+                         class="w-4 h-4 rounded border-slate-300 text-red-600">
+                  <span class="text-sm text-slate-700">Verify SSL certificate on sync</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Test Connection Output -->
+          <template x-if="testResult">
+            <div class="rounded-xl px-4 py-3 text-xs font-medium border"
+                 :class="testOk ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-800'"
+                 x-text="testResult"></div>
+          </template>
+
+          <!-- Submit Actions -->
+          <div class="pt-3 flex flex-wrap items-center gap-3">
+            <button type="submit"
+                    class="flex-1 py-2.5 px-5 rounded-xl bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white text-sm font-semibold transition shadow-sm">
+              <i class="fas fa-check mr-1.5"></i> Save MeshCentral Settings
+            </button>
+            <button type="button" @click="testConnection" :disabled="testing"
+                    class="py-2.5 px-4 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-sm font-semibold transition">
+              <i class="fas fa-plug mr-1.5" :class="testing ? 'fa-spin' : ''"></i>
+              <span x-text="testing ? 'Testing...' : 'Test Connection'"></span>
+            </button>
+          </div>
+
+        </div>
+      </form>
+    </div>
+
+    <!-- Right: MeshCentral Setup Guide -->
+    <aside class="lg:col-span-5 space-y-5">
+      <div class="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-lg bg-blue-100 text-blue-600 flex items-center justify-center">
+            <i class="fas fa-book"></i>
+          </div>
+          <h2 class="font-bold text-slate-900">MeshCentral Server Checklist</h2>
+        </div>
+
+        <ol class="space-y-3 text-xs text-slate-600 list-decimal pl-4">
+          <li>
+            <strong class="text-slate-800">Enable iframe embedding &amp; login tokens</strong> in your MeshCentral
+            <code class="px-1 py-0.5 bg-slate-100 rounded">meshcentral-data/config.json</code>:
+            <pre class="mt-2 p-3 rounded-xl bg-slate-900 text-slate-100 overflow-x-auto text-[11px] leading-relaxed">{
+  "settings": {
+    "allowFraming": true,
+    "allowLoginToken": true
+  }
+}</pre>
+          </li>
+          <li>
+            <strong class="text-slate-800">Generate your Login Token Key</strong> on the MeshCentral server:
+            <pre class="mt-2 p-3 rounded-xl bg-slate-900 text-slate-100 overflow-x-auto text-[11px]">node node_modules/meshcentral --loginTokenKey</pre>
+            Paste the output into the <em>Login Token Key</em> field on the left.
+          </li>
+          <li>
+            <strong class="text-slate-800">Restart MeshCentral</strong>, click <em>Save</em>, then click <em>Test Connection</em> and <em>Sync Devices</em> on the Remote Dashboard.
+          </li>
+          <li>
+            <strong class="text-slate-800">Install the MeshAgent</strong> on client PCs from your MeshCentral group page — once installed, they automatically appear in this dashboard!
+          </li>
+        </ol>
+
+        <div class="pt-2 border-t border-slate-100">
+          <a href="https://docs.meshcentral.com/meshcentral/" target="_blank" rel="noopener noreferrer"
+             class="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 hover:underline">
+            <i class="fas fa-arrow-up-right-from-square"></i>
+            Official MeshCentral Documentation
+          </a>
+        </div>
+      </div>
+    </aside>
+
+  </div>
+</div>
+{% endblock %}

@@ -47,6 +47,7 @@ from .knowledge_base import KBDiagnosticTree, KBResolvedCase
 from .system_log import SystemLog
 from .api_key import APIKey
 from .webhook import Webhook
+from .meshcentral import MeshCentralSettings, MeshCentralDevice, MeshCentralSessionLog
 __all__ = [
     "Workspace",
     "User",
@@ -116,4 +117,7 @@ __all__ = [
     "SystemLog",
     "APIKey",
     "Webhook",
+    "MeshCentralSettings",
+    "MeshCentralDevice",
+    "MeshCentralSessionLog",
 ]

@@ -230,6 +230,8 @@ from app.api.routes import external as external_routes
 app.include_router(external_routes.router, prefix="/api")
 from app.web import routes as web_routes  # noqa: E402
 app.include_router(web_routes.router, prefix="/web")
+from app.web import meshcentral_routes as meshcentral_web_routes  # noqa: E402
+app.include_router(meshcentral_web_routes.router, prefix="/web")
 
 
 # Minimal server-rendered pages
