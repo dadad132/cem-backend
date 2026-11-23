@@ -49,6 +49,7 @@ from .api_key import APIKey
 from .webhook import Webhook
 from .meshcentral import (
     MeshCentralSettings,
+    MeshCentralGroup,
     MeshCentralDevice,
     MeshCentralSessionLog,
     MeshCentralAgentInvite,
@@ -123,6 +124,7 @@ __all__ = [
     "APIKey",
     "Webhook",
     "MeshCentralSettings",
+    "MeshCentralGroup",
     "MeshCentralDevice",
     "MeshCentralSessionLog",
     "MeshCentralAgentInvite",

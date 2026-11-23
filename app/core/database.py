@@ -46,6 +46,7 @@ MESHCENTRAL_SETTINGS_EXTRA_COLUMNS = (
     ("meshcentralsettings", "default_mesh_id", "VARCHAR"),
     ("meshcentralsettings", "default_mesh_name", "VARCHAR"),
     ("meshcentralsettings", "local_install_path", "VARCHAR"),
+    ("meshcentralsettings", "local_port", "INTEGER"),
 )
 
 # SQLite uses StaticPool by default with aiosqlite, so we don't set pool parameters

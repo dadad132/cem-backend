@@ -23,6 +23,7 @@ from app.core.meshcentral import (
     build_login_user_id,
     create_meshcentral_group,
     decrypt_secret,
+    diagnose_meshcentral_connection,
     detect_os_family,
     encrypt_secret,
     fetch_meshcentral_auth_cookie,
@@ -35,11 +36,13 @@ from app.core.meshcentral import (
     proxy_agent_installer,
     resolve_view_mode,
     sync_workspace_devices,
+    upsert_workspace_groups,
 )
 from app.models.company import Company
 from app.models.meshcentral import (
     MeshCentralAgentInvite,
     MeshCentralDevice,
+    MeshCentralGroup,
     MeshCentralSessionLog,
     MeshCentralSettings,
 )
@@ -696,26 +699,24 @@ async def web_remote_settings_test(request: Request, db: AsyncSession = Depends(
             status_code=400,
         )
 
-    try:
-        meshes, devices = await fetch_meshcentral_inventory(mc_settings, timeout=10.0)
-        online = sum(1 for d in devices if d.get("is_online"))
-        has_token_key = bool(decrypt_secret(mc_settings.login_token_key_encrypted))
-        auto_sso = has_token_key
-        if not auto_sso and mc_settings.username and mc_settings.password_encrypted:
-            try:
-                auto_sso = bool(await fetch_meshcentral_auth_cookie(mc_settings, timeout=5.0))
-            except Exception:
-                auto_sso = False
+    report = await diagnose_meshcentral_connection(mc_settings, timeout=10.0)
+    if not report["ok"]:
         return JSONResponse({
-            "success": True,
-            "groups": len(meshes),
-            "devices": len(devices),
-            "online": online,
-            "sso_ready": auto_sso,
-            "sso_mode": "token_key" if has_token_key else ("authcookie" if auto_sso else "none"),
-        })
-    except Exception as exc:
-        return JSONResponse({"success": False, "error": str(exc)}, status_code=502)
+            "success": False,
+            "error": report["error"],
+            "hint": report["hint"],
+            "auth_method": report["auth_method"],
+        }, status_code=502)
+    return JSONResponse({
+        "success": True,
+        "groups": report["groups"],
+        "devices": report["devices"],
+        "online": report["online"],
+        "sso_ready": report["sso_mode"] != "none",
+        "sso_mode": report["sso_mode"],
+        "auth_method": report["auth_method"],
+        "hint": report["hint"],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -830,6 +831,14 @@ async def web_remote_settings_autofill(
     elif "verify_ssl" in autolink:
         row.verify_ssl = bool(autolink["verify_ssl"])
 
+    if autolink.get("local_port") is not None:
+        try:
+            local_port = int(autolink["local_port"])
+            if 1 <= local_port <= 65535:
+                row.local_port = local_port
+        except (TypeError, ValueError):
+            pass
+
     autofilled_key = local_info.get("login_token_key")
     if autofilled_key:
         row.login_token_key_encrypted = encrypt_secret(autofilled_key)
@@ -870,6 +879,8 @@ async def web_remote_settings_autofill(
                 first_id, first_name = next(iter(groups_map.items()))
                 row.default_mesh_id = first_id
                 row.default_mesh_name = first_name
+            if groups_map:
+                await upsert_workspace_groups(db, user.workspace_id, groups_map)
             if not row.login_token_key_encrypted and row.username and row.password_encrypted:
                 try:
                     authcookie_ok = bool(await fetch_meshcentral_auth_cookie(row, timeout=6.0))
@@ -952,13 +963,34 @@ async def _resolve_mesh_group(
                 .limit(1)
             )
         ).scalar_one_or_none()
+        cached = (
+            await db.execute(
+                select(MeshCentralGroup).where(
+                    MeshCentralGroup.workspace_id == workspace_id,
+                    MeshCentralGroup.mesh_id == mid,
+                )
+            )
+        ).scalars().first()
         mname = (dev.mesh_name if dev and dev.mesh_name else None) or (
+            cached.name if cached else None
+        ) or (
             mc_settings.default_mesh_name if mc_settings.default_mesh_id == mid else None
         ) or "Client PCs"
         return mid, mname
 
     if mc_settings.default_mesh_id:
         return mc_settings.default_mesh_id, mc_settings.default_mesh_name or "Client PCs"
+
+    cached_default = (
+        await db.execute(
+            select(MeshCentralGroup).where(
+                MeshCentralGroup.workspace_id == workspace_id,
+                MeshCentralGroup.is_default.is_(True),
+            )
+        )
+    ).scalars().first()
+    if cached_default and cached_default.mesh_id:
+        return cached_default.mesh_id, cached_default.name or "Client PCs"
 
     dev = (
         await db.execute(
@@ -1000,6 +1032,15 @@ async def web_remote_groups(request: Request, db: AsyncSession = Depends(get_ses
     if mc_settings and mc_settings.default_mesh_id:
         groups[mc_settings.default_mesh_id] = mc_settings.default_mesh_name or "Client PCs"
 
+    cached_groups = (
+        await db.execute(
+            select(MeshCentralGroup).where(MeshCentralGroup.workspace_id == user.workspace_id)
+        )
+    ).scalars().all()
+    for group in cached_groups:
+        if group.mesh_id and group.mesh_id not in groups:
+            groups[group.mesh_id] = group.name or group.mesh_id
+
     devs = (
         await db.execute(
             select(MeshCentralDevice).where(MeshCentralDevice.workspace_id == user.workspace_id)
@@ -1013,6 +1054,9 @@ async def web_remote_groups(request: Request, db: AsyncSession = Depends(get_ses
         try:
             live_meshes, _ = await fetch_meshcentral_inventory(mc_settings, timeout=8.0)
             groups.update(live_meshes)
+            if live_meshes:
+                await upsert_workspace_groups(db, user.workspace_id, live_meshes)
+                await db.commit()
         except Exception:
             pass
 
@@ -1040,10 +1084,13 @@ async def web_remote_groups_create(
 
     try:
         created = await create_meshcentral_group(mc_settings, name, description=description)
+        await upsert_workspace_groups(
+            db, user.workspace_id, {created["mesh_id"]: created["mesh_name"]}
+        )
         if not mc_settings.default_mesh_id:
             mc_settings.default_mesh_id = created["mesh_id"]
             mc_settings.default_mesh_name = created["mesh_name"]
-            await db.commit()
+        await db.commit()
         return JSONResponse({"success": True, **created})
     except Exception as exc:
         return JSONResponse({"success": False, "error": str(exc)}, status_code=502)

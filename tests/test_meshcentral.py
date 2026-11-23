@@ -1,6 +1,7 @@
 """Tests for MeshCentral Remote Client Access dashboard, SSO tokens, sync, and tenant isolation."""
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 from types import SimpleNamespace
@@ -13,8 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import SQLModel, select
 
 from app.core import meshcentral as mc
+from app.core.database import MESHCENTRAL_SETTINGS_EXTRA_COLUMNS
+from app.core.tenant_backup import TENANT_SCOPE
 from app.models.meshcentral import (
     MeshCentralDevice,
+    MeshCentralGroup,
     MeshCentralSessionLog,
     MeshCentralSettings,
 )
@@ -30,6 +34,7 @@ from app.web.meshcentral_routes import (
     web_remote_session_embed_url,
     web_remote_settings,
     web_remote_settings_save,
+    web_remote_settings_test,
     web_remote_sync,
 )
 
@@ -527,6 +532,16 @@ async def test_local_autodetect_updates_config_and_autofill_settings(seeded, tmp
     assert payload["sso_mode"] == "authcookie"
     assert payload["default_mesh_id"] == "mesh//GRP1"
 
+    cached = (
+        await db.execute(
+            select(MeshCentralGroup).where(
+                MeshCentralGroup.workspace_id == ws1.id,
+                MeshCentralGroup.mesh_id == "mesh//GRP1",
+            )
+        )
+    ).scalar_one_or_none()
+    assert cached is not None and cached.name == "Acme Clients"
+
     # Verify build_embed_url_async uses live authcookie automatically when loginTokenKey is blank
     monkeypatch.setattr("app.core.meshcentral.fetch_meshcentral_auth_cookie", fake_cookie)
     saved = (
@@ -684,6 +699,554 @@ async def test_cem_autolink_json_auto_populates_settings_without_manual_typing(s
     again = await mc.auto_import_local_meshcentral_if_present(db, ws1.id)
     assert again is not None
     assert again.enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Slice 1: persistent groups, loopback auth fallback, protocol & diagnostics
+# ---------------------------------------------------------------------------
+
+def _mc_settings(**overrides):
+    values = {
+        "workspace_id": 1,
+        "enabled": True,
+        "server_url": "https://tickets.hubconnect.co.za:4433",
+        "domain": "",
+        "username": "Admin",
+        "password_encrypted": mc.encrypt_secret("Pass123"),
+        "verify_ssl": True,
+    }
+    values.update(overrides)
+    return MeshCentralSettings(**values)
+
+
+def _fake_aiohttp(monkeypatch, ws_scripts=None, get_responses=None):
+    """Install an in-memory aiohttp stand-in and return a call recorder.
+
+    ``ws_scripts[i]`` is the frame script for the i-th ws_connect attempt (a
+    list of JSON dicts, or an exception to raise on connect). ``get_responses``
+    is a list of ``(status, body)`` tuples or exceptions for HTTP downloads.
+    """
+    state = {"ws_calls": [], "get_calls": []}
+    ws_scripts = list(ws_scripts or [])
+    get_responses = list(get_responses or [])
+
+    class _MsgType:
+        TEXT = "TEXT"
+        CLOSED = "CLOSED"
+        ERROR = "ERROR"
+
+    class _Timeout:
+        def __init__(self, **kwargs):
+            pass
+
+    class _Context:
+        def __init__(self, value):
+            self.value = value
+
+        async def __aenter__(self):
+            if isinstance(self.value, BaseException):
+                raise self.value
+            return self.value
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Message:
+        def __init__(self, data, kind):
+            # Real aiohttp delivers JSON frames as strings.
+            self.data = json.dumps(data) if isinstance(data, dict) else data
+            self.type = kind
+
+    class _WS:
+        def __init__(self, script, call):
+            self._script = script
+            self._call = call
+
+        async def send_json(self, payload):
+            self._call["sent"].append(payload)
+
+        async def receive(self, timeout=None):
+            if not self._script:
+                raise asyncio.TimeoutError()
+            frame = self._script.pop(0)
+            if isinstance(frame, BaseException):
+                raise frame
+            return _Message(frame, _MsgType.TEXT)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Response:
+        def __init__(self, status, body):
+            self.status = status
+            self._body = body
+
+        async def read(self):
+            return self._body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Session:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def ws_connect(self, url, headers=None, **kwargs):
+            call = {"url": url, "headers": dict(headers or {}), "sent": []}
+            state["ws_calls"].append(call)
+            index = len(state["ws_calls"]) - 1
+            if index >= len(ws_scripts):
+                raise AssertionError(f"Unexpected ws_connect #{index + 1}: {url}")
+            script = ws_scripts[index]
+            if isinstance(script, BaseException):
+                return _Context(script)
+            return _WS(list(script), call)
+
+        def get(self, url, headers=None, **kwargs):
+            call = {"url": url, "headers": dict(headers or {})}
+            state["get_calls"].append(call)
+            index = len(state["get_calls"]) - 1
+            if index >= len(get_responses):
+                raise AssertionError(f"Unexpected HTTP GET #{index + 1}: {url}")
+            response = get_responses[index]
+            if isinstance(response, BaseException):
+                return _Context(response)
+            status, body = response
+            return _Response(status, body)
+
+    class _FakeAiohttp:
+        ClientSession = _Session
+        ClientTimeout = _Timeout
+        WSMsgType = _MsgType
+
+    monkeypatch.setattr(mc, "_require_aiohttp", lambda: _FakeAiohttp)
+    return state
+
+
+DNS_ERROR_TEXT = (
+    "Cannot connect to host tickets.hubconnect.co.za:443 "
+    "ssl:default [Name or service not known]"
+)
+
+
+async def _cached_groups(db, workspace_id):
+    result = await db.execute(
+        select(MeshCentralGroup).where(MeshCentralGroup.workspace_id == workspace_id)
+    )
+    return result.scalars().all()
+
+
+def test_group_model_is_persistent_indexed_and_tenant_scoped():
+    assert TENANT_SCOPE["meshcentralgroup"] == ("direct",)
+    assert ("meshcentralsettings", "local_port", "INTEGER") in MESHCENTRAL_SETTINGS_EXTRA_COLUMNS
+
+    group = MeshCentralGroup(workspace_id=7, mesh_id="mesh//G1", name="Acme Clients")
+    assert group.id is None
+    assert group.description is None
+    assert group.is_default is False
+    assert group.created_at is not None and group.updated_at is not None
+    assert MeshCentralGroup.__tablename__ == "meshcentralgroup"
+    assert MeshCentralGroup.__table__.c.workspace_id.index is True
+    assert MeshCentralGroup.__table__.c.mesh_id.index is True
+    assert MeshCentralGroup.__table__.c.name.index is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_workspace_groups_is_idempotent_and_cross_tenant_safe(seeded):
+    db, ws1, ws2, *_ = seeded
+
+    first = await mc.upsert_workspace_groups(db, ws1.id, {
+        "mesh//A": "Acme Clients",
+        "mesh//B": "Acme Servers",
+    })
+    assert first == {"created": 2, "updated": 0}
+
+    rows = await _cached_groups(db, ws1.id)
+    by_id = {row.mesh_id: row for row in rows}
+    assert set(by_id) == {"mesh//A", "mesh//B"}
+    assert by_id["mesh//A"].name == "Acme Clients"
+
+    second = await mc.upsert_workspace_groups(db, ws1.id, {
+        "mesh//A": "Renamed Clients",
+        "mesh//C": "New Group",
+    })
+    assert second == {"created": 1, "updated": 1}
+    rows = await _cached_groups(db, ws1.id)
+    by_id = {row.mesh_id: row for row in rows}
+    assert by_id["mesh//A"].name == "Renamed Clients"
+    assert by_id["mesh//B"].name == "Acme Servers"  # stale groups are never deleted
+    assert by_id["mesh//C"].name == "New Group"
+
+    rival = await mc.upsert_workspace_groups(db, ws2.id, {"mesh//A": "Rival Clients"})
+    assert rival == {"created": 1, "updated": 0}
+    rival_rows = await _cached_groups(db, ws2.id)
+    assert len(rival_rows) == 1
+    assert rival_rows[0].name == "Rival Clients"
+    assert rival_rows[0].id != by_id["mesh//A"].id
+
+    empty = await mc.upsert_workspace_groups(db, ws1.id, {})
+    assert empty == {"created": 0, "updated": 0}
+
+
+def test_local_loopback_candidates_append_without_changing_browser_url(tmp_path):
+    cfg = _mc_settings(
+        local_install_path="/opt/meshcentral",
+        local_port=4430,
+        login_token_key_encrypted=mc.encrypt_secret(secrets.token_hex(32)),
+    )
+
+    candidates = mc.build_control_ws_candidates(cfg)
+    urls = [url for url, _headers in candidates]
+    headers = [headers for _url, headers in candidates]
+
+    assert any(url.startswith("wss://tickets.hubconnect.co.za:4433/control.ashx") for url in urls)
+    assert any("x-meshauth" in item for item in headers)
+    assert any("?auth=" in url for url in urls)
+    assert "ws://127.0.0.1:4430/control.ashx" in urls
+    assert any(url.startswith("ws://127.0.0.1:4430/control.ashx?auth=") for url in urls)
+
+    # Browser iframes keep using the public HTTPS server_url, never loopback.
+    embed = mc.build_embed_url(cfg, "node//PC123")
+    assert urlparse(embed["url"]).netloc == "tickets.hubconnect.co.za:4433"
+
+    # A real local install path alone enables the default loopback port, but an
+    # arbitrary path does not (no credential leak to an unrelated listener).
+    install_dir = tmp_path / "meshcentral"
+    (install_dir / "meshcentral-data").mkdir(parents=True)
+    path_only = mc.build_control_ws_candidates(
+        _mc_settings(local_install_path=str(install_dir))
+    )
+    assert any("ws://127.0.0.1:4430/control.ashx" in url for url, _ in path_only)
+    arbitrary = mc.build_control_ws_candidates(_mc_settings(local_install_path="/opt/nowhere"))
+    assert not any("127.0.0.1" in url for url, _ in arbitrary)
+    # ...and without either setting there is no loopback candidate.
+    cloud_only = mc.build_control_ws_candidates(_mc_settings())
+    assert not any("127.0.0.1" in url for url, _ in cloud_only)
+
+    # HTTP bases keep the domain prefix and end in '/' for correct path joins.
+    dom_cfg = _mc_settings(domain="tenant1", local_port=4430)
+    bases = mc.build_control_http_bases(dom_cfg)
+    assert bases[0] == "https://tickets.hubconnect.co.za:4433/tenant1/"
+    assert bases[1] == "http://127.0.0.1:4430/tenant1/"
+
+    # A public URL mounted under a path prefix must be mirrored on loopback.
+    mounted_cfg = _mc_settings(
+        server_url="https://tickets.hubconnect.co.za:4433/meshcentral",
+        domain="tenant1",
+        local_port=4430,
+    )
+    mounted_urls = [url for url, _ in mc.build_control_ws_candidates(mounted_cfg)]
+    assert "ws://127.0.0.1:4430/meshcentral/tenant1/control.ashx" in mounted_urls
+    mounted_bases = mc.build_control_http_bases(mounted_cfg)
+    assert mounted_bases[0] == "https://tickets.hubconnect.co.za:4433/meshcentral/tenant1/"
+    assert mounted_bases[1] == "http://127.0.0.1:4430/meshcentral/tenant1/"
+
+
+@pytest.mark.asyncio
+async def test_create_meshcentral_group_handles_direct_event_and_meshes_frames(monkeypatch):
+    state = _fake_aiohttp(monkeypatch, [[{"action": "createmesh", "meshid": "mesh//D1"}]])
+    created = await mc.create_meshcentral_group(_mc_settings(), "Acme Clients", "Managed by CEM")
+    assert created == {"mesh_id": "mesh//D1", "mesh_name": "Acme Clients"}
+    assert state["ws_calls"][0]["sent"][0] == {
+        "action": "createmesh",
+        "meshname": "Acme Clients",
+        "meshtype": 2,
+        "desc": "Managed by CEM",
+        "responseid": "cem",
+    }
+    assert any(frame.get("action") == "meshes" for frame in state["ws_calls"][0]["sent"])
+
+    _fake_aiohttp(monkeypatch, [[{
+        "action": "event",
+        "event": {"action": "createmesh", "meshid": "mesh//E1"},
+        "responseid": "cem",
+    }]])
+    created = await mc.create_meshcentral_group(_mc_settings(), "Event Group")
+    assert created["mesh_id"] == "mesh//E1"
+
+    # An uncorrelated createmesh event is another user's broadcast on a shared
+    # server and must not be recorded as this workspace's new group.
+    _fake_aiohttp(monkeypatch, [[
+        {"action": "event", "event": {"action": "createmesh", "meshid": "mesh//SOMEONE_ELSE"}},
+        {"action": "createmesh", "meshid": "mesh//MINE", "responseid": "cem"},
+    ]])
+    created = await mc.create_meshcentral_group(_mc_settings(), "My Group")
+    assert created["mesh_id"] == "mesh//MINE"
+
+    _fake_aiohttp(monkeypatch, [[
+        {"action": "createmesh", "result": "ok"},
+        {"action": "meshes", "meshes": [{"_id": "mesh//F1", "name": "acme clients"}]},
+    ]])
+    created = await mc.create_meshcentral_group(_mc_settings(), "Acme Clients")
+    assert created["mesh_id"] == "mesh//F1"
+
+
+@pytest.mark.asyncio
+async def test_create_meshcentral_group_falls_back_from_noauth_to_login_token(monkeypatch):
+    key_hex = secrets.token_hex(32)
+    cfg = _mc_settings(login_token_key_encrypted=mc.encrypt_secret(key_hex))
+    state = _fake_aiohttp(monkeypatch, [
+        [{"action": "close", "cause": "noauth"}],
+        [{"action": "close", "cause": "noauth"}],
+        [{"action": "createmesh", "meshid": "mesh//TOKEN"}],
+    ])
+
+    created = await mc.create_meshcentral_group(cfg, "Token Group")
+    assert created["mesh_id"] == "mesh//TOKEN"
+    assert len(state["ws_calls"]) == 3
+    success_url = state["ws_calls"][2]["url"]
+    assert "?auth=" in success_url
+    token = parse_qs(urlparse(success_url).query)["auth"][0]
+    assert mc.decode_login_token(token, key_hex)["u"] in {"user//Admin", "user//admin"}
+
+
+@pytest.mark.asyncio
+async def test_create_meshcentral_group_uses_loopback_after_public_connection_failure(monkeypatch):
+    cfg = _mc_settings(local_port=4430)
+    dns_error = OSError(
+        DNS_ERROR_TEXT
+    )
+    state = _fake_aiohttp(monkeypatch, [
+        dns_error,
+        dns_error,
+        [{"action": "createmesh", "meshid": "mesh//LOOPBACK", "responseid": "cem"}],
+    ])
+    created = await mc.create_meshcentral_group(cfg, "Loopback Group")
+    assert created["mesh_id"] == "mesh//LOOPBACK"
+    assert len(state["ws_calls"]) == 3
+    assert state["ws_calls"][2]["url"].startswith("ws://127.0.0.1:4430/control.ashx")
+
+
+@pytest.mark.asyncio
+async def test_create_meshcentral_group_reports_actionable_noauth_dns_and_ssl_errors(monkeypatch):
+    cfg = _mc_settings()
+
+    _fake_aiohttp(monkeypatch, [[{"action": "close", "cause": "noauth"}] for _ in range(2)])
+    with pytest.raises(RuntimeError) as noauth:
+        await mc.create_meshcentral_group(cfg, "Acme Clients")
+    noauth_msg = str(noauth.value).lower()
+    assert "noauth" in noauth_msg
+    assert "credential" in noauth_msg or "password" in noauth_msg
+
+    dns_error = OSError("[Errno -2] Name or service not known: tickets.hubconnect.co.za")
+    _fake_aiohttp(monkeypatch, [dns_error for _ in range(2)])
+    with pytest.raises(RuntimeError) as dns:
+        await mc.create_meshcentral_group(cfg, "Acme Clients")
+    assert "dns" in str(dns.value).lower() or "hostname" in str(dns.value).lower()
+
+    ssl_error = RuntimeError("SSL: CERTIFICATE_VERIFY_FAILED certificate verify failed")
+    _fake_aiohttp(monkeypatch, [ssl_error for _ in range(2)])
+    with pytest.raises(RuntimeError) as ssl:
+        await mc.create_meshcentral_group(cfg, "Acme Clients")
+    assert "ssl" in str(ssl.value).lower() or "certificate" in str(ssl.value).lower()
+
+
+def test_error_messages_redact_live_auth_tokens_and_credentials():
+    key_hex = secrets.token_hex(32)
+    cfg = _mc_settings(login_token_key_encrypted=mc.encrypt_secret(key_hex))
+    token = mc.generate_login_token(key_hex, "user//admin")
+    err = OSError(
+        f"connection failed at wss://tickets.hubconnect.co.za:4433/control.ashx?auth={token}&x=1"
+    )
+
+    kind, hint = mc.classify_meshcentral_error(err, cfg)
+    wrapped = mc.actionable_meshcentral_error(err, cfg)
+    assert kind == "connection"
+    assert token not in hint and token not in str(wrapped)
+    assert "<redacted>" in str(wrapped)
+
+    # Real aiohttp errors include `ssl:default` even for DNS failures.
+    aiohttp_dns = OSError(
+        DNS_ERROR_TEXT
+    )
+    kind, hint = mc.classify_meshcentral_error(aiohttp_dns, cfg)
+    assert kind == "dns"
+    assert "dns" in hint.lower() or "hostname" in hint.lower()
+
+    credential_err = mc.actionable_meshcentral_error(
+        RuntimeError("x-meshauth dXNlcjpwYXNzd29yZA=="), cfg
+    )
+    assert "dXNlcjpwYXNzd29yZA==" not in str(credential_err)
+
+
+@pytest.mark.asyncio
+async def test_agent_download_rejects_non_installer_payload(monkeypatch):
+    cfg = _mc_settings(local_port=4430)
+    _fake_aiohttp(monkeypatch, get_responses=[
+        (200, b"not-a-real-installer"),
+        (200, b"still-not-a-real-installer"),
+    ])
+    with pytest.raises(RuntimeError) as exc:
+        await mc.proxy_agent_installer(cfg, "mesh//GROUP1")
+    assert "unexpected" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_auth_cookie_retries_remaining_candidates(monkeypatch):
+    state = _fake_aiohttp(monkeypatch, [
+        [{"action": "close", "cause": "noauth"}],
+        [{"action": "authcookie", "cookie": "LIVE_COOKIE_123"}],
+    ])
+    assert await mc.fetch_meshcentral_auth_cookie(_mc_settings()) == "LIVE_COOKIE_123"
+    assert len(state["ws_calls"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_download_falls_back_to_local_loopback_http(monkeypatch):
+    cfg = _mc_settings(local_port=4430)
+    state = _fake_aiohttp(monkeypatch, get_responses=[(502, b""), (200, b"MZ-LOCAL-AGENT")])
+
+    payload, filename, content_type = await mc.proxy_agent_installer(cfg, "mesh//GROUP1")
+    assert payload == b"MZ-LOCAL-AGENT"
+    assert filename.endswith(".exe")
+    assert content_type == "application/octet-stream"
+    urls = [call["url"] for call in state["get_calls"]]
+    assert urls[0].startswith("https://tickets.hubconnect.co.za:4433/meshagents?")
+    assert urls[1].startswith("http://127.0.0.1:4430/meshagents?")
+
+
+@pytest.mark.asyncio
+async def test_sync_and_group_creation_persist_groups(seeded, monkeypatch):
+    db, ws1, *_ = seeded
+    db.add(_mc_settings())
+    await db.commit()
+
+    async def fake_inventory(settings_row, timeout=12.0):
+        return ({"mesh//SYNC": "Synced Group"}, [])
+
+    monkeypatch.setattr(mc, "fetch_meshcentral_inventory", fake_inventory)
+    await mc.sync_workspace_devices(db, ws1.id, _mc_settings())
+    groups = await _cached_groups(db, ws1.id)
+    assert [group.mesh_id for group in groups] == ["mesh//SYNC"]
+
+    from app.web.meshcentral_routes import web_remote_groups_create
+
+    async def fake_create(settings_row, name, description="", timeout=10.0):
+        return {"mesh_id": "mesh//CREATED", "mesh_name": name}
+
+    monkeypatch.setattr("app.web.meshcentral_routes.create_meshcentral_group", fake_create)
+    admin = (await db.execute(select(User).where(User.username == "admin"))).scalar_one()
+    response = await web_remote_groups_create(
+        _request(admin.id), name="Created Group", description="desc", db=db,
+    )
+    assert json.loads(response.body)["success"] is True
+    created = (
+        await db.execute(
+            select(MeshCentralGroup).where(
+                MeshCentralGroup.workspace_id == ws1.id,
+                MeshCentralGroup.mesh_id == "mesh//CREATED",
+            )
+        )
+    ).scalar_one()
+    assert created.name == "Created Group"
+
+
+@pytest.mark.asyncio
+async def test_diagnose_connection_reports_success_noauth_and_dns_hints(monkeypatch):
+    cfg = _mc_settings(login_token_key_encrypted=mc.encrypt_secret(secrets.token_hex(32)))
+
+    async def healthy(settings_row, timeout=12.0):
+        return ({"mesh//G1": "Group"}, [{"is_online": True}, {"is_online": False}])
+
+    monkeypatch.setattr(mc, "fetch_meshcentral_inventory", healthy)
+    report = await mc.diagnose_meshcentral_connection(cfg, timeout=8.0)
+    assert report["ok"] is True
+    assert report["auth_method"] == "x-meshauth"
+    assert report["groups"] == 1
+    assert report["devices"] == 2
+    assert report["online"] == 1
+    assert report["sso_mode"] == "token_key"
+    assert report["error"] is None
+
+    async def rejected(settings_row, timeout=12.0):
+        raise RuntimeError("MeshCentral closed the connection: noauth")
+
+    monkeypatch.setattr(mc, "fetch_meshcentral_inventory", rejected)
+    report = await mc.diagnose_meshcentral_connection(cfg)
+    assert report["ok"] is False
+    assert "noauth" in report["error"].lower()
+    hint = report["hint"].lower()
+    assert "credential" in hint or "password" in hint
+
+    async def unreachable(settings_row, timeout=12.0):
+        raise OSError("[Errno -2] Name or service not known: tickets.hubconnect.co.za")
+
+    monkeypatch.setattr(mc, "fetch_meshcentral_inventory", unreachable)
+    report = await mc.diagnose_meshcentral_connection(cfg)
+    assert report["ok"] is False
+    assert "dns" in report["hint"].lower() or "hostname" in report["hint"].lower()
+
+
+@pytest.mark.asyncio
+async def test_settings_test_route_surfaces_actionable_diagnostics(seeded, monkeypatch):
+    db, ws1, *_ = seeded
+    db.add(_mc_settings(workspace_id=ws1.id))
+    await db.commit()
+    admin = (await db.execute(select(User).where(User.username == "admin"))).scalar_one()
+
+    async def rejected(settings_row, timeout=10.0):
+        return {
+            "ok": False,
+            "auth_method": "x-meshauth",
+            "groups": 0,
+            "devices": 0,
+            "online": 0,
+            "sso_mode": "none",
+            "error": "MeshCentral noauth error",
+            "hint": "Check the MeshCentral username/password.",
+        }
+
+    monkeypatch.setattr(
+        "app.web.meshcentral_routes.diagnose_meshcentral_connection", rejected
+    )
+    response = await web_remote_settings_test(_request(admin.id), db=db)
+    assert response.status_code == 502
+    payload = json.loads(response.body)
+    assert payload["success"] is False
+    assert payload["hint"] == "Check the MeshCentral username/password."
+
+
+@pytest.mark.asyncio
+async def test_auto_import_seeds_default_group_and_local_port(seeded, tmp_path, monkeypatch):
+    db, ws1, ws2, *_ = seeded
+    mc_dir = tmp_path / "meshcentral"
+    data_dir = mc_dir / "meshcentral-data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "cem-autolink.json").write_text(json.dumps({
+        "server_url": "https://tickets.hubconnect.co.za:4433",
+        "username": "admin",
+        "password": "AutoPass99!",
+        "login_token_key": secrets.token_hex(80),
+        "default_mesh_id": "mesh//DEFAULT1",
+        "default_mesh_name": "HubConnect Clients",
+        "local_port": 4430,
+    }), encoding="utf-8")
+    monkeypatch.setenv("MESHCENTRAL_DIR", str(mc_dir))
+
+    imported = await mc.auto_import_local_meshcentral_if_present(db, ws1.id)
+    assert imported.local_port == 4430
+    assert imported.default_mesh_id == "mesh//DEFAULT1"
+    assert imported.default_mesh_name == "HubConnect Clients"
+
+    group = (await _cached_groups(db, ws1.id))[0]
+    assert group.mesh_id == "mesh//DEFAULT1"
+    assert group.name == "HubConnect Clients"
+    assert group.is_default is True
+
+    rival = await _cached_groups(db, ws2.id)
+    assert rival == []
 
 
 

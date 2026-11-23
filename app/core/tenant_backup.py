@@ -77,6 +77,7 @@ TENANT_SCOPE: Dict[str, Tuple] = {
     'meeting': ('direct',),
     'meshcentralagentinvite': ('direct',),
     'meshcentraldevice': ('direct',),
+    'meshcentralgroup': ('direct',),
     'meshcentralsessionlog': ('direct',),
     'meshcentralsettings': ('direct',),
     'pending_email': ('direct',),

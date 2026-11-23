@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -34,7 +35,27 @@ class MeshCentralSettings(SQLModel, table=True):
     default_mesh_id: Optional[str] = Field(default=None)
     default_mesh_name: Optional[str] = Field(default=None)
     local_install_path: Optional[str] = Field(default=None)
+    # Local MeshCentral listener used for server-side loopback calls. The public
+    # server_url is still used for browser iframes/agent download links.
+    local_port: Optional[int] = Field(default=None)
 
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class MeshCentralGroup(SQLModel, table=True):
+    """A MeshCentral device group (mesh) cached per workspace."""
+
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "mesh_id", name="uq_meshcentralgroup_ws_mesh"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    workspace_id: int = Field(foreign_key="workspace.id", index=True)
+    mesh_id: str = Field(index=True)
+    name: str = Field(index=True)
+    description: Optional[str] = Field(default=None)
+    is_default: bool = Field(default=False)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
