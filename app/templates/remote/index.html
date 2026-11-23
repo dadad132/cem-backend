@@ -321,9 +321,15 @@
         <i class="fas fa-plug text-lg"></i>
       </div>
       <div>
-        <h2 class="text-base font-bold text-slate-900">Connect your MeshCentral server to start remoting into client PCs</h2>
+        <h2 class="text-base font-bold text-slate-900">
+          {% if user.is_admin %}Connect your MeshCentral server to start remoting into client PCs{% else %}Remote Support is not enabled yet{% endif %}
+        </h2>
         <p class="text-sm text-slate-600 mt-1">
-          Point this dashboard to your MeshCentral server URL, paste your <code class="px-1.5 py-0.5 rounded bg-slate-100 text-xs">loginTokenKey</code> for 1-click passwordless client login, and sync your entire client PC fleet automatically.
+          {% if user.is_admin %}
+          Configure your MeshCentral connection in Settings and click <strong>Auto-Setup &amp; Fill</strong> to enable 1-click remote sessions and expiring client download links.
+          {% else %}
+          Ask a workspace administrator to finish setting up Remote Support.
+          {% endif %}
         </p>
       </div>
     </div>

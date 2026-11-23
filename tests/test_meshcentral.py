@@ -368,6 +368,17 @@ async def test_dashboard_device_lifecycle_sync_and_session_embedding(seeded, mon
     assert len(logs) == 2
     assert {l.view_mode for l in logs} == {"desktop", "terminal"}
 
+    # Non-admin technician sees the remote dashboard & session without any MeshCentral Setup links
+    tech_dash = await web_remote_dashboard(_request(tech.id, "/web/remote"), db=db)
+    tech_dash_html = bytes(tech_dash.body).decode()
+    assert "/web/remote/settings" not in tech_dash_html
+    assert "MeshCentral Setup" not in tech_dash_html
+
+    tech_sess = await web_remote_session(_request(tech.id, f"/web/remote/session/{dev.id}"), dev.id, mode="desktop", db=db)
+    tech_sess_html = bytes(tech_sess.body).decode()
+    assert "/web/remote/settings" not in tech_sess_html
+    assert "Open Direct Tab" not in tech_sess_html
+
     # Strict multi-tenant isolation: Rival MSP admin cannot open, pin, edit, or delete Acme's device
     with pytest.raises(HTTPException) as exc404:
         await web_remote_session(_request(other_admin.id), dev.id, mode="desktop", db=db)

@@ -156,12 +156,14 @@
           <i class="fas fa-expand"></i>
         </button>
 
+        {% if user.is_admin %}
         <a :href="directUrl" target="_blank" rel="noopener noreferrer"
            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold text-white transition"
            title="Open in new browser tab">
           <i class="fas fa-arrow-up-right-from-square"></i>
           <span class="hidden xl:inline">Pop Out</span>
         </a>
+        {% endif %}
 
         <button type="button" @click="showHelp = !showHelp"
                 class="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold text-slate-300 hover:text-white transition"
@@ -176,17 +178,21 @@
   <div x-show="showHelp" x-cloak
        class="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-900 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
     <div>
-      <strong>Blank frame or login prompt?</strong>
-      Make sure your MeshCentral <code class="px-1 py-0.5 bg-amber-100 rounded">config.json</code> has
-      <code class="px-1 py-0.5 bg-amber-100 rounded">"allowFraming": true</code> and
-      <code class="px-1 py-0.5 bg-amber-100 rounded">"allowLoginToken": true</code>, and your
-      <code class="px-1 py-0.5 bg-amber-100 rounded">loginTokenKey</code> is saved in
-      <a href="/web/remote/settings" class="underline font-semibold">MeshCentral Setup</a>.
+      <strong>Blank screen or trouble connecting?</strong>
+      {% if user.is_admin %}
+      Verify your MeshCentral connection and SSO status in
+      <a href="/web/remote/settings" class="underline font-semibold">MeshCentral Setup</a>
+      (or click <strong>Auto-Setup &amp; Fill</strong> in <a href="/web/admin/site-settings" class="underline font-semibold">Site Settings</a>).
+      {% else %}
+      Try clicking the <strong>Reconnect</strong> button above. If the issue persists, ask an administrator to check the Remote Support settings.
+      {% endif %}
     </div>
+    {% if user.is_admin %}
     <a :href="directUrl" target="_blank" rel="noopener noreferrer"
        class="flex-shrink-0 px-3 py-1.5 rounded-lg bg-amber-600 text-white font-semibold hover:bg-amber-700 transition">
       Open Direct Tab
     </a>
+    {% endif %}
   </div>
 
   <!-- Live Embedded Remote Stage + Optional Notes Panel -->
