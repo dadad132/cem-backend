@@ -1640,6 +1640,12 @@ async def proxy_agent_installer(
                                 last_error = f"unexpected {platform} installer body."
                                 continue
                             return payload, filename, spec["content_type"]
+                        elif resp.status == 404:
+                            last_error = (
+                                "MeshCentral returned HTTP 404 fetching installer. "
+                                "On first startup MeshCentral downloads ~119 MB of agent binaries from GitHub (takes ~1 minute); "
+                                "wait 30 seconds and try again."
+                            )
                         else:
                             last_error = (
                                 f"MeshCentral returned HTTP {resp.status} fetching installer."
@@ -1651,3 +1657,192 @@ async def proxy_agent_installer(
                         last_error = str(actionable_meshcentral_error(exc, settings_row))
 
     raise RuntimeError(last_error)
+
+
+# ---------------------------------------------------------------------------
+# Admin Diagnostic Report (zero CLI copy-paste required!)
+# ---------------------------------------------------------------------------
+
+async def build_meshcentral_diagnostic_report(
+    db: AsyncSession,
+    workspace_id: int,
+    mc_settings: Optional[MeshCentralSettings],
+) -> Dict[str, Any]:
+    """Assemble a secret-redacted diagnostic report for admins right inside the dashboard."""
+    import subprocess
+    from app.models.meshcentral import MeshCentralGroup
+
+    groups = (
+        await db.execute(
+            select(MeshCentralGroup)
+            .where(MeshCentralGroup.workspace_id == workspace_id)
+            .order_by(MeshCentralGroup.name.asc())
+        )
+    ).scalars().all()
+    devices = (
+        await db.execute(
+            select(MeshCentralDevice).where(MeshCentralDevice.workspace_id == workspace_id)
+        )
+    ).scalars().all()
+
+    secrets_to_redact: List[str] = []
+    if mc_settings:
+        for enc in (mc_settings.password_encrypted, mc_settings.login_token_key_encrypted):
+            dec = decrypt_secret(enc)
+            if dec:
+                secrets_to_redact.append(dec)
+
+    def _redact(text: str) -> str:
+        out = text
+        for sec in secrets_to_redact:
+            if sec and len(sec) >= 4:
+                out = out.replace(sec, "<redacted>")
+        return out
+
+    # Inspect local MeshCentral directory (read-only, never mutates config.json)
+    local_dir: Optional[Path] = None
+    candidates: List[Path] = []
+    if mc_settings and mc_settings.local_install_path:
+        candidates.append(Path(mc_settings.local_install_path).expanduser())
+    env_dir = (os.getenv("MESHCENTRAL_DIR") or get_settings().meshcentral_dir or "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir).expanduser())
+    candidates.extend([
+        Path("/opt/meshcentral"),
+        Path("/usr/local/meshcentral"),
+        Path("/srv/meshcentral"),
+    ])
+    for cand in candidates:
+        if (cand / "meshcentral-data").is_dir():
+            local_dir = cand
+            break
+
+    local_summary: Dict[str, Any] = {
+        "found": bool(local_dir),
+        "path": str(local_dir) if local_dir else None,
+        "config_json": None,
+        "autolink_json": None,
+        "service_status": "unknown",
+        "installer_log_tail": [],
+    }
+
+    if local_dir:
+        cfg_file = local_dir / "meshcentral-data" / "config.json"
+        if cfg_file.is_file():
+            try:
+                raw_cfg = json.loads(_strip_json_comments(cfg_file.read_text(encoding="utf-8")))
+                sec = raw_cfg.get("settings") or {}
+                dom = (raw_cfg.get("domains") or {}).get("") or {}
+                local_summary["config_json"] = {
+                    "Cert": sec.get("Cert") or sec.get("cert"),
+                    "Port": sec.get("Port") or sec.get("port"),
+                    "AliasPort": sec.get("AliasPort") or sec.get("aliasPort"),
+                    "TlsOffload": sec.get("TlsOffload") or sec.get("tlsOffload"),
+                    "AllowFraming": sec.get("AllowFraming", sec.get("allowFraming")),
+                    "AllowLoginToken": sec.get("AllowLoginToken", sec.get("allowLoginToken")),
+                    "NewAccounts": dom.get("NewAccounts", dom.get("newAccounts")),
+                    "certUrl": dom.get("certUrl"),
+                }
+            except Exception as exc:
+                local_summary["config_json"] = {"error": str(exc)}
+
+        al_file = local_dir / "meshcentral-data" / "cem-autolink.json"
+        if al_file.is_file():
+            try:
+                al_raw = json.loads(al_file.read_text(encoding="utf-8"))
+                for k in ("password", "login_token_key"):
+                    val = str(al_raw.get(k) or "").strip()
+                    if val:
+                        secrets_to_redact.append(val)
+                local_summary["autolink_json"] = {
+                    "server_url": al_raw.get("server_url"),
+                    "username": al_raw.get("username"),
+                    "has_password": bool(al_raw.get("password")),
+                    "has_login_token_key": bool(al_raw.get("login_token_key")),
+                    "local_port": al_raw.get("local_port"),
+                    "default_mesh_id": al_raw.get("default_mesh_id"),
+                    "default_mesh_name": al_raw.get("default_mesh_name"),
+                    "verify_ssl": al_raw.get("verify_ssl"),
+                }
+            except Exception as exc:
+                local_summary["autolink_json"] = {"error": str(exc)}
+
+    if shutil.which("systemctl"):
+        try:
+            proc = subprocess.run(
+                ["systemctl", "is-active", "meshcentral"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            local_summary["service_status"] = (proc.stdout or proc.stderr or "unknown").strip()
+        except Exception:
+            local_summary["service_status"] = "unavailable"
+
+    user_log = Path("/tmp/meshcentral-user.log")
+    if user_log.is_file():
+        try:
+            lines = user_log.read_text(encoding="utf-8", errors="replace").splitlines()
+            local_summary["installer_log_tail"] = [_redact(ln) for ln in lines[-25:]]
+        except Exception as exc:
+            local_summary["installer_log_tail"] = [f"(unreadable: {exc})"]
+
+    # Live connection probe
+    live_probe: Dict[str, Any]
+    if mc_settings and mc_settings.server_url:
+        try:
+            live_probe = await diagnose_meshcentral_connection(mc_settings, timeout=8.0)
+        except Exception as exc:
+            live_probe = {"ok": False, "error": _redact(str(exc)), "hint": ""}
+    else:
+        live_probe = {"ok": False, "error": "MeshCentral Server URL is not configured yet.", "hint": ""}
+
+    settings_summary = (
+        {
+            "enabled": bool(mc_settings.enabled),
+            "server_url": mc_settings.server_url,
+            "domain": mc_settings.domain or "",
+            "username": mc_settings.username,
+            "has_password": bool(mc_settings.password_encrypted),
+            "has_login_token_key": bool(mc_settings.login_token_key_encrypted),
+            "login_user_id": mc_settings.login_user_id,
+            "local_install_path": mc_settings.local_install_path,
+            "local_port": mc_settings.local_port,
+            "default_mesh_id": mc_settings.default_mesh_id,
+            "default_mesh_name": mc_settings.default_mesh_name,
+            "verify_ssl": bool(mc_settings.verify_ssl),
+        }
+        if mc_settings
+        else None
+    )
+
+    lines_out = [
+        f"=== CEM MeshCentral Diagnostic Report ({datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}) ===",
+        f"Workspace ID: {workspace_id}",
+        f"App Domain:   {get_settings().app_domain}",
+        "",
+        "[1. Saved CEM Settings]",
+        json.dumps(settings_summary, indent=2),
+        "",
+        f"[2. Live Connection Probe] ok={live_probe.get('ok')}",
+        _redact(json.dumps(live_probe, indent=2)),
+        "",
+        f"[3. Cached Groups ({len(groups)}) & Devices ({len(devices)}, online={sum(1 for d in devices if d.is_online)})]",
+        json.dumps([{"mesh_id": g.mesh_id, "name": g.name, "is_default": g.is_default} for g in groups], indent=2),
+        "",
+        "[4. Local Server Engine Inspection]",
+        json.dumps(local_summary, indent=2),
+    ]
+    report_text = _redact("\n".join(lines_out)) + "\n"
+
+    return {
+        "success": True,
+        "ok": bool(live_probe.get("ok")),
+        "settings": settings_summary,
+        "live_probe": live_probe,
+        "groups_count": len(groups),
+        "devices_count": len(devices),
+        "local": local_summary,
+        "report_text": report_text,
+    }

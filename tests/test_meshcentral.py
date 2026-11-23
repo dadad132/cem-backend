@@ -1459,9 +1459,13 @@ def test_setup_script_group_parser_handles_real_shapes_and_fails_closed():
     assert obj.returncode == 0
     assert obj.stdout.strip().splitlines()[:3] == ["2", "mesh//A", "Client PCs"]
 
-    arr = run('[{"id": "mesh//Z", "name": "Client PCs"}]')
+    arr = run('[{"_id": "mesh//Z", "name": "Client PCs"}]')
     assert arr.returncode == 0
     assert arr.stdout.strip().splitlines()[:3] == ["1", "mesh//Z", "Client PCs"]
+
+    csv_table = run('id, name\r\n---------------\n"ABC123", "Client PCs"\n')
+    assert csv_table.returncode == 0
+    assert csv_table.stdout.strip().splitlines()[:3] == ["1", "mesh//ABC123", "Client PCs"]
 
     ansi = run('\x1b[0m[{"id": "mesh//Q", "name": "Client PCs"}]')
     assert ansi.returncode == 0 and "mesh//Q" in ansi.stdout
@@ -1472,6 +1476,56 @@ def test_setup_script_group_parser_handles_real_shapes_and_fails_closed():
     garbage = run("meshctrl: auth failed")
     assert garbage.returncode == 2
     assert "unparseable" in garbage.stderr.lower()
+
+
+@pytest.mark.asyncio
+async def test_admin_diagnostics_report_is_admin_only_and_redacts_secrets(seeded, tmp_path, monkeypatch):
+    from app.web.meshcentral_routes import web_remote_settings_diagnostics
+
+    db, ws1, _ws2, admin, tech, _other = seeded
+    secret_pass = "UltraSecretMeshPass999!"
+    secret_key = secrets.token_hex(40)
+
+    db.add(
+        MeshCentralSettings(
+            workspace_id=ws1.id,
+            enabled=True,
+            server_url="https://tickets.hubconnect.co.za:4433",
+            username="admin",
+            password_encrypted=mc.encrypt_secret(secret_pass),
+            login_token_key_encrypted=mc.encrypt_secret(secret_key),
+            local_install_path=str(tmp_path / "mc"),
+            local_port=4430,
+        )
+    )
+    await db.commit()
+
+    # Non-admin technician gets HTTP 403
+    with pytest.raises(HTTPException) as exc403:
+        await web_remote_settings_diagnostics(_request(tech.id), download=0, db=db)
+    assert exc403.value.status_code == 403
+
+    # Mock live probe echoing a secret to verify redaction
+    async def fake_diag(_cfg, timeout=8.0):
+        return {"ok": False, "error": f"Auth failed with {secret_pass}", "hint": "Check credentials."}
+
+    monkeypatch.setattr("app.core.meshcentral.diagnose_meshcentral_connection", fake_diag)
+
+    resp = await web_remote_settings_diagnostics(_request(admin.id), download=0, db=db)
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store"
+    body = json.loads(resp.body)
+    assert body["success"] is True
+    assert secret_pass not in body["report_text"]
+    assert secret_key not in body["report_text"]
+    assert "<redacted>" in body["report_text"]
+    assert "tickets.hubconnect.co.za:4433" in body["report_text"]
+
+    dl = await web_remote_settings_diagnostics(_request(admin.id), download=1, db=db)
+    assert dl.status_code == 200
+    assert "attachment; filename=\"meshcentral-diagnostics.txt\"" in dl.headers["content-disposition"]
+    assert secret_pass not in dl.body.decode("utf-8")
+
 
 
 

@@ -657,17 +657,19 @@ verify_failed() {
     exit 1
 }
 
-# meshctrl prints a JSON object/array (sometimes after ANSI/preamble text) with
-# one entry per device group. Emit: <count>\n<matched mesh id>\n<matched name>.
+# meshctrl --json prints a JSON array of mesh objects with `_id` and `name`
+# (sometimes after ANSI/preamble text). Also accepts meshctrl's plain CSV table
+# (`"id", "name"`) as a fallback. Emit: <count>\n<matched mesh id>\n<matched name>.
 # Exit 2 on unparseable non-empty output so a parse failure is NEVER mistaken
 # for "zero groups" (which would create duplicate groups on every re-run).
 parse_device_groups() {
 python3 -c '
-import json, re, sys
+import csv, io, json, re, sys
 raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", sys.stdin.read()).strip()
 if not raw:
     print(0); print(""); print("")
     sys.exit(0)
+groups = []
 match = re.search(r"[\[{]", raw)
 data = None
 if match:
@@ -675,29 +677,42 @@ if match:
         data = json.loads(raw[match.start():])
     except Exception:
         data = None
-if data is None:
-    sys.stderr.write("unparseable meshctrl listdevicegroups output\n")
-    sys.exit(2)
-groups = []
-if isinstance(data, dict):
-    for key, value in data.items():
-        if isinstance(value, dict):
-            gid = str(value.get("id") or value.get("meshid") or key)
-            name = str(value.get("name") or key)
-        else:
-            gid, name = str(key), str(value)
-        groups.append((gid, name))
-elif isinstance(data, list):
-    for value in data:
-        if isinstance(value, dict):
-            gid = str(value.get("id") or value.get("meshid") or "")
-            name = str(value.get("name") or "")
-        else:
-            gid, name = "", str(value)
-        groups.append((gid, name))
+if data is not None:
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, dict):
+                gid = str(value.get("_id") or value.get("id") or value.get("meshid") or key)
+                name = str(value.get("name") or key)
+            else:
+                gid, name = str(key), str(value)
+            groups.append((gid, name))
+    elif isinstance(data, list):
+        for value in data:
+            if isinstance(value, dict):
+                gid = str(value.get("_id") or value.get("id") or value.get("meshid") or "")
+                name = str(value.get("name") or "")
+            else:
+                gid, name = "", str(value)
+            groups.append((gid, name))
+    else:
+        sys.stderr.write("unexpected meshctrl group payload type\n")
+        sys.exit(2)
 else:
-    sys.stderr.write("unexpected meshctrl group payload type\n")
-    sys.exit(2)
+    # Fallback for meshctrl CSV table output ("id, name\n---\n\"<id>\", \"<name>\"")
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if lines and lines[0].lower().replace(" ", "") == "id,name":
+        for ln in lines[1:]:
+            if set(ln) <= {"-"}:
+                continue
+            row = next(csv.reader(io.StringIO(ln), skipinitialspace=True), [])
+            if len(row) >= 2 and row[0].strip():
+                gid = row[0].strip()
+                if not gid.startswith("mesh/"):
+                    gid = f"mesh//{gid}"
+                groups.append((gid, row[1].strip()))
+    else:
+        sys.stderr.write("unparseable meshctrl listdevicegroups output\n")
+        sys.exit(2)
 # Prefer the canonical installer group, otherwise fall back to the first group.
 chosen = next((g for g in groups if g[1].strip().lower() == "client pcs"), None)
 if chosen is None and groups:
@@ -724,7 +739,7 @@ sys.stdout.write(text)
 
 refresh_groups() {
     local output parsed count mid name
-    output=$(node "$MESHCTRL" "${MESHCTRL_ARGS[@]}" listdevicegroups 2>&1) || return 1
+    output=$(node "$MESHCTRL" "${MESHCTRL_ARGS[@]}" listdevicegroups --json 2>&1) || return 1
     printf '%s\n' "$output" | log_meshctrl_output
     parsed=$(printf '%s\n' "$output" | parse_device_groups) || return 2
     count=$(printf '%s\n' "$parsed" | sed -n '1p')

@@ -20,6 +20,7 @@ from app.core.meshcentral import (
     build_embed_url,
     build_embed_url_async,
     build_login_user_id,
+    build_meshcentral_diagnostic_report,
     classify_meshcentral_error,
     create_meshcentral_group,
     diagnose_meshcentral_connection,
@@ -1007,6 +1008,32 @@ async def web_remote_settings_generate_key(request: Request, db: AsyncSession = 
     if redirect:
         return JSONResponse({"success": False, "error": "Authentication required"}, status_code=401)
     return JSONResponse({"success": True, "login_token_key": generate_random_login_token_key()})
+
+
+@router.get("/remote/settings/diagnostics")
+async def web_remote_settings_diagnostics(
+    request: Request,
+    download: int = Query(default=0),
+    db: AsyncSession = Depends(get_session),
+):
+    """Return a secret-redacted MeshCentral diagnostic report (admin-only)."""
+    user, redirect = await _require_workspace_admin(request, db)
+    if redirect:
+        return JSONResponse({"success": False, "error": "Authentication required"}, status_code=401)
+
+    mc_settings = await _get_or_none_settings(db, user.workspace_id)
+    report = await build_meshcentral_diagnostic_report(db, user.workspace_id, mc_settings)
+
+    if download:
+        return Response(
+            content=report["report_text"].encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="meshcentral-diagnostics.txt"',
+                "Cache-Control": "no-store",
+            },
+        )
+    return JSONResponse(report, headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------------------
