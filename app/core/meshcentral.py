@@ -427,9 +427,11 @@ def build_control_ws_candidates(settings_row: MeshCentralSettings) -> List[Tuple
     candidates: List[Tuple[str, Dict[str, str]]] = []
     password = decrypt_secret(settings_row.password_encrypted)
     if settings_row.username and password:
-        u_b64 = base64.b64encode(settings_row.username.strip().encode("utf-8")).decode("ascii")
+        raw_user = settings_row.username.strip()
         p_b64 = base64.b64encode(password.encode("utf-8")).decode("ascii")
-        candidates.append((ws_url, {"x-meshauth": f"{u_b64},{p_b64}"}))
+        for uname in dict.fromkeys([raw_user, raw_user.lower()]):
+            u_b64 = base64.b64encode(uname.encode("utf-8")).decode("ascii")
+            candidates.append((ws_url, {"x-meshauth": f"{u_b64},{p_b64}"}))
 
     token_key = decrypt_secret(settings_row.login_token_key_encrypted)
     login_uid = build_login_user_id(
@@ -438,8 +440,9 @@ def build_control_ws_candidates(settings_row: MeshCentralSettings) -> List[Tuple
         settings_row.login_user_id,
     )
     if token_key and login_uid:
-        token = generate_login_token(token_key, login_uid)
-        candidates.append((f"{ws_url}?{urlencode({'auth': token}, safe='@$')}", {}))
+        for uid in dict.fromkeys([login_uid, login_uid.lower()]):
+            token = generate_login_token(token_key, uid)
+            candidates.append((f"{ws_url}?{urlencode({'auth': token}, safe='@$')}", {}))
 
     if not candidates:
         raise ValueError(
