@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import shutil
 import time
 from datetime import datetime
@@ -1574,15 +1575,25 @@ async def proxy_agent_installer(
         server_base = _base_with_domain(settings_row.server_url or "", settings_row.domain).rstrip("/")
         script_url = f"{server_base}/meshagents?script=1"
         insecure_flag = " -k" if not settings_row.verify_ssl else ""
+        q_brand = shlex.quote(f"Downloading {brand_name} Remote Support agent...")
+        q_script_url = shlex.quote(script_url)
+        q_server_base = shlex.quote(server_base)
+        q_mesh_id = shlex.quote(clean_mesh)
         script = (
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
-            f'echo "Downloading {brand_name} Remote Support agent..."\n'
-            f'TMP_SCRIPT="$(mktemp /tmp/meshinstall.XXXXXX.sh)"\n'
-            f'trap \'rm -f "$TMP_SCRIPT"\' EXIT\n'
-            f'curl -fsSL{insecure_flag} "{script_url}" -o "$TMP_SCRIPT"\n'
+            f"echo {q_brand}\n"
+            'TMP_DIR="$(mktemp -d /tmp/meshinstall.XXXXXX)"\n'
+            'trap \'rm -rf "$TMP_DIR"\' EXIT\n'
+            'TMP_SCRIPT="$TMP_DIR/meshinstall.sh"\n'
+            f'curl -fsSL{insecure_flag} {q_script_url} | tr -d \'\\r\' > "$TMP_SCRIPT"\n'
             'chmod 755 "$TMP_SCRIPT"\n'
-            f'sudo "$TMP_SCRIPT" "{server_base}" "{clean_mesh}"\n'
+            'cd "$TMP_DIR"\n'
+            'if [ "$(id -u)" -eq 0 ]; then\n'
+            f'  bash "$TMP_SCRIPT" {q_server_base} {q_mesh_id}\n'
+            'else\n'
+            f'  sudo bash "$TMP_SCRIPT" {q_server_base} {q_mesh_id}\n'
+            'fi\n'
         )
         return script.encode("utf-8"), filename, spec["content_type"]
 

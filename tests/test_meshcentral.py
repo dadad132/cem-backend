@@ -1527,5 +1527,35 @@ async def test_admin_diagnostics_report_is_admin_only_and_redacts_secrets(seeded
     assert secret_pass not in dl.body.decode("utf-8")
 
 
+@pytest.mark.asyncio
+async def test_linux_installer_single_quotes_dollar_mesh_ids_and_passes_bash_syntax():
+    import subprocess
+
+    cfg = MeshCentralSettings(
+        workspace_id=1,
+        enabled=True,
+        server_url="https://tickets.hubconnect.co.za:4433",
+        verify_ssl=True,
+    )
+    mesh_id_with_dollar = "mesh//abc$sUsy@123"
+    payload, filename, ctype = await mc.proxy_agent_installer(
+        cfg,
+        mesh_id_with_dollar,
+        platform="linux",
+        brand_name="Kyotech",
+    )
+    script_text = payload.decode("utf-8")
+    assert filename == "Kyotech-Support-Linux.sh"
+    assert ctype == "text/x-shellscript"
+    # Mesh ID containing $sUsy MUST be single-quoted so bash `set -u` never expands $sUsy
+    assert "'abc$sUsy@123'" in script_text
+    assert '"abc$sUsy@123"' not in script_text
+    assert "tr -d '\\r'" in script_text
+
+    check = subprocess.run(["bash", "-n"], input=script_text, text=True, capture_output=True)
+    assert check.returncode == 0, check.stderr
+
+
+
 
 
