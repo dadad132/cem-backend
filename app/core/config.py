@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     # Email-to-Ticket Configuration
     email_check_interval: int = Field(120, alias="EMAIL_CHECK_INTERVAL")  # Default: 2 minutes (120 seconds)
 
+    # Optional local MeshCentral engine directory (set by setup_meshcentral.sh)
+    meshcentral_dir: str = Field("", alias="MESHCENTRAL_DIR")
+
     # Google OAuth Configuration
     google_client_id: str = Field("", alias="GOOGLE_CLIENT_ID")
     google_client_secret: str = Field("", alias="GOOGLE_CLIENT_SECRET")
@@ -56,6 +59,7 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         populate_by_name = True
+        extra = "ignore"
 
 
 @lru_cache

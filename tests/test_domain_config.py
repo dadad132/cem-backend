@@ -16,6 +16,15 @@ def test_default_domain_settings_include_tickets_hubconnect():
     https_cfg = Settings(_env_file=None, APP_HTTPS_ONLY=True)
     assert https_cfg.public_base_url == "https://tickets.hubconnect.co.za"
 
+    # Extra .env keys (like MESHCENTRAL_DIR written by setup_meshcentral.sh or SMTP_*) must never crash startup
+    extra_cfg = Settings(
+        _env_file=None,
+        MESHCENTRAL_DIR="/opt/meshcentral",
+        SMTP_HOST="smtp.example.com",
+        UNKNOWN_CUSTOM_VAR="ok",
+    )
+    assert extra_cfg.meshcentral_dir == "/opt/meshcentral"
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scheme", ["http", "https"])

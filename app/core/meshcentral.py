@@ -25,10 +25,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
-import aiohttp
-from cryptography.fernet import Fernet, InvalidToken
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +32,28 @@ from app.core.config import get_settings
 from app.models.meshcentral import MeshCentralDevice, MeshCentralSettings
 
 logger = logging.getLogger(__name__)
+
+
+def _require_aiohttp():
+    try:
+        import aiohttp
+        return aiohttp
+    except ImportError as exc:
+        raise RuntimeError(
+            "MeshCentral live sync requires 'aiohttp'. Run: pip install aiohttp"
+        ) from exc
+
+
+def _require_cryptography():
+    try:
+        from cryptography.fernet import Fernet, InvalidToken
+        from cryptography.hazmat.backends import default_backend
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        return Fernet, InvalidToken, default_backend, Cipher, algorithms, modes
+    except ImportError as exc:
+        raise RuntimeError(
+            "MeshCentral encryption/SSO requires 'cryptography'. Run: pip install cryptography"
+        ) from exc
 
 # Official MeshCentral viewmode IDs (https://docs.meshcentral.com/meshcentral/)
 VIEW_MODE_MAP: Dict[str, int] = {
@@ -96,7 +114,8 @@ _HEX_KEY_RE = re.compile(r"\b([0-9a-fA-F]{64,256})\b")
 # At-rest secret encryption
 # ---------------------------------------------------------------------------
 
-def _fernet() -> Fernet:
+def _fernet():
+    Fernet, *_ = _require_cryptography()
     raw_secret = (get_settings().secret_key or "change-me-in-production").encode("utf-8")
     digest = hashlib.sha256(raw_secret + b":meshcentral-secret-v1").digest()
     return Fernet(base64.urlsafe_b64encode(digest))
@@ -114,6 +133,7 @@ def encrypt_secret(plaintext: Optional[str]) -> Optional[str]:
 def decrypt_secret(ciphertext: Optional[str]) -> Optional[str]:
     if not ciphertext:
         return None
+    _, InvalidToken, *_ = _require_cryptography()
     try:
         return _fernet().decrypt(ciphertext.encode("ascii")).decode("utf-8")
     except (InvalidToken, ValueError, TypeError):
@@ -266,6 +286,7 @@ def generate_login_token(
         "a": 3,
         "time": int(time.time() if now is None else now),
     }
+    _, _, default_backend, Cipher, algorithms, modes = _require_cryptography()
     plaintext = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     encryptor = Cipher(
         algorithms.AES(key),
@@ -280,6 +301,7 @@ def generate_login_token(
 
 def decode_login_token(token: str, login_token_key: str | bytes) -> Dict[str, Any]:
     """Decode and verify a MeshCentral login token (used for diagnostics and tests)."""
+    _, _, default_backend, Cipher, algorithms, modes = _require_cryptography()
     key = _derive_token_key_bytes(login_token_key)
     restored = token.translate(str.maketrans("@$", "+/"))
     pad = len(restored) % 4
@@ -491,7 +513,9 @@ async def fetch_meshcentral_inventory(
     timeout: float = 12.0,
 ) -> Tuple[Dict[str, str], List[Dict[str, Any]]]:
     """Connect to MeshCentral `/control.ashx` over WebSocket and fetch live groups + devices."""
+    aiohttp = _require_aiohttp()
     ws_url, headers = build_control_ws_url(settings_row)
+    aiohttp = _require_aiohttp()
     ssl_param: Any = None if settings_row.verify_ssl else False
     client_timeout = aiohttp.ClientTimeout(total=timeout)
 
@@ -644,7 +668,9 @@ async def fetch_meshcentral_auth_cookie(
     MeshCentral Server URL + Username + Password, without requiring a manual CLI
     `--loginTokenKey` copy-paste.
     """
+    aiohttp = _require_aiohttp()
     ws_url, headers = build_control_ws_url(settings_row)
+    aiohttp = _require_aiohttp()
     ssl_param: Any = None if settings_row.verify_ssl else False
     client_timeout = aiohttp.ClientTimeout(total=timeout)
 
@@ -730,11 +756,13 @@ async def create_meshcentral_group(
     timeout: float = 10.0,
 ) -> Dict[str, str]:
     """Create a new Agent-Only device group (mesh) directly on the MeshCentral server."""
+    aiohttp = _require_aiohttp()
     clean_name = (name or "").strip()
     if not clean_name:
         raise ValueError("Group name is required.")
 
     ws_url, headers = build_control_ws_url(settings_row)
+    aiohttp = _require_aiohttp()
     ssl_param: Any = None if settings_row.verify_ssl else False
     client_timeout = aiohttp.ClientTimeout(total=timeout)
 
@@ -1116,6 +1144,7 @@ async def proxy_agent_installer(
         )
         return script.encode("utf-8"), filename, spec["content_type"]
 
+    aiohttp = _require_aiohttp()
     ssl_param: Any = None if settings_row.verify_ssl else False
     headers: Dict[str, str] = {}
     password = decrypt_secret(settings_row.password_encrypted)
