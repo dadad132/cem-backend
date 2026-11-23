@@ -407,8 +407,13 @@ def build_direct_url(
 # WebSocket live inventory sync (`/control.ashx`)
 # ---------------------------------------------------------------------------
 
-def build_control_ws_url(settings_row: MeshCentralSettings) -> Tuple[str, Dict[str, str]]:
-    """Build the `/control.ashx` WebSocket URL and auth headers."""
+def build_control_ws_candidates(settings_row: MeshCentralSettings) -> List[Tuple[str, Dict[str, str]]]:
+    """Return ordered `(ws_url, headers)` auth attempts for `/control.ashx`.
+
+    Supports both `x-meshauth` (username + password) and `?auth=<loginToken>`
+    so if one method returns `noauth`, callers can transparently fall back to
+    the other.
+    """
     if not settings_row.server_url:
         raise ValueError("MeshCentral server URL is not configured.")
     base = normalize_server_url(settings_row.server_url)
@@ -419,13 +424,12 @@ def build_control_ws_url(settings_row: MeshCentralSettings) -> Tuple[str, Dict[s
     ws_path = f"{path_prefix}/{dom}/control.ashx" if dom else f"{path_prefix}/control.ashx"
     ws_url = f"{ws_scheme}://{parsed.netloc}{ws_path}"
 
-    headers: Dict[str, str] = {}
+    candidates: List[Tuple[str, Dict[str, str]]] = []
     password = decrypt_secret(settings_row.password_encrypted)
     if settings_row.username and password:
         u_b64 = base64.b64encode(settings_row.username.strip().encode("utf-8")).decode("ascii")
         p_b64 = base64.b64encode(password.encode("utf-8")).decode("ascii")
-        headers["x-meshauth"] = f"{u_b64},{p_b64}"
-        return ws_url, headers
+        candidates.append((ws_url, {"x-meshauth": f"{u_b64},{p_b64}"}))
 
     token_key = decrypt_secret(settings_row.login_token_key_encrypted)
     login_uid = build_login_user_id(
@@ -435,12 +439,18 @@ def build_control_ws_url(settings_row: MeshCentralSettings) -> Tuple[str, Dict[s
     )
     if token_key and login_uid:
         token = generate_login_token(token_key, login_uid)
-        ws_url = f"{ws_url}?{urlencode({'auth': token}, safe='@$')}"
-        return ws_url, headers
+        candidates.append((f"{ws_url}?{urlencode({'auth': token}, safe='@$')}", {}))
 
-    raise ValueError(
-        "Configure either a MeshCentral username + password or a loginTokenKey + username before syncing."
-    )
+    if not candidates:
+        raise ValueError(
+            "Configure either a MeshCentral username + password or a loginTokenKey + username before syncing."
+        )
+    return candidates
+
+
+def build_control_ws_url(settings_row: MeshCentralSettings) -> Tuple[str, Dict[str, str]]:
+    """Build the primary `/control.ashx` WebSocket URL and auth headers."""
+    return build_control_ws_candidates(settings_row)[0]
 
 
 def parse_inventory_messages(messages: List[Dict[str, Any]]) -> Tuple[Dict[str, str], List[Dict[str, Any]]]:
@@ -514,61 +524,72 @@ async def fetch_meshcentral_inventory(
 ) -> Tuple[Dict[str, str], List[Dict[str, Any]]]:
     """Connect to MeshCentral `/control.ashx` over WebSocket and fetch live groups + devices."""
     aiohttp = _require_aiohttp()
-    ws_url, headers = build_control_ws_url(settings_row)
-    aiohttp = _require_aiohttp()
+    candidates = build_control_ws_candidates(settings_row)
     ssl_param: Any = None if settings_row.verify_ssl else False
     client_timeout = aiohttp.ClientTimeout(total=timeout)
 
-    collected: List[Dict[str, Any]] = []
-    got_meshes = False
-    got_nodes = False
+    last_error: Optional[Exception] = None
+    for ws_url, headers in candidates:
+        collected: List[Dict[str, Any]] = []
+        got_meshes = False
+        got_nodes = False
+        noauth_failed = False
 
-    async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        async with session.ws_connect(
-            ws_url,
-            headers=headers,
-            ssl=ssl_param,
-            heartbeat=10.0,
-            max_msg_size=16 * 1024 * 1024,
-        ) as ws:
-            await ws.send_json({"action": "meshes"})
-            await ws.send_json({"action": "nodes"})
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.ws_connect(
+                ws_url,
+                headers=headers,
+                ssl=ssl_param,
+                heartbeat=10.0,
+                max_msg_size=16 * 1024 * 1024,
+            ) as ws:
+                await ws.send_json({"action": "meshes"})
+                await ws.send_json({"action": "nodes"})
 
-            deadline = time.monotonic() + timeout
-            while not (got_meshes and got_nodes):
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    msg = await ws.receive(timeout=remaining)
-                except asyncio.TimeoutError:
-                    break
-
-                if msg.type == aiohttp.WSMsgType.TEXT:
+                deadline = time.monotonic() + timeout
+                while not (got_meshes and got_nodes):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
                     try:
-                        data = json.loads(msg.data)
-                    except ValueError:
-                        continue
-                    if not isinstance(data, dict):
-                        continue
-                    action = data.get("action")
-                    if action == "close":
-                        cause = data.get("cause") or data.get("msg") or "Authentication failed"
-                        raise RuntimeError(f"MeshCentral closed the connection: {cause}")
-                    if action == "meshes":
-                        got_meshes = True
-                        collected.append(data)
-                    elif action == "nodes":
-                        got_nodes = True
-                        collected.append(data)
-                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                    break
+                        msg = await ws.receive(timeout=remaining)
+                    except asyncio.TimeoutError:
+                        break
 
-    if not got_meshes and not got_nodes:
-        raise RuntimeError(
-            "Connected to MeshCentral but received no inventory data. Check credentials and user permissions."
-        )
-    return parse_inventory_messages(collected)
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        try:
+                            data = json.loads(msg.data)
+                        except ValueError:
+                            continue
+                        if not isinstance(data, dict):
+                            continue
+                        action = data.get("action")
+                        if action == "close":
+                            cause = data.get("cause") or data.get("msg") or "Authentication failed"
+                            last_error = RuntimeError(f"MeshCentral closed the connection: {cause}")
+                            if "noauth" in str(cause).lower():
+                                noauth_failed = True
+                                break
+                            raise last_error
+                        if action == "meshes":
+                            got_meshes = True
+                            collected.append(data)
+                        elif action == "nodes":
+                            got_nodes = True
+                            collected.append(data)
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
+
+        if got_meshes or got_nodes:
+            return parse_inventory_messages(collected)
+        if not noauth_failed:
+            break
+
+    if last_error:
+        raise last_error
+    raise RuntimeError(
+        "Connected to MeshCentral but received no inventory data. Check credentials and user permissions."
+    )
 
 
 async def sync_workspace_devices(
@@ -761,65 +782,76 @@ async def create_meshcentral_group(
     if not clean_name:
         raise ValueError("Group name is required.")
 
-    ws_url, headers = build_control_ws_url(settings_row)
-    aiohttp = _require_aiohttp()
+    candidates = build_control_ws_candidates(settings_row)
     ssl_param: Any = None if settings_row.verify_ssl else False
     client_timeout = aiohttp.ClientTimeout(total=timeout)
 
-    async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        async with session.ws_connect(
-            ws_url,
-            headers=headers,
-            ssl=ssl_param,
-            heartbeat=10.0,
-            max_msg_size=8 * 1024 * 1024,
-        ) as ws:
-            await ws.send_json({
-                "action": "createmesh",
-                "meshname": clean_name,
-                "meshtype": 2,  # 2 = Agent-only standard device group
-                "desc": (description or "").strip(),
-            })
-            await asyncio.sleep(0.25)
-            await ws.send_json({"action": "meshes"})
+    last_error: Optional[Exception] = None
+    for ws_url, headers in candidates:
+        noauth_failed = False
+        created_id: Optional[str] = None
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.ws_connect(
+                ws_url,
+                headers=headers,
+                ssl=ssl_param,
+                heartbeat=10.0,
+                max_msg_size=8 * 1024 * 1024,
+            ) as ws:
+                await ws.send_json({
+                    "action": "createmesh",
+                    "meshname": clean_name,
+                    "meshtype": 2,  # 2 = Agent-only standard device group
+                    "desc": (description or "").strip(),
+                })
+                await asyncio.sleep(0.25)
+                await ws.send_json({"action": "meshes"})
 
-            deadline = time.monotonic() + timeout
-            created_id: Optional[str] = None
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    msg = await ws.receive(timeout=remaining)
-                except asyncio.TimeoutError:
-                    break
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    try:
-                        data = json.loads(msg.data)
-                    except ValueError:
-                        continue
-                    if not isinstance(data, dict):
-                        continue
-                    action = data.get("action")
-                    if action == "close":
-                        cause = data.get("cause") or data.get("msg") or "Authentication failed"
-                        raise RuntimeError(f"MeshCentral closed the connection: {cause}")
-                    if action == "createmesh" and data.get("meshid"):
-                        created_id = str(data["meshid"])
+                deadline = time.monotonic() + timeout
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         break
-                    if action == "meshes":
-                        for mesh in data.get("meshes") or []:
-                            if (mesh.get("name") or "").strip().lower() == clean_name.lower() and mesh.get("_id"):
-                                created_id = str(mesh["_id"])
+                    try:
+                        msg = await ws.receive(timeout=remaining)
+                    except asyncio.TimeoutError:
+                        break
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        try:
+                            data = json.loads(msg.data)
+                        except ValueError:
+                            continue
+                        if not isinstance(data, dict):
+                            continue
+                        action = data.get("action")
+                        if action == "close":
+                            cause = data.get("cause") or data.get("msg") or "Authentication failed"
+                            last_error = RuntimeError(f"MeshCentral closed the connection: {cause}")
+                            if "noauth" in str(cause).lower():
+                                noauth_failed = True
                                 break
-                        if created_id:
+                            raise last_error
+                        if action == "createmesh" and data.get("meshid"):
+                            created_id = str(data["meshid"])
                             break
-                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                    break
+                        if action == "meshes":
+                            for mesh in data.get("meshes") or []:
+                                if (mesh.get("name") or "").strip().lower() == clean_name.lower() and mesh.get("_id"):
+                                    created_id = str(mesh["_id"])
+                                    break
+                            if created_id:
+                                break
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
 
-    if not created_id:
-        raise RuntimeError(f"MeshCentral did not confirm creation of group '{clean_name}'.")
-    return {"mesh_id": created_id, "mesh_name": clean_name}
+        if created_id:
+            return {"mesh_id": created_id, "mesh_name": clean_name}
+        if not noauth_failed:
+            break
+
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"MeshCentral did not confirm creation of group '{clean_name}'.")
 
 
 def _strip_json_comments(text: str) -> str:

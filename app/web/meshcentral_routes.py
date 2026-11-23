@@ -666,15 +666,18 @@ async def web_remote_settings_save(
     row.verify_ssl = verify_ssl in ("1", "true", "on", "yes")
     row.updated_at = now
 
-    if clear_password in ("1", "true", "on"):
-        row.password_encrypted = None
-    elif password and password.strip():
-        row.password_encrypted = encrypt_secret(password)
+    try:
+        if clear_password in ("1", "true", "on"):
+            row.password_encrypted = None
+        elif password and password.strip():
+            row.password_encrypted = encrypt_secret(password)
 
-    if clear_login_token_key in ("1", "true", "on"):
-        row.login_token_key_encrypted = None
-    elif login_token_key and login_token_key.strip():
-        row.login_token_key_encrypted = encrypt_secret(login_token_key)
+        if clear_login_token_key in ("1", "true", "on"):
+            row.login_token_key_encrypted = None
+        elif login_token_key and login_token_key.strip():
+            row.login_token_key_encrypted = encrypt_secret(login_token_key)
+    except RuntimeError as exc:
+        return _settings_redirect(request, return_to, str(exc), ok=False)
 
     await db.commit()
     return _settings_redirect(request, return_to, "MeshCentral settings saved successfully.", ok=True)

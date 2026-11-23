@@ -560,10 +560,15 @@ print_status "Wrote $CFG_FILE (AllowFraming=true, AllowLoginToken=true, AliasPor
 # ─── Stop existing service (if any) before offline account & token setup ─────
 systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
-print_info "Creating internal engine admin account '${ADMIN_USER}'..."
+print_info "Creating / syncing internal engine admin account '${ADMIN_USER}'..."
 su -s /bin/bash "$MC_USER" -c \
     "cd '$MC_DIR' && node node_modules/meshcentral --createaccount '$ADMIN_USER' --pass '$ADMIN_PASS'" \
     >/tmp/meshcentral-user.log 2>&1 || true
+# If the account already existed from a previous run, --createaccount leaves the
+# old password untouched; --resetaccount ensures the password always matches.
+su -s /bin/bash "$MC_USER" -c \
+    "cd '$MC_DIR' && node node_modules/meshcentral --resetaccount '$ADMIN_USER' --pass '$ADMIN_PASS'" \
+    >>/tmp/meshcentral-user.log 2>&1 || true
 su -s /bin/bash "$MC_USER" -c \
     "cd '$MC_DIR' && node node_modules/meshcentral --adminaccount '$ADMIN_USER'" \
     >>/tmp/meshcentral-user.log 2>&1 || true
