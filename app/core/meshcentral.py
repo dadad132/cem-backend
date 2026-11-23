@@ -869,12 +869,26 @@ async def autodetect_local_meshcentral(custom_path: Optional[str] = None) -> Dic
             "config_updated": False,
             "login_token_key": None,
             "suggested_url": None,
+            "autolink": None,
             "notes": [],
         }
 
     notes: List[str] = []
     config_updated = False
     suggested_url: Optional[str] = None
+    autolink: Optional[Dict[str, Any]] = None
+
+    # Read optional cem-autolink.json written by setup_meshcentral.sh
+    autolink_file = found_dir / "meshcentral-data" / "cem-autolink.json"
+    if autolink_file.is_file():
+        try:
+            al_data = json.loads(autolink_file.read_text(encoding="utf-8"))
+            if isinstance(al_data, dict):
+                autolink = al_data
+                if al_data.get("server_url"):
+                    suggested_url = str(al_data["server_url"]).strip()
+        except Exception as exc:
+            notes.append(f"Could not read cem-autolink.json: {exc}")
 
     try:
         raw_text = config_file.read_text(encoding="utf-8")
@@ -912,10 +926,12 @@ async def autodetect_local_meshcentral(custom_path: Optional[str] = None) -> Dic
     except Exception as exc:
         notes.append(f"Could not edit local config.json: {exc}")
 
-    login_token_key: Optional[str] = None
+    login_token_key: Optional[str] = (
+        str(autolink.get("login_token_key") or "").strip() if autolink else None
+    ) or None
     mc_entry = found_dir / "node_modules" / "meshcentral"
     node_bin = shutil.which("node")
-    if node_bin and mc_entry.exists():
+    if not login_token_key and node_bin and mc_entry.exists():
         try:
             proc = await asyncio.create_subprocess_exec(
                 node_bin,
@@ -940,8 +956,90 @@ async def autodetect_local_meshcentral(custom_path: Optional[str] = None) -> Dic
         "config_updated": config_updated,
         "login_token_key": login_token_key,
         "suggested_url": suggested_url,
+        "autolink": autolink,
         "notes": notes,
     }
+
+
+async def auto_import_local_meshcentral_if_present(
+    db: AsyncSession,
+    workspace_id: int,
+    custom_path: Optional[str] = None,
+) -> Optional[MeshCentralSettings]:
+    """Auto-populate MeshCentralSettings once from setup_meshcentral.sh's cem-autolink.json.
+
+    Never overwrites an existing workspace configuration — only bootstraps a workspace
+    that has not configured MeshCentral yet so admins don't have to re-type anything.
+    """
+    existing = (
+        await db.execute(
+            select(MeshCentralSettings).where(MeshCentralSettings.workspace_id == workspace_id)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    candidates: List[Path] = []
+    if custom_path and custom_path.strip():
+        candidates.append(Path(custom_path.strip()).expanduser())
+    env_dir = os.getenv("MESHCENTRAL_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir).expanduser())
+    candidates.extend([
+        Path("/opt/meshcentral"),
+        Path("/usr/local/meshcentral"),
+        Path("/srv/meshcentral"),
+        Path("/var/lib/meshcentral"),
+    ])
+
+    autolink: Optional[Dict[str, Any]] = None
+    found_dir: Optional[Path] = None
+    for cand in candidates:
+        al_file = cand / "meshcentral-data" / "cem-autolink.json"
+        if al_file.is_file():
+            try:
+                data = json.loads(al_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("server_url"):
+                    autolink = data
+                    found_dir = cand
+                    break
+            except Exception:
+                continue
+
+    if not autolink or not found_dir:
+        return None
+
+    try:
+        clean_url = normalize_server_url(str(autolink["server_url"]))
+    except ValueError:
+        return None
+
+    username = (str(autolink.get("username") or "")).strip() or None
+    password = (str(autolink.get("password") or "")).strip() or None
+    token_key = (str(autolink.get("login_token_key") or "")).strip() or None
+    verify_ssl = bool(autolink.get("verify_ssl", True))
+    now = datetime.utcnow()
+
+    row = MeshCentralSettings(
+        workspace_id=workspace_id,
+        enabled=True,
+        server_url=clean_url,
+        domain="",
+        username=username,
+        password_encrypted=encrypt_secret(password) if password else None,
+        login_token_key_encrypted=encrypt_secret(token_key) if token_key else None,
+        login_user_id=build_login_user_id(username, ""),
+        default_view_mode=11,
+        hide_mesh_chrome=True,
+        verify_ssl=verify_ssl,
+        local_install_path=str(found_dir),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return row
 
 
 # ---------------------------------------------------------------------------

@@ -6836,10 +6836,13 @@ async def web_admin_site_settings(
 
     mc_settings = None
     try:
+        from app.core.meshcentral import auto_import_local_meshcentral_if_present
         from app.models.meshcentral import MeshCentralSettings
         mc_settings = (await db.execute(
             select(MeshCentralSettings).where(MeshCentralSettings.workspace_id == user.workspace_id)
         )).scalar_one_or_none()
+        if mc_settings is None:
+            mc_settings = await auto_import_local_meshcentral_if_present(db, user.workspace_id)
     except Exception:
         mc_settings = None
 

@@ -635,7 +635,7 @@ if [ -n "$CRM_DIR" ] && [ -f "$CRM_DIR/.env" ]; then
     print_status "Linked MESHCENTRAL_DIR=${MC_DIR} in ${CRM_DIR}/.env"
 fi
 
-# ─── Build canonical engine URL and save credentials summary ─────────────────
+# ─── Build canonical engine URL and save credentials + CEM auto-link file ────
 SCHEME=$([ "$USE_SSL" -eq 1 ] && echo https || echo http)
 if [ "$USE_SSL" -eq 1 ] && [ "$PUBLIC_PORT" -eq 443 ]; then
     SERVER_URL="https://${DOMAIN}"
@@ -644,6 +644,33 @@ elif [ "$USE_SSL" -eq 0 ] && [ "$PUBLIC_PORT" -eq 80 ]; then
 else
     SERVER_URL="${SCHEME}://${DOMAIN}:${PUBLIC_PORT}"
 fi
+
+# Write a group-readable auto-link file so CEM automatically fills and enables
+# MeshCentral on first visit (zero manual typing in Site Settings!).
+AUTOLINK_FILE="$MC_DIR/meshcentral-data/cem-autolink.json"
+MC_SERVER_URL="$SERVER_URL" \
+MC_ADMIN_USER="$ADMIN_USER" \
+MC_ADMIN_PASS="$ADMIN_PASS" \
+MC_LOGIN_KEY="$LOGIN_TOKEN_KEY" \
+MC_INSTALL_DIR="$MC_DIR" \
+MC_VERIFY_SSL="$USE_SSL" \
+python3 - "$AUTOLINK_FILE" << 'PYEOF'
+import json, os, sys
+payload = {
+    "server_url": os.environ["MC_SERVER_URL"],
+    "username": os.environ["MC_ADMIN_USER"],
+    "password": os.environ["MC_ADMIN_PASS"],
+    "login_token_key": os.environ.get("MC_LOGIN_KEY", ""),
+    "local_install_path": os.environ["MC_INSTALL_DIR"],
+    "verify_ssl": os.environ.get("MC_VERIFY_SSL", "1") == "1",
+}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2)
+    fh.write("\n")
+PYEOF
+chown "$MC_USER:$MC_USER" "$AUTOLINK_FILE"
+chmod 640 "$AUTOLINK_FILE"
+print_status "Wrote CEM auto-link config ($AUTOLINK_FILE) — zero manual typing needed!"
 
 CRED_FILE="/root/meshcentral-credentials.txt"
 cat > "$CRED_FILE" << EOF
@@ -666,17 +693,11 @@ echo -e "${GREEN}=====================================================${NC}\n"
 echo -e "${BLUE}Direct browser access to MeshCentral is LOCKED:${NC}"
 echo -e "  Anyone visiting ${SERVER_URL} directly is sent to ${GREEN}${SITE_ORIGIN}/web/remote${NC}"
 echo ""
-echo -e "${BLUE}Final 30-second step inside ${SITE_ORIGIN}:${NC}"
-echo -e "  1. Open ${GREEN}${SITE_ORIGIN}/web/admin/site-settings${NC} -> MeshCentral Remote Access"
-echo -e "  2. Enter:"
-echo -e "       Server URL:      ${GREEN}${SERVER_URL}${NC}"
-echo -e "       Username:        ${GREEN}${ADMIN_USER}${NC}"
-echo -e "       Password:        ${GREEN}${ADMIN_PASS}${NC}"
-if [ -n "$LOGIN_TOKEN_KEY" ]; then
-echo -e "       Login Token Key: ${GREEN}${LOGIN_TOKEN_KEY}${NC}"
-fi
-echo -e "  3. Click ${BLUE}Auto-Setup & Fill${NC} (CEM auto-fills & enables instant SSO!)"
+echo -e "${BLUE}Zero manual setup needed inside ${SITE_ORIGIN}:${NC}"
+echo -e "  1. Restart CEM:  ${YELLOW}sudo systemctl restart crm-backend${NC}"
+echo -e "  2. Open ${GREEN}${SITE_ORIGIN}/web/remote${NC} — CEM auto-imports all settings from"
+echo -e "     ${AUTOLINK_FILE} and turns on Remote Support automatically!"
 echo ""
-echo -e "Saved a copy to: ${YELLOW}${CRED_FILE}${NC} (root-only)"
+echo -e "Credentials copy saved to: ${YELLOW}${CRED_FILE}${NC} (root-only)"
 echo -e "Note: If your cloud VPS has an external firewall/security group, allow TCP port ${PUBLIC_PORT}."
 echo ""

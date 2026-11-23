@@ -15,6 +15,7 @@ from app.core.database import get_session
 from app.core.meshcentral import (
     AGENT_PLATFORMS,
     VIEW_MODE_MAP,
+    auto_import_local_meshcentral_if_present,
     autodetect_local_meshcentral,
     build_direct_url,
     build_embed_url,
@@ -112,6 +113,8 @@ async def web_remote_dashboard(request: Request, db: AsyncSession = Depends(get_
         await db.execute(select(Workspace).where(Workspace.id == user.workspace_id))
     ).scalar_one_or_none()
     mc_settings = await _get_or_none_settings(db, user.workspace_id)
+    if mc_settings is None:
+        mc_settings = await auto_import_local_meshcentral_if_present(db, user.workspace_id)
 
     devices = (
         await db.execute(
@@ -267,6 +270,8 @@ async def web_remote_session(
         await db.execute(select(Workspace).where(Workspace.id == user.workspace_id))
     ).scalar_one_or_none()
     mc_settings = await _get_or_none_settings(db, user.workspace_id)
+    if mc_settings is None:
+        mc_settings = await auto_import_local_meshcentral_if_present(db, user.workspace_id)
     device = await _get_workspace_device(db, user.workspace_id, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Client device not found")
@@ -565,6 +570,8 @@ async def web_remote_settings(request: Request, db: AsyncSession = Depends(get_s
         await db.execute(select(Workspace).where(Workspace.id == user.workspace_id))
     ).scalar_one_or_none()
     mc_settings = await _get_or_none_settings(db, user.workspace_id)
+    if mc_settings is None:
+        mc_settings = await auto_import_local_meshcentral_if_present(db, user.workspace_id)
 
     flash_message = request.session.pop("flash_message", None)
     flash_type = request.session.pop("flash_type", None)
@@ -738,7 +745,7 @@ def _serialize_invite(
     return {
         "id": invite.id,
         "token": invite.token,
-        "share_url": f"{base_origin}/web/remote/get/{invite.token}",
+        "share_url": f"{base_origin}/web/client/remote/get/{invite.token}",
         "mesh_id": invite.mesh_id,
         "mesh_name": invite.mesh_name or "",
         "client_name": invite.client_name or "",
@@ -781,8 +788,14 @@ async def web_remote_settings_autofill(
     if local_info["found"] and local_info["path"]:
         row.local_install_path = local_info["path"]
 
-    # 2. Resolve URL, domain, credentials (form overrides saved DB, local config is fallback)
-    raw_url = (server_url or "").strip() or row.server_url or local_info.get("suggested_url") or ""
+    # 2. Resolve URL, domain, credentials (form overrides saved DB, local autolink/config is fallback)
+    autolink = local_info.get("autolink") or {}
+    raw_url = (
+        (server_url or "").strip()
+        or row.server_url
+        or local_info.get("suggested_url")
+        or ""
+    )
     if raw_url:
         try:
             row.server_url = normalize_server_url(raw_url)
@@ -797,8 +810,14 @@ async def web_remote_settings_autofill(
 
     if username and username.strip():
         row.username = username.strip()
+    elif not row.username and autolink.get("username"):
+        row.username = str(autolink["username"]).strip()
+
     if password and password.strip():
         row.password_encrypted = encrypt_secret(password)
+    elif not row.password_encrypted and autolink.get("password"):
+        row.password_encrypted = encrypt_secret(str(autolink["password"]))
+
     if verify_ssl is not None:
         row.verify_ssl = verify_ssl in ("1", "true", "on", "yes")
 
@@ -1079,7 +1098,7 @@ async def web_remote_invite_create(
     client_name: str = Form(""),
     platform: str = Form("windows64"),
     install_mode: str = Form("install"),
-    expires_minutes: int = Form(10),
+    expires_minutes: int = Form(15),
     db: AsyncSession = Depends(get_session),
 ):
     """Create a 5-15 minute expiring client download link hosted on this website."""
@@ -1173,6 +1192,7 @@ def _check_invite_validity(invite: Optional[MeshCentralAgentInvite], now: dateti
     return True, remaining, ""
 
 
+@router.get("/client/remote/get/{token}", response_class=HTMLResponse)
 @router.get("/remote/get/{token}", response_class=HTMLResponse)
 async def web_remote_public_invite_page(
     request: Request,
@@ -1218,6 +1238,7 @@ async def web_remote_public_invite_page(
     )
 
 
+@router.get("/client/remote/get/{token}/download")
 @router.get("/remote/get/{token}/download")
 async def web_remote_public_invite_download(
     request: Request,

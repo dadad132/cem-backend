@@ -52,6 +52,7 @@ app.add_middleware(
 _NO_COMPANY_PATHS = (
     '/web/superadmin', '/web/login', '/web/logout', '/web/signup', '/web/set-password',
     '/web/download', '/web/notifications', '/web/uploads/',
+    '/web/client/remote/get/', '/web/remote/get/',
 )
 
 # With no company the super admin still has its own projects and tasks: what it
