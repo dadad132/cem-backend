@@ -594,8 +594,8 @@
                  if (data.server_url && form.querySelector('[name=server_url]')) {
                    form.querySelector('[name=server_url]').value = data.server_url;
                  }
-                 if (data.login_token_key && form.querySelector('[name=login_token_key]')) {
-                   form.querySelector('[name=login_token_key]').value = data.login_token_key;
+                 if (data.login_user_id && form.querySelector('[name=login_user_id]')) {
+                   form.querySelector('[name=login_user_id]').value = data.login_user_id;
                  }
                  if (data.enabled && form.querySelector('[name=enabled]')) {
                    form.querySelector('[name=enabled]').checked = true;
@@ -605,24 +605,6 @@
                  this.mcTestResult = 'Could not run auto-setup right now.';
                } finally {
                  this.mcAutofilling = false;
-               }
-             },
-             async generateTokenKey() {
-               try {
-                 const res = await fetch('/web/remote/settings/generate-key', { method: 'POST' });
-                 const data = await res.json();
-                 if (data.success && data.login_token_key) {
-                   const input = this.$refs.mcForm.querySelector('[name=login_token_key]');
-                   if (input) {
-                     input.type = 'text';
-                     input.value = data.login_token_key;
-                   }
-                   this.mcTestOk = true;
-                   this.mcTestResult = 'Generated a new Login Token Key and filled the field. Click Save MeshCentral Settings to store it.';
-                 }
-               } catch (err) {
-                 this.mcTestOk = false;
-                 this.mcTestResult = 'Could not generate key.';
                }
              }
            }">
@@ -744,6 +726,14 @@
                 </label>
                 {% endif %}
               </div>
+            </div>
+
+            <div>
+              <label class="block text-sm font-medium text-slate-700 mb-1">Login User ID (optional override)</label>
+              <input type="text" name="login_user_id"
+                     value="{{ mc_settings.login_user_id if mc_settings and mc_settings.login_user_id else '' }}"
+                     placeholder="Auto-derived as user//<username> if blank"
+                     class="w-full px-3.5 py-2.5 border border-slate-300 rounded-lg font-mono text-xs">
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">

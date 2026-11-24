@@ -140,13 +140,26 @@ fi
 
 cd "$APP_DIR"
 
+# Never ship the template's publicly known signing key. A fresh random key is
+# generated on every install and reused only to repair placeholder values.
+RANDOM_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || echo "")
+if [ -z "$RANDOM_SECRET" ]; then
+    print_error "Could not generate a secure SECRET_KEY."
+    exit 1
+fi
+
 # Install any missing Python dependencies using system pip with --break-system-packages
 print_info "Installing Python dependencies..."
 if [ -f "requirements.txt" ]; then
-    # Use --ignore-installed to avoid conflicts with system packages
-    pip3 install --break-system-packages --no-deps --ignore-installed -r requirements.txt 2>/dev/null || \
-    python3 -m pip install --break-system-packages --no-deps -r requirements.txt 2>/dev/null || \
+    # Use --ignore-installed to avoid conflicts with system packages. Keep
+    # stderr visible so a failed install is diagnosable.
+    pip3 install --break-system-packages --no-deps --ignore-installed -r requirements.txt || \
+    python3 -m pip install --break-system-packages --no-deps -r requirements.txt || \
     print_info "Using system packages where available"
+    if ! python3 -c "import fastapi, uvicorn, sqlmodel, cryptography, aiohttp, multipart, jinja2, itsdangerous, jose, passlib, bcrypt, httpx, pydantic_settings, dotenv, reportlab, openpyxl" >/dev/null 2>&1; then
+        print_error "Python dependencies verification failed. Install requirements.txt manually."
+        exit 1
+    fi
     print_status "Python dependencies installed"
 else
     print_error "requirements.txt not found!"
@@ -172,7 +185,6 @@ if [ ! -f ".env" ]; then
         print_status ".env file created from template"
         print_info "Please edit .env file to configure your settings"
     else
-        RANDOM_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || echo "change-this-$(date +%s)")
         cat > .env << EOF
 # CRM Backend Configuration
 APP_DOMAIN=tickets.hubconnect.co.za
@@ -203,6 +215,20 @@ else
     print_info ".env file already exists"
 fi
 
+# Replace known placeholder keys and lock down the file.
+if ! grep -q '^SECRET_KEY=' .env || grep -qE '^SECRET_KEY=(change-me-in-production|change-this-)' .env; then
+    if grep -q '^SECRET_KEY=' .env; then
+        sed -i "s|^SECRET_KEY=.*|SECRET_KEY=${RANDOM_SECRET}|" .env
+    else
+        printf 'SECRET_KEY=%s\n' "$RANDOM_SECRET" >> .env
+    fi
+    print_status "Generated a unique SECRET_KEY"
+fi
+if [ "$EUID" -eq 0 ]; then
+    chown "$SERVICE_USER:$SERVICE_USER" .env
+fi
+chmod 600 .env
+
 # Initialize database
 print_info "Initializing database..."
 cd "$APP_DIR"
@@ -220,7 +246,8 @@ try:
     asyncio.run(init_models())
     print('Database initialized successfully')
 except Exception as e:
-    print(f'Database initialization skipped or already done: {e}')
+    print(f'Database initialization failed: {e}', file=sys.stderr)
+    sys.exit(1)
 PYEOF
 print_status "Database ready"
 
@@ -308,7 +335,9 @@ fi
 if [ "$SERVICE_ACTIVE" = "active" ]; then
     print_status "Service is running!"
 else
-    print_error "Service failed to start. Check logs with: sudo journalctl -u ${SERVICE_NAME} -f"
+    print_error "Service failed to start. Showing recent logs:"
+    journalctl -u "$SERVICE_NAME" -n 30 --no-pager 2>/dev/null || true
+    exit 1
 fi
 
 # Configure firewall if ufw is installed

@@ -340,7 +340,17 @@ async def test_single_task_archive_is_scoped_and_authenticated(env):
 
 
 @pytest.mark.asyncio
-async def test_bulk_archive_done_filters_by_project_and_age(env):
+async def test_bulk_archive_done_filters_by_project_and_age(env, monkeypatch):
+    # The fixtures are dated relative to NOW; the endpoint uses the wall clock.
+    # Freeze that clock too, otherwise the age cutoff drifts with the real date
+    # and once-fresh tasks appear old months later.
+    class FrozenDateTime(datetime):
+        @classmethod
+        def utcnow(cls):
+            return NOW
+
+    monkeypatch.setattr(external, 'datetime', FrozenDateTime)
+
     response = await env.client.post('/api/v1/tasks/archive-done', json={'older_than_days': 5})
     assert response.status_code == 200, response.text
     assert response.json() == {'archived_count': 1, 'task_ids': [env.tasks['old'].id]}

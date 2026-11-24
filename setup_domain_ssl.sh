@@ -35,6 +35,9 @@ SERVICE_NAME="crm-backend"
 # Ubuntu installer puts it under $HOME when not run as root.
 APP_DIR=$(awk -F= '/^WorkingDirectory=/{print $2}'     "/etc/systemd/system/crm-backend.service" 2>/dev/null || true)
 APP_DIR="${APP_DIR:-/opt/crm-backend}"
+SERVICE_USER=$(awk -F= '/^User=/{print $2}' "/etc/systemd/system/${SERVICE_NAME}.service" 2>/dev/null || true)
+SERVICE_GROUP=$(awk -F= '/^Group=/{print $2}' "/etc/systemd/system/${SERVICE_NAME}.service" 2>/dev/null || true)
+SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER:-root}}"
 APP_PORT=8000
 NGINX_CONF="/etc/nginx/conf.d/crm-backend.conf"
 
@@ -380,24 +383,36 @@ fi
 # APP_HTTPS_ONLY marks session cookies Secure. It must be true only once TLS
 # actually works: set on plain HTTP, browsers refuse to send the cookie and
 # every login silently fails.
-if [ -f "$APP_DIR/.env" ]; then
-    WANT=$([ "$USE_SSL" -eq 1 ] && echo true || echo false)
-    SCHEME_FOR_ENV=$([ "$USE_SSL" -eq 1 ] && echo https || echo http)
-    if grep -q '^APP_HTTPS_ONLY=' "$APP_DIR/.env"; then
-        sed -i "s/^APP_HTTPS_ONLY=.*/APP_HTTPS_ONLY=${WANT}/" "$APP_DIR/.env"
-    else
-        echo "APP_HTTPS_ONLY=${WANT}" >> "$APP_DIR/.env"
-    fi
-    if grep -q '^APP_DOMAIN=' "$APP_DIR/.env"; then
-        sed -i "s|^APP_DOMAIN=.*|APP_DOMAIN=${PRIMARY_DOMAIN}|" "$APP_DIR/.env"
-    else
-        echo "APP_DOMAIN=${PRIMARY_DOMAIN}" >> "$APP_DIR/.env"
-    fi
-    if grep -q '^GOOGLE_REDIRECT_URI=http://localhost:8000/' "$APP_DIR/.env"; then
-        sed -i "s|^GOOGLE_REDIRECT_URI=http://localhost:8000/|GOOGLE_REDIRECT_URI=${SCHEME_FOR_ENV}://${PRIMARY_DOMAIN}/|" "$APP_DIR/.env"
-    fi
-    print_status "Set APP_DOMAIN=${PRIMARY_DOMAIN} and APP_HTTPS_ONLY=${WANT} in .env"
+if [ ! -f "$APP_DIR/.env" ]; then
+    print_error "Could not update $APP_DIR/.env because the file does not exist."
+    print_info  "Check the WorkingDirectory in /etc/systemd/system/${SERVICE_NAME}.service."
+    exit 1
 fi
+WANT=$([ "$USE_SSL" -eq 1 ] && echo true || echo false)
+SCHEME_FOR_ENV=$([ "$USE_SSL" -eq 1 ] && echo https || echo http)
+if grep -q '^APP_HTTPS_ONLY=' "$APP_DIR/.env"; then
+    sed -i "s/^APP_HTTPS_ONLY=.*/APP_HTTPS_ONLY=${WANT}/" "$APP_DIR/.env"
+else
+    echo "APP_HTTPS_ONLY=${WANT}" >> "$APP_DIR/.env"
+fi
+if grep -q '^APP_DOMAIN=' "$APP_DIR/.env"; then
+    sed -i "s|^APP_DOMAIN=.*|APP_DOMAIN=${PRIMARY_DOMAIN}|" "$APP_DIR/.env"
+else
+    echo "APP_DOMAIN=${PRIMARY_DOMAIN}" >> "$APP_DIR/.env"
+fi
+if grep -q '^GOOGLE_REDIRECT_URI=http://localhost:8000/' "$APP_DIR/.env"; then
+    sed -i "s|^GOOGLE_REDIRECT_URI=http://localhost:8000/|GOOGLE_REDIRECT_URI=${SCHEME_FOR_ENV}://${PRIMARY_DOMAIN}/|" "$APP_DIR/.env"
+fi
+if ! grep -q "^APP_HTTPS_ONLY=${WANT}$" "$APP_DIR/.env" || ! grep -q "^APP_DOMAIN=${PRIMARY_DOMAIN}$" "$APP_DIR/.env"; then
+    print_error "Could not update $APP_DIR/.env with the expected values."
+    exit 1
+fi
+if [ -n "$SERVICE_USER" ] && ! chown "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR/.env"; then
+    print_error "Could not make $APP_DIR/.env readable by service user '$SERVICE_USER'."
+    exit 1
+fi
+chmod 600 "$APP_DIR/.env"
+print_status "Set APP_DOMAIN=${PRIMARY_DOMAIN} and APP_HTTPS_ONLY=${WANT} in .env"
 
 # ─── Forward the real client IP to the app ───────────────────────────────────
 # Without --proxy-headers every request looks like it came from 127.0.0.1,
@@ -436,7 +451,9 @@ if curl -fsS --max-time 15 "${SCHEME}://${PRIMARY_DOMAIN}/health" >/dev/null 2>&
     print_status "Site is live at ${SCHEME}://${PRIMARY_DOMAIN}"
 else
     print_error "Could not reach ${SCHEME}://${PRIMARY_DOMAIN}/health from this server"
-    print_info  "It may still work from outside. Check DNS and any upstream firewall."
+    print_info  "Check DNS, firewall, and nginx logs before using this deployment."
+    journalctl -u nginx -n 20 --no-pager 2>/dev/null || true
+    exit 1
 fi
 
 echo ""

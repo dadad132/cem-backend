@@ -43,7 +43,6 @@ from app.web.meshcentral_routes import (
     web_remote_session_embed_url,
     web_remote_settings,
     web_remote_settings_autofill,
-    web_remote_settings_generate_key,
     web_remote_settings_save,
     web_remote_settings_test,
     web_remote_sync,
@@ -479,10 +478,7 @@ async def test_site_settings_includes_meshcentral_form_and_roundtrip(seeded):
 
 @pytest.mark.asyncio
 async def test_local_autodetect_updates_config_and_autofill_settings(seeded, tmp_path, monkeypatch):
-    from app.web.meshcentral_routes import (
-        web_remote_settings_autofill,
-        web_remote_settings_generate_key,
-    )
+    from app.web.meshcentral_routes import web_remote_settings_autofill
 
     db, ws1, _ws2, admin, tech, _other = seeded
 
@@ -505,15 +501,10 @@ async def test_local_autodetect_updates_config_and_autofill_settings(seeded, tmp
     assert updated_cfg["settings"].get("AllowFraming") is True or updated_cfg["settings"].get("allowFraming") is True
     assert updated_cfg["settings"].get("AllowLoginToken") is True
 
-    # Non-admin blocked from autofill & generate-key
+    # Non-admin blocked from autofill
     with pytest.raises(HTTPException) as exc403:
         await web_remote_settings_autofill(_request(tech.id), db=db)
     assert exc403.value.status_code == 403
-
-    gen_resp = await web_remote_settings_generate_key(_request(admin.id), db=db)
-    gen_data = json.loads(gen_resp.body)
-    assert gen_data["success"] is True
-    assert len(gen_data["login_token_key"]) == 160
 
     # Mock the hardened diagnostics report used by autofill (inventory + SSO discovery)
     async def fake_diagnose(settings_row, timeout=10.0):
@@ -545,6 +536,7 @@ async def test_local_autodetect_updates_config_and_autofill_settings(seeded, tmp
         db=db,
     )
     payload = json.loads(resp.body)
+    assert "login_token_key" not in payload
     assert payload["success"] is True
     assert payload["enabled"] is True
     assert payload["server_url"] == "https://mesh.hubconnect.co.za"
@@ -571,6 +563,42 @@ async def test_local_autodetect_updates_config_and_autofill_settings(seeded, tmp
     assert embed["sso_active"] is True
     assert embed.get("sso_mode") == "authcookie"
     assert "auth=LIVE_SIGNED_COOKIE_ABC" in embed["url"]
+
+
+@pytest.mark.asyncio
+async def test_autofill_reports_group_creation_failure_instead_of_succeeding(seeded, monkeypatch):
+    from app.web.meshcentral_routes import web_remote_settings_autofill
+
+    db, ws1, _ws2, admin, _tech, _other = seeded
+    db.add(_mc_settings(
+        workspace_id=ws1.id,
+        enabled=False,
+        server_url="https://mesh.acme.test",
+        username="admin",
+        password_encrypted=mc.encrypt_secret("AdminPassword!"),
+    ))
+    await db.commit()
+
+    async def fake_diagnose(settings_row, timeout=10.0):
+        return {"ok": True, "meshes": {}, "devices": 0, "online": 0,
+                "sso_mode": "none", "error": None, "hint": None}
+
+    async def broken_group_create(settings_row, name, description="", timeout=10.0):
+        raise RuntimeError("group API refused")
+
+    monkeypatch.setattr("app.web.meshcentral_routes.diagnose_meshcentral_connection", fake_diagnose)
+    monkeypatch.setattr("app.web.meshcentral_routes.create_meshcentral_group", broken_group_create)
+
+    resp = await web_remote_settings_autofill(
+        _request(admin.id, "/web/remote/settings/autofill"),
+        server_url="", domain="", username="", password="", verify_ssl=None,
+        local_install_path="", db=db,
+    )
+    payload = json.loads(resp.body)
+    assert payload["success"] is False
+    assert payload["enabled"] is False
+    assert "default_group_error" in payload
+    assert "group API refused" in payload["default_group_error"]
 
 
 @pytest.mark.asyncio
@@ -684,6 +712,166 @@ async def test_agent_direct_download_and_expiring_client_invite_lifecycle(seeded
 
 
 @pytest.mark.asyncio
+async def test_remote_group_selection_rejects_unknown_and_cross_tenant_mesh_ids(seeded, monkeypatch):
+    from app.web.meshcentral_routes import web_remote_agent_download, web_remote_invite_create
+
+    db, ws1, ws2, _admin, tech, _other = seeded
+    db.add(MeshCentralSettings(
+        workspace_id=ws1.id, enabled=True, server_url="https://mesh.acme.test", verify_ssl=True,
+    ))
+    db.add(MeshCentralGroup(workspace_id=ws1.id, mesh_id="mesh//MINE", name="My Clients"))
+    db.add(MeshCentralGroup(workspace_id=ws2.id, mesh_id="mesh//RIVAL", name="Rival Clients"))
+    await db.commit()
+
+    for foreign_id in ("mesh//RIVAL", "mesh//NOT-MINE"):
+        with pytest.raises(HTTPException) as denied_download:
+            await web_remote_agent_download(
+                _request(tech.id), mesh_id=foreign_id, platform="windows64",
+                install_mode="install", db=db,
+            )
+        assert denied_download.value.status_code == 400
+
+        denied_invite = await web_remote_invite_create(
+            _request(tech.id), mesh_id=foreign_id, mesh_name="", client_name="",
+            platform="windows64", install_mode="connect", expires_minutes=15, db=db,
+        )
+        assert denied_invite.status_code == 400
+        assert json.loads(denied_invite.body)["success"] is False
+
+    async def fake_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0):
+        assert mesh_id == "mesh//MINE"
+        return b"AGENT", "agent.exe", "application/octet-stream"
+
+    monkeypatch.setattr("app.web.meshcentral_routes.proxy_agent_installer", fake_proxy)
+    ok = await web_remote_agent_download(
+        _request(tech.id), mesh_id="mesh//MINE", platform="windows64",
+        install_mode="install", db=db,
+    )
+    assert ok.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_public_invite_pages_and_downloads_are_no_store_and_unindexable(seeded, monkeypatch):
+    from datetime import timedelta
+
+    from app.models.meshcentral import MeshCentralAgentInvite
+    from app.web.meshcentral_routes import (
+        web_remote_public_invite_download,
+        web_remote_public_invite_page,
+    )
+
+    db, ws1, _ws2, _admin, tech, _other = seeded
+    db.add(MeshCentralSettings(
+        workspace_id=ws1.id, enabled=True, server_url="https://mesh.acme.test", verify_ssl=True,
+    ))
+    invite = MeshCentralAgentInvite(
+        workspace_id=ws1.id,
+        token="publicheaders123",
+        mesh_id="mesh//G1",
+        mesh_name="Acme Clients",
+        client_name="Sarah",
+        platform="linux",
+        install_mode="connect",
+        created_by_id=tech.id,
+        expires_at=datetime.utcnow() + timedelta(minutes=10),
+    )
+    db.add(invite)
+    await db.commit()
+
+    async def fake_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0):
+        return b"AGENT-SCRIPT", "agent.sh", "text/x-shellscript"
+
+    monkeypatch.setattr("app.web.meshcentral_routes.proxy_agent_installer", fake_proxy)
+
+    page = await web_remote_public_invite_page(_request(None, "/web/client/remote/get/publicheaders123"),
+                                               invite.token, db=db)
+    assert page.status_code == 200
+    assert page.headers["cache-control"] == "no-store"
+    assert page.headers["x-robots-tag"] == "noindex, nofollow"
+
+    download = await web_remote_public_invite_download(
+        _request(None, "/web/client/remote/get/publicheaders123/download"), invite.token, db=db
+    )
+    assert download.status_code == 200
+    assert download.headers["cache-control"] == "no-store"
+    assert download.headers["x-robots-tag"] == "noindex, nofollow"
+
+    invite.expires_at = datetime.utcnow() - timedelta(seconds=1)
+    await db.commit()
+    expired = await web_remote_public_invite_page(_request(None), invite.token, db=db)
+    assert expired.status_code == 410
+    assert expired.headers["cache-control"] == "no-store"
+    assert expired.headers["x-robots-tag"] == "noindex, nofollow"
+
+
+@pytest.mark.asyncio
+async def test_public_invite_download_caps_uses_and_rechecks_after_proxy(seeded, monkeypatch):
+    from datetime import timedelta
+
+    from app.models.meshcentral import MeshCentralAgentInvite
+    from app.web.meshcentral_routes import web_remote_public_invite_download
+
+    db, ws1, _ws2, _admin, tech, _other = seeded
+    db.add(MeshCentralSettings(
+        workspace_id=ws1.id, enabled=True, server_url="https://mesh.acme.test", verify_ssl=True,
+    ))
+    invite = MeshCentralAgentInvite(
+        workspace_id=ws1.id,
+        token="publicmaxuses1",
+        mesh_id="mesh//G1",
+        platform="windows64",
+        created_by_id=tech.id,
+        expires_at=datetime.utcnow() + timedelta(minutes=10),
+        max_downloads=1,
+    )
+    db.add(invite)
+    await db.commit()
+
+    async def fake_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0):
+        return b"AGENT-BINARY", "agent.exe", "application/octet-stream"
+
+    monkeypatch.setattr("app.web.meshcentral_routes.proxy_agent_installer", fake_proxy)
+
+    first = await web_remote_public_invite_download(_request(None), invite.token, db=db)
+    assert first.status_code == 200
+    await db.refresh(invite)
+    assert invite.download_count == 1
+
+    with pytest.raises(HTTPException) as exhausted:
+        await web_remote_public_invite_download(_request(None), invite.token, db=db)
+    assert exhausted.value.status_code == 410
+    await db.refresh(invite)
+    assert invite.download_count == 1
+
+    # A link revoked while the installer is being proxied must never be streamed.
+    invite.token = "publicrevoked2"
+    invite.download_count = 0
+    invite.revoked = False
+    invite.expires_at = datetime.utcnow() + timedelta(minutes=10)
+    await db.commit()
+
+    async def revoking_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0):
+        other_engine = create_async_engine(db.get_bind().url)
+        try:
+            async with AsyncSession(other_engine, expire_on_commit=False) as other:
+                row = (await other.execute(
+                    select(MeshCentralAgentInvite).where(MeshCentralAgentInvite.token == "publicrevoked2")
+                )).scalar_one()
+                row.revoked = True
+                await other.commit()
+        finally:
+            await other_engine.dispose()
+        return b"MUST-NOT-STREAM", "agent.exe", "application/octet-stream"
+
+    monkeypatch.setattr("app.web.meshcentral_routes.proxy_agent_installer", revoking_proxy)
+    with pytest.raises(HTTPException) as revoked:
+        await web_remote_public_invite_download(_request(None), invite.token, db=db)
+    assert revoked.value.status_code == 410
+    await db.refresh(invite)
+    assert invite.download_count == 0
+
+
+@pytest.mark.asyncio
 async def test_cem_autolink_json_auto_populates_settings_without_manual_typing(seeded, tmp_path, monkeypatch):
     db, ws1, _ws2, admin, _tech, _other = seeded
 
@@ -719,6 +907,38 @@ async def test_cem_autolink_json_auto_populates_settings_without_manual_typing(s
     again = await mc.auto_import_local_meshcentral_if_present(db, ws1.id)
     assert again is not None
     assert again.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_user_pages_never_import_shared_autolink_credentials(seeded, tmp_path, monkeypatch):
+    """Shared server credentials must not be imported by an ordinary tenant visit."""
+    from app.web.meshcentral_routes import web_remote_dashboard, web_remote_session
+
+    db, ws1, _ws2, _admin, tech, _other = seeded
+    mc_dir = tmp_path / "meshcentral"
+    data_dir = mc_dir / "meshcentral-data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "cem-autolink.json").write_text(json.dumps({
+        "server_url": "https://mesh.shared.test",
+        "username": "shared-admin",
+        "password": "SharedSecret123",
+        "login_token_key": secrets.token_hex(40),
+    }), encoding="utf-8")
+    monkeypatch.setenv("MESHCENTRAL_DIR", str(mc_dir))
+
+    device = MeshCentralDevice(
+        workspace_id=ws1.id, node_id="DEVICE1", name="Reception PC", is_online=True,
+    )
+    db.add(device)
+    await db.commit()
+
+    await web_remote_dashboard(_request(tech.id, "/web/remote"), db=db)
+    await web_remote_session(_request(tech.id, "/web/remote/session"), device.id, mode="desktop", db=db)
+
+    rows = (await db.execute(
+        select(MeshCentralSettings).where(MeshCentralSettings.workspace_id == ws1.id)
+    )).scalars().all()
+    assert rows == [], "a tenant page silently imported shared MeshCentral credentials"
 
 
 # ---------------------------------------------------------------------------
@@ -1408,7 +1628,6 @@ async def test_non_admin_settings_routes_blocked_and_admin_hints_present(seeded)
         lambda: web_remote_settings_save(_request(tech.id), db=db),
         lambda: web_remote_settings_test(_request(tech.id), db=db),
         lambda: web_remote_settings_autofill(_request(tech.id), db=db),
-        lambda: web_remote_settings_generate_key(_request(tech.id), db=db),
     ]
     for invoke in admin_only_calls:
         with pytest.raises(HTTPException) as exc:
@@ -1521,6 +1740,8 @@ async def test_admin_diagnostics_report_is_admin_only_and_redacts_secrets(seeded
     assert body["success"] is True
     assert secret_pass not in body["report_text"]
     assert secret_key not in body["report_text"]
+    assert secret_pass not in json.dumps(body)
+    assert secret_key not in json.dumps(body)
     assert "<redacted>" in body["report_text"]
     assert "tickets.hubconnect.co.za:4433" in body["report_text"]
 
@@ -1528,6 +1749,91 @@ async def test_admin_diagnostics_report_is_admin_only_and_redacts_secrets(seeded
     assert dl.status_code == 200
     assert "attachment; filename=\"meshcentral-diagnostics.txt\"" in dl.headers["content-disposition"]
     assert secret_pass not in dl.body.decode("utf-8")
+
+
+def test_no_server_side_login_token_key_generation_endpoint():
+    routes = Path("app/web/meshcentral_routes.py").read_text(encoding="utf-8")
+    settings_ui = Path("app/templates/remote/settings.html").read_text(encoding="utf-8")
+    site_ui = Path("app/templates/admin/site_settings.html").read_text(encoding="utf-8")
+    assert "remote/settings/generate-key" not in routes
+    assert "remote/settings/generate-key" not in settings_ui
+    assert "remote/settings/generate-key" not in site_ui
+
+
+def test_installer_seeds_one_workspace_not_every_tenant():
+    script = Path("setup_meshcentral.sh").read_text(encoding="utf-8")
+    assert "--workspace-id" in script
+    assert "CEM_MESHCENTRAL_WORKSPACE_ID" in script
+    assert "order_by(Workspace.id.asc()).limit(1)" in script
+    assert "does not exist; nothing was seeded" in script
+    assert "no CEM workspace exists; nothing was seeded" in script
+    assert script.count("sys.exit(1)") >= 2
+    assert "for wid in ws_ids" not in script
+    assert "select(Workspace.id)" not in script
+
+
+def test_installer_root_hint_never_echoes_admin_password():
+    script = Path("setup_meshcentral.sh").read_text(encoding="utf-8")
+    assert "Try:  sudo bash $0 $*" not in script
+    assert "ORIGINAL_ARGS=(" in script
+    assert "<redacted>" in script
+
+
+def test_mesh_installer_shell_escapes_su_arguments_and_redacts_attached_passwords():
+    script = Path("setup_meshcentral.sh").read_text(encoding="utf-8")
+    assert '--admin-pass=*)' in script
+    assert '-p*)' in script
+    assert '-p*|--admin-pass=*) SAFE_ARGS="$SAFE_ARGS <redacted>"' in script
+    assert "q_dir=$(printf '%q' \"$MC_DIR\")" in script
+    assert "q_user=$(printf '%q' \"$ADMIN_USER\")" in script
+    assert "q_pass=$(printf '%q' \"$ADMIN_PASS\")" in script
+    assert "cd '$MC_DIR'" not in script
+    assert "--pass '$ADMIN_PASS'" not in script
+    assert "MESHCENTRAL_DIR='$MC_DIR'" not in script
+    assert "CEM_MESHCENTRAL_WORKSPACE_ID='$TARGET_WORKSPACE_ID'" not in script
+    assert "q_crm_dir=$(printf '%q' \"$CRM_DIR\")" in script
+    assert "q_crm_py=$(printf '%q' \"$CRM_PY\")" in script
+    assert "q_sync_script=$(printf '%q' \"$SYNC_SCRIPT\")" in script
+    assert "q_autolink_file=$(printf '%q' \"$AUTOLINK_FILE\")" in script
+    assert "q_workspace_id=$(printf '%q' \"$TARGET_WORKSPACE_ID\")" in script
+
+
+def test_mesh_installer_does_not_claim_ready_after_dependency_or_sync_failure():
+    script = Path("setup_meshcentral.sh").read_text(encoding="utf-8")
+    assert '"$CRM_PY" -m pip install -q aiohttp cryptography || true' in script
+    assert 'print_error "Python dependency verification failed (aiohttp, cryptography)."' in script
+    assert '"$CRM_PY" -c "import aiohttp, cryptography"' in script
+    assert "CEM will auto-import" not in script
+    assert "manual Auto-Setup is required" in script
+    assert "Python dependency verification failed" in script
+    assert "curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - >/dev/null" not in script
+    assert "curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null" not in script
+    assert "ACCOUNT_OK=0" in script
+    assert "ADMIN_OK=0" in script
+    assert "Could not configure internal MeshCentral admin account" in script
+    assert "TOKEN_KEY_OK=0" in script
+    assert "Could not retrieve Login Token Key" in script
+
+
+def test_installers_fail_closed_on_secrets_dependencies_and_health():
+    ubuntu = Path("install_ubuntu.sh").read_text(encoding="utf-8")
+    assert "RANDOM_SECRET=" in ubuntu
+    assert "chmod 600 .env" in ubuntu
+    assert 'chown "$SERVICE_USER:$SERVICE_USER" .env' in ubuntu
+    assert "change-me-in-production" in ubuntu
+    assert "Python dependencies verification failed" in ubuntu
+    assert "Database initialization failed" in ubuntu
+    assert "Service failed to start" in ubuntu
+
+    domain = Path("setup_domain_ssl.sh").read_text(encoding="utf-8")
+    assert 'if [ ! -f "$APP_DIR/.env" ]' in domain
+    assert "SERVICE_USER=$(awk -F= '/^User=/" in domain
+    assert "Could not update $APP_DIR/.env" in domain
+    assert "Could not reach ${SCHEME}://${PRIMARY_DOMAIN}/health" in domain
+    # The public health failure must stop the success banner.
+    failure_line = domain.index("Could not reach ${SCHEME}://${PRIMARY_DOMAIN}/health")
+    banner_line = domain.index("Domain setup complete")
+    assert "exit 1" in domain[failure_line:banner_line]
 
 
 @pytest.mark.asyncio
@@ -1890,6 +2196,42 @@ async def test_remote_dashboard_export_link_is_visible_only_to_admins(seeded):
     tech_html = bytes((await web_remote_dashboard(_request(tech.id), db=db)).body).decode()
     assert 'href="/web/remote/audit/export.csv"' not in tech_html
     assert "Export CSV" not in tech_html
+
+
+@pytest.mark.asyncio
+async def test_site_settings_meshcentral_form_preserves_login_user_id(seeded):
+    """The admin form must submit the same SSO identity as the remote settings form."""
+    from app.web.routes import web_admin_site_settings
+
+    db, ws1, _ws2, admin, _tech, _other = seeded
+    req = _request(admin.id, "/web/remote/settings/save")
+    await web_remote_settings_save(
+        req,
+        enabled="1",
+        server_url="https://mesh.acme.test",
+        domain="",
+        username="admin",
+        password="",
+        clear_password=None,
+        login_token_key="",
+        clear_login_token_key=None,
+        login_user_id="user//meshsvc",
+        default_view_mode=11,
+        hide_mesh_chrome="1",
+        verify_ssl="1",
+        return_to="/web/admin/site-settings",
+        db=db,
+    )
+
+    html = bytes((await web_admin_site_settings(_request(admin.id), db=db)).body).decode()
+    assert 'name="login_user_id"' in html
+    assert 'value="user//meshsvc"' in html
+    assert "data.login_user_id && form.querySelector('[name=login_user_id]')" in html
+
+    saved = (
+        await db.execute(select(MeshCentralSettings).where(MeshCentralSettings.workspace_id == ws1.id))
+    ).scalar_one()
+    assert saved.login_user_id == "user//meshsvc"
 
 
 @pytest.mark.asyncio

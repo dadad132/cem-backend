@@ -41,6 +41,7 @@
 #       --no-ssl            Plain HTTP only (testing only)
 #       --staging           Use Let's Encrypt staging CA
 #       --skip-dns-check    Skip DNS check
+#       --workspace-id ID   CEM workspace to seed (default: first workspace only)
 #   -h, --help              Show this help
 ###############################################################################
 
@@ -75,6 +76,8 @@ NGINX_CONF="/etc/nginx/conf.d/meshcentral.conf"
 USE_SSL=1
 STAGING=0
 SKIP_DNS=0
+TARGET_WORKSPACE_ID=""
+ORIGINAL_ARGS=("$@")
 
 echo -e "${BLUE}=====================================================${NC}"
 echo -e "${BLUE}   MeshCentral Integrated Engine Installer for CEM${NC}"
@@ -89,12 +92,15 @@ while [ $# -gt 0 ]; do
         -e|--email)        EMAIL="$2"; shift 2 ;;
         -u|--admin-user)   ADMIN_USER="$2"; shift 2 ;;
         -p|--admin-pass)   ADMIN_PASS="$2"; shift 2 ;;
+        -p*)               ADMIN_PASS="${1#-p}"; shift ;;
+        --admin-pass=*)    ADMIN_PASS="${1#--admin-pass=}"; shift ;;
         --port)            MC_PORT="$2"; shift 2 ;;
         --dir)             MC_DIR="$2"; shift 2 ;;
         --no-ssl)          USE_SSL=0; shift ;;
         --staging)         STAGING=1; shift ;;
         --skip-dns-check)  SKIP_DNS=1; shift ;;
-        -h|--help)         sed -n '3,46p' "$0"; exit 0 ;;
+        --workspace-id)    TARGET_WORKSPACE_ID="$2"; shift 2 ;;
+        -h|--help)         sed -n '3,47p' "$0"; exit 0 ;;
         *) print_error "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -102,7 +108,27 @@ done
 # ─── Root check ──────────────────────────────────────────────────────────────
 if [ "$(id -u)" -ne 0 ]; then
     print_error "This script must run as root."
-    print_info  "Try:  sudo bash $0 $*"
+    # Never echo -p/--admin-pass values: local users can observe the hint.
+    SAFE_ARGS=""
+    HIDE_NEXT=0
+    for arg in "${ORIGINAL_ARGS[@]}"; do
+        if [ "$HIDE_NEXT" -eq 1 ]; then
+            SAFE_ARGS="$SAFE_ARGS <redacted>"
+            HIDE_NEXT=0
+            continue
+        fi
+        case "$arg" in
+            -p|--admin-pass) SAFE_ARGS="$SAFE_ARGS $arg"; HIDE_NEXT=1 ;;
+            -p*|--admin-pass=*) SAFE_ARGS="$SAFE_ARGS <redacted>" ;;
+            *) SAFE_ARGS="$SAFE_ARGS $arg" ;;
+        esac
+    done
+    print_info  "Try:  sudo bash $0${SAFE_ARGS:-}"
+    exit 1
+fi
+
+if [ -n "$TARGET_WORKSPACE_ID" ] && ! [[ "$TARGET_WORKSPACE_ID" =~ ^[0-9]+$ ]]; then
+    print_error "--workspace-id must be a numeric CEM workspace ID."
     exit 1
 fi
 
@@ -131,6 +157,13 @@ if [ -z "$ADMIN_PASS" ]; then
     ADMIN_PASS=$(tr -dc 'A-Za-z0-9@#%+=_' </dev/urandom | head -c 20 || openssl rand -base64 16 | tr -dc 'A-Za-z0-9')
     print_info "Generated strong random internal password for engine user '${ADMIN_USER}'"
 fi
+
+# These values are embedded in commands executed as another user via `su -c`.
+# Shell-escape them once here so quotes, spaces, or metacharacters cannot break
+# out of the command string (especially the admin password).
+q_dir=$(printf '%q' "$MC_DIR")
+q_user=$(printf '%q' "$ADMIN_USER")
+q_pass=$(printf '%q' "$ADMIN_PASS")
 
 SITE_ORIGIN="https://${SITE_DOMAIN}"
 [ "$USE_SSL" -eq 0 ] && SITE_ORIGIN="http://${SITE_DOMAIN}"
@@ -206,7 +239,7 @@ if [ "$PKG" = "dnf" ]; then
     fi
     if [ "$NEED_NODE" -eq 1 ]; then
         print_info "Installing Node.js 20 LTS..."
-        curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - >/dev/null
+        curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
         dnf install -y nodejs >/dev/null
         print_status "Node.js $(node -v) installed"
     fi
@@ -218,7 +251,7 @@ else
     fi
     if [ "$NEED_NODE" -eq 1 ]; then
         print_info "Installing Node.js 20 LTS..."
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
         DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs >/dev/null
         print_status "Node.js $(node -v) installed"
     fi
@@ -252,7 +285,7 @@ EOF
 fi
 
 print_info "Installing / updating MeshCentral via npm (this takes ~20-40s)..."
-su -s /bin/bash "$MC_USER" -c "cd '$MC_DIR' && npm install --no-audit --no-fund meshcentral" >/tmp/meshcentral-npm.log 2>&1
+su -s /bin/bash "$MC_USER" -c "cd $q_dir && npm install --no-audit --no-fund meshcentral" >/tmp/meshcentral-npm.log 2>&1
 print_status "MeshCentral installed in $MC_DIR"
 
 # ─── Configure Nginx reverse proxy with standalone-login lockdown ────────────
@@ -571,27 +604,39 @@ print_status "Wrote $CFG_FILE (AllowFraming=true, AllowLoginToken=true, AliasPor
 systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 
 print_info "Creating / syncing internal engine admin account '${ADMIN_USER}'..."
+ACCOUNT_OK=0
 su -s /bin/bash "$MC_USER" -c \
-    "cd '$MC_DIR' && node node_modules/meshcentral --createaccount '$ADMIN_USER' --pass '$ADMIN_PASS'" \
-    >/tmp/meshcentral-user.log 2>&1 || true
+    "cd $q_dir && node node_modules/meshcentral --createaccount $q_user --pass $q_pass" \
+    >"$VERIFY_LOG" 2>&1 && ACCOUNT_OK=1 || true
 # If the account already existed from a previous run, --createaccount leaves the
 # old password untouched; --resetaccount ensures the password always matches.
 su -s /bin/bash "$MC_USER" -c \
-    "cd '$MC_DIR' && node node_modules/meshcentral --resetaccount '$ADMIN_USER' --pass '$ADMIN_PASS'" \
-    >>/tmp/meshcentral-user.log 2>&1 || true
+    "cd $q_dir && node node_modules/meshcentral --resetaccount $q_user --pass $q_pass" \
+    >>"$VERIFY_LOG" 2>&1 && ACCOUNT_OK=1 || true
+ADMIN_OK=0
 su -s /bin/bash "$MC_USER" -c \
-    "cd '$MC_DIR' && node node_modules/meshcentral --adminaccount '$ADMIN_USER'" \
-    >>/tmp/meshcentral-user.log 2>&1 || true
+    "cd $q_dir && node node_modules/meshcentral --adminaccount $q_user" \
+    >>"$VERIFY_LOG" 2>&1 && ADMIN_OK=1 || true
+if [ "$ACCOUNT_OK" -ne 1 ] || [ "$ADMIN_OK" -ne 1 ]; then
+    print_error "Could not configure internal MeshCentral admin account '${ADMIN_USER}'."
+    print_info  "See $VERIFY_LOG (secrets are redacted there)."
+    exit 1
+fi
 print_status "Internal engine account '${ADMIN_USER}' ready"
 
 print_info "Retrieving Login Token Key..."
-LOGIN_TOKEN_KEY=$(su -s /bin/bash "$MC_USER" -c \
-    "cd '$MC_DIR' && node node_modules/meshcentral --loginTokenKey" 2>/dev/null \
-    | grep -Eo '[0-9a-fA-F]{64,256}' | head -n 1 || true)
+TOKEN_KEY_OK=0
+TOKEN_KEY_OUTPUT=$(su -s /bin/bash "$MC_USER" -c \
+    "cd $q_dir && node node_modules/meshcentral --loginTokenKey" 2>>"$VERIFY_LOG") \
+    && TOKEN_KEY_OK=1 || true
+LOGIN_TOKEN_KEY=$(printf '%s\n' "$TOKEN_KEY_OUTPUT" | grep -Eo '[0-9a-fA-F]{64,256}' | head -n 1 || true)
 if [ -n "$LOGIN_TOKEN_KEY" ]; then
     print_status "Login Token Key retrieved"
+elif [ "$TOKEN_KEY_OK" -eq 1 ]; then
+    print_info "Could not retrieve Login Token Key; CEM will use verified live authcookie SSO instead"
 else
-    print_info "Login Token Key will be auto-handled via CEM live SSO"
+    print_error "Could not retrieve Login Token Key (node --loginTokenKey failed)"
+    print_info  "See $VERIFY_LOG. CEM can still use live authcookie SSO, but Token Key SSO is unavailable."
 fi
 
 chmod 750 "$MC_DIR" "$MC_DIR/meshcentral-data"
@@ -869,12 +914,16 @@ if [ -n "${CRM_DIR:-}" ] && [ -d "$CRM_DIR" ]; then
         if ! "$CRM_PY" -c "import aiohttp, cryptography" >/dev/null 2>&1; then
             print_info "Installing missing MeshCentral Python dependencies (aiohttp, cryptography)..."
             "$CRM_PY" -m pip install -q aiohttp cryptography || true
+            if ! "$CRM_PY" -c "import aiohttp, cryptography" >/dev/null 2>&1; then
+                print_error "Python dependency verification failed (aiohttp, cryptography)."
+                exit 1
+            fi
         fi
 
         print_info "Syncing verified MeshCentral settings & default group into CEM database..."
         SYNC_SCRIPT="/tmp/cem-mesh-sync.$$.py"
         cat > "$SYNC_SCRIPT" << 'PYEOF'
-import asyncio, json, sys
+import asyncio, json, os, sys
 from datetime import datetime
 from pathlib import Path
 
@@ -898,7 +947,26 @@ data = json.loads(autolink_path.read_text(encoding="utf-8"))
 async def main() -> None:
     await init_models()
     async with async_session_factory() as db:
-        ws_ids = (await db.execute(select(Workspace.id))).scalars().all()
+        target_raw = (os.environ.get("CEM_MESHCENTRAL_WORKSPACE_ID") or "").strip()
+        if target_raw:
+            target = (
+                await db.execute(select(Workspace).where(Workspace.id == int(target_raw)))
+            ).scalar_one_or_none()
+            if target is None:
+                print("ERROR: CEM workspace %s does not exist; nothing was seeded." % target_raw)
+                sys.exit(1)
+            target_ids = [target.id]
+        else:
+            # Seed exactly one tenant by default. Sharing admin credentials with
+            # every workspace would grant cross-tenant MeshCentral access.
+            target = (
+                await db.execute(select(Workspace).order_by(Workspace.id.asc()).limit(1))
+            ).scalar_one_or_none()
+            if target is None:
+                print("ERROR: no CEM workspace exists; nothing was seeded.")
+                sys.exit(1)
+            target_ids = [target.id]
+            print("NOTICE: seeding first workspace %s only; re-run with --workspace-id to target another tenant." % target.id)
         now = datetime.utcnow()
         clean_url = normalize_server_url(data["server_url"])
         username = (data.get("username") or "").strip() or None
@@ -909,7 +977,7 @@ async def main() -> None:
         def_mname = (data.get("default_mesh_name") or "").strip() or None
         verify_ssl = bool(data.get("verify_ssl", True))
 
-        for wid in ws_ids:
+        for wid in target_ids:
             row = (
                 await db.execute(
                     select(MeshCentralSettings).where(MeshCentralSettings.workspace_id == wid)
@@ -941,20 +1009,26 @@ async def main() -> None:
 asyncio.run(main())
 PYEOF
         chmod 644 "$SYNC_SCRIPT"
+        q_crm_dir=$(printf '%q' "$CRM_DIR")
+        q_crm_py=$(printf '%q' "$CRM_PY")
+        q_sync_script=$(printf '%q' "$SYNC_SCRIPT")
+        q_autolink_file=$(printf '%q' "$AUTOLINK_FILE")
+        q_workspace_id=$(printf '%q' "$TARGET_WORKSPACE_ID")
         SYNC_OK=0
         if [ -n "${CRM_USER:-}" ] && [ "$CRM_USER" != "root" ] && id -u "$CRM_USER" >/dev/null 2>&1; then
             su -s /bin/bash "$CRM_USER" -c \
-                "cd '$CRM_DIR' && MESHCENTRAL_DIR='$MC_DIR' '$CRM_PY' '$SYNC_SCRIPT' '$CRM_DIR' '$AUTOLINK_FILE'" \
+                "cd $q_crm_dir && CEM_MESHCENTRAL_WORKSPACE_ID=$q_workspace_id MESHCENTRAL_DIR=$q_dir $q_crm_py $q_sync_script $q_crm_dir $q_autolink_file" \
                 && SYNC_OK=1 || SYNC_OK=0
         else
-            (cd "$CRM_DIR" && MESHCENTRAL_DIR="$MC_DIR" "$CRM_PY" "$SYNC_SCRIPT" "$CRM_DIR" "$AUTOLINK_FILE") \
+            (cd "$CRM_DIR" && CEM_MESHCENTRAL_WORKSPACE_ID="$TARGET_WORKSPACE_ID" MESHCENTRAL_DIR="$MC_DIR" "$CRM_PY" "$SYNC_SCRIPT" "$CRM_DIR" "$AUTOLINK_FILE") \
                 && SYNC_OK=1 || SYNC_OK=0
         fi
         rm -f "$SYNC_SCRIPT"
         if [ "$SYNC_OK" -eq 1 ]; then
             print_status "Synced MeshCentral settings & '${DEFAULT_MESH_NAME}' group directly into CEM database"
         else
-            print_info "Could not pre-sync CEM DB (CEM will auto-import from ${AUTOLINK_FILE} on first visit)"
+            print_error "Could not pre-sync CEM DB from ${AUTOLINK_FILE}; manual Auto-Setup is required in CEM"
+            print_info  "Open Remote Settings in the target workspace and click Auto-Setup & Fill."
         fi
     fi
 fi

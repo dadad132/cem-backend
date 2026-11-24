@@ -68,9 +68,6 @@
            if (data.server_url && form.querySelector('[name=server_url]')) {
              form.querySelector('[name=server_url]').value = data.server_url;
            }
-           if (data.login_token_key && form.querySelector('[name=login_token_key]')) {
-             form.querySelector('[name=login_token_key]').value = data.login_token_key;
-           }
            if (data.login_user_id && form.querySelector('[name=login_user_id]')) {
              form.querySelector('[name=login_user_id]').value = data.login_user_id;
            }
@@ -82,24 +79,6 @@
            this.testResult = 'Could not reach server for auto-setup.';
          } finally {
            this.autofilling = false;
-         }
-       },
-       async generateKey() {
-         try {
-           const res = await fetch('/web/remote/settings/generate-key', { method: 'POST' });
-           const data = await res.json();
-           if (data.success && data.login_token_key) {
-             const input = this.$refs.settingsForm.querySelector('[name=login_token_key]');
-             if (input) {
-               input.type = 'text';
-               input.value = data.login_token_key;
-             }
-             this.testOk = true;
-             this.testResult = 'Generated a new Login Token Key and filled the box. Click Save to store it.';
-           }
-         } catch (err) {
-           this.testOk = false;
-           this.testResult = 'Could not generate key.';
          }
        }
      }">

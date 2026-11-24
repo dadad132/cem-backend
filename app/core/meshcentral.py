@@ -1756,6 +1756,16 @@ async def build_meshcentral_diagnostic_report(
                 out = out.replace(sec, "<redacted>")
         return out
 
+    def _scrub(value: Any) -> Any:
+        """Redact both known plaintext secrets and common token patterns in JSON."""
+        if isinstance(value, str):
+            return _redact(redact_meshcentral_text(value))
+        if isinstance(value, dict):
+            return {key: _scrub(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_scrub(item) for item in value]
+        return value
+
     # Inspect local MeshCentral directory (read-only, never mutates config.json)
     local_dir: Optional[Path] = None
     candidates: List[Path] = []
@@ -1891,15 +1901,15 @@ async def build_meshcentral_diagnostic_report(
         "[4. Local Server Engine Inspection]",
         json.dumps(local_summary, indent=2),
     ]
-    report_text = _redact("\n".join(lines_out)) + "\n"
+    report_text = _scrub("\n".join(lines_out)) + "\n"
 
     return {
         "success": True,
         "ok": bool(live_probe.get("ok")),
-        "settings": settings_summary,
-        "live_probe": live_probe,
+        "settings": _scrub(settings_summary),
+        "live_probe": _scrub(live_probe),
         "groups_count": len(groups),
         "devices_count": len(devices),
-        "local": local_summary,
+        "local": _scrub(local_summary),
         "report_text": report_text,
     }
