@@ -736,6 +736,150 @@
                     {% endif %}
                 </div>
             </div>
+
+            {% if mc_enabled %}
+            <!-- Remote Support hand-off: only rendered when this workspace has MeshCentral enabled. -->
+            <div id="ticket-remote-support-card" class="bg-white rounded-lg shadow-sm p-6 border border-indigo-100">
+                <h3 class="text-sm font-semibold text-gray-700 uppercase mb-3">
+                    <i class="fas fa-desktop mr-2 text-indigo-500"></i>Remote Support
+                </h3>
+                <p class="text-xs text-gray-500 mb-3">
+                    Client PCs linked to <span class="font-semibold text-gray-700">{{ mc_default_client_label }}</span>.
+                </p>
+
+                {% if mc_matching_devices %}
+                <div class="space-y-2 mb-4">
+                    {% for dev in mc_matching_devices %}
+                    <div class="flex items-center justify-between gap-2 p-2 rounded-md border border-slate-100 bg-slate-50">
+                        <div class="min-w-0">
+                            <p class="text-sm font-semibold text-slate-800 truncate" title="{{ dev.name }}">{{ dev.name }}</p>
+                            <p class="text-[11px] text-slate-500 truncate">
+                                {{ dev.client_name }}
+                                &bull; {% if dev.is_online %}<span class="text-emerald-600">Online</span>{% else %}<span class="text-slate-400">Offline</span>{% endif %}
+                            </p>
+                        </div>
+                        <div class="flex gap-1 flex-shrink-0">
+                            <a href="/web/remote/session/{{ dev.id }}?mode=desktop"
+                               class="px-2 py-1 rounded bg-slate-900 text-white text-[11px] font-semibold hover:bg-slate-700">
+                                <i class="fas fa-desktop mr-1"></i>Desktop
+                            </a>
+                            <a href="/web/remote/session/{{ dev.id }}?mode=terminal"
+                               class="px-2 py-1 rounded bg-slate-700 text-white text-[11px] font-semibold hover:bg-slate-800">
+                                <i class="fas fa-terminal mr-1"></i>Terminal
+                            </a>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-xs text-slate-500 mb-4">No client PCs are linked to this customer yet. You can still send a one-time support link below.</p>
+                {% endif %}
+
+                <form id="ticketRemoteInviteForm" class="space-y-2">
+                    <input type="hidden" name="client_name" value="{{ mc_default_client_label }}">
+                    <input type="hidden" name="expires_minutes" value="15">
+                    <input type="hidden" name="platform" value="windows64">
+                    <input type="hidden" name="install_mode" value="connect">
+                    {# No mesh_id: the endpoint uses the workspace's configured default group. #}
+                    <button type="submit" id="ticketRemoteInviteBtn"
+                            class="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 font-semibold">
+                        <i class="fas fa-link mr-2"></i>Send 15-Min Support Link
+                    </button>
+                </form>
+
+                <div id="ticketRemoteInviteResult" class="hidden mt-3 p-3 rounded-md bg-emerald-50 border border-emerald-200" role="status">
+                    <p class="text-xs font-semibold text-emerald-900 mb-1">Support link ready (valid for 15 minutes):</p>
+                    <a id="ticketRemoteInviteLink" href="#" target="_blank" rel="noopener noreferrer"
+                       class="block text-xs text-blue-700 break-all underline mb-2"></a>
+                    <div class="flex flex-wrap gap-2">
+                        <button type="button" id="ticketRemoteCopyLink"
+                                class="px-3 py-1.5 rounded bg-white border border-emerald-300 text-emerald-800 text-xs font-semibold hover:bg-emerald-100">
+                            <i class="fas fa-copy mr-1"></i>Copy Link
+                        </button>
+                        <button type="button" id="ticketRemoteCopyMessage"
+                                class="px-3 py-1.5 rounded bg-white border border-emerald-300 text-emerald-800 text-xs font-semibold hover:bg-emerald-100">
+                            <i class="fas fa-comment mr-1"></i>Copy Client Message
+                        </button>
+                    </div>
+                </div>
+                {# Kept outside the success panel so the first failed request is visible too. #}
+                <p id="ticketRemoteInviteError" class="hidden mt-2 text-xs text-red-700" role="alert"></p>
+            </div>
+            <script>
+            (function () {
+                const form = document.getElementById('ticketRemoteInviteForm');
+                if (!form) return;
+                const result = document.getElementById('ticketRemoteInviteResult');
+                const link = document.getElementById('ticketRemoteInviteLink');
+                const errorBox = document.getElementById('ticketRemoteInviteError');
+                const button = document.getElementById('ticketRemoteInviteBtn');
+                const buttonHtml = button.innerHTML;
+                let shareUrl = '';
+
+                function showError(message) {
+                    errorBox.textContent = message;
+                    errorBox.classList.remove('hidden');
+                }
+
+                function copyText(text) {
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        return navigator.clipboard.writeText(text);
+                    }
+                    const helper = document.createElement('textarea');
+                    helper.value = text;
+                    helper.style.position = 'fixed';
+                    helper.style.opacity = '0';
+                    document.body.appendChild(helper);
+                    helper.select();
+                    const copied = document.execCommand('copy');
+                    helper.remove();
+                    return copied ? Promise.resolve() : Promise.reject(new Error('copy unavailable'));
+                }
+
+                function handleCopy(text) {
+                    if (!text) return;
+                    copyText(text).catch(function () {
+                        showError('Could not copy automatically - select the link and copy it manually.');
+                    });
+                }
+
+                form.addEventListener('submit', async function (event) {
+                    event.preventDefault();
+                    errorBox.classList.add('hidden');
+                    button.disabled = true;
+                    button.textContent = 'Creating link...';
+                    try {
+                        const response = await fetch('/web/remote/invites', {
+                            method: 'POST',
+                            body: new FormData(form),
+                            headers: { 'X-Requested-With': 'fetch' }
+                        });
+                        const data = await response.json().catch(function () { return {}; });
+                        if (!response.ok || !data.success || !data.invite) {
+                            throw new Error(data.error || 'Could not create the support link.');
+                        }
+                        shareUrl = data.invite.share_url || '';
+                        link.href = shareUrl;
+                        link.textContent = shareUrl;
+                        result.classList.remove('hidden');
+                    } catch (err) {
+                        showError(err.message || 'Could not create the support link.');
+                    } finally {
+                        button.disabled = false;
+                        button.innerHTML = buttonHtml;
+                    }
+                });
+
+                document.getElementById('ticketRemoteCopyLink').addEventListener('click', function () {
+                    handleCopy(shareUrl);
+                });
+                document.getElementById('ticketRemoteCopyMessage').addEventListener('click', function () {
+                    handleCopy('Hi, please download and run the remote support tool from ' + shareUrl +
+                               ' - this link is valid for 15 minutes.');
+                });
+            })();
+            </script>
+            {% endif %}
         </div>
     </div>
 </div>

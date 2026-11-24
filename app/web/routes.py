@@ -15477,6 +15477,137 @@ async def _work_timer_context(db: AsyncSession, owner_col, owner_id: int) -> dic
     return timer
 
 
+def _ticket_remote_labels(ticket, related_project=None) -> tuple[str, list[str], list[str]]:
+    """Client label and name terms used to find this ticket's client PCs.
+
+    Tickets carry the customer as free text (guest company/name, or the closed
+    job-card client). Short values still label the card, but only company labels
+    of 3+ characters and personal names of 4+ characters are used for matching:
+    two-letter company names like "IT" otherwise match almost anything.
+    """
+    def clean(value) -> str:
+        return " ".join(str(value or "").split())
+
+    company = clean(ticket.guest_company)
+    project = clean(related_project.name) if related_project else ""
+    first = clean(ticket.guest_name or ticket.job_client_name)
+    last = clean(ticket.guest_surname or ticket.job_client_surname)
+    person = " ".join(part for part in (first, last) if part)
+    label = company or project or person or f"Ticket {ticket.ticket_number}"
+
+    company_terms = [term.casefold() for term in (company, project) if len(term) >= 3]
+    person_terms = [
+        term.casefold() for term in (person, first, last) if len(term) >= 4
+    ]
+    return label, company_terms, person_terms
+
+
+async def _ticket_remote_matching_devices(
+    db: AsyncSession, workspace_id: int, company_terms: list[str], person_terms: list[str]
+) -> list[dict]:
+    """Up to 5 workspace devices related to the ticket, best match first.
+
+    SQL narrows the candidates (and caps them) so a large fleet does not get
+    loaded into Python on every ticket view; scoring then prefers exact company
+    labels over substring hits.
+    """
+    from app.models.company import Company
+    from app.models.meshcentral import MeshCentralDevice
+
+    all_terms = list(dict.fromkeys(company_terms + person_terms))
+    if not all_terms:
+        return []
+
+    company_rows = []
+    if company_terms:
+        company_rows = (
+            await db.execute(
+                select(Company).where(
+                    Company.workspace_id == workspace_id,
+                    or_(*[Company.name.ilike(f"%{term}%") for term in company_terms]),
+                )
+            )
+        ).scalars().all()
+    company_ids = [row.id for row in company_rows if row.id]
+    company_names = {row.id: row.name for row in company_rows if row.id}
+
+    device_conditions = [
+        *[
+            MeshCentralDevice.client_name.ilike(f"%{term}%")
+            for term in all_terms
+        ],
+        *[
+            MeshCentralDevice.mesh_name.ilike(f"%{term}%")
+            for term in all_terms
+        ],
+        *[MeshCentralDevice.name.ilike(f"%{term}%") for term in all_terms],
+    ]
+    if company_ids:
+        device_conditions.append(MeshCentralDevice.company_id.in_(company_ids))
+
+    devices = (
+        await db.execute(
+            select(MeshCentralDevice)
+            .where(
+                MeshCentralDevice.workspace_id == workspace_id,
+                or_(*device_conditions),
+            )
+            .order_by(
+                MeshCentralDevice.is_online.desc(),
+                MeshCentralDevice.is_pinned.desc(),
+                MeshCentralDevice.name.asc(),
+                MeshCentralDevice.id.asc(),
+            )
+            .limit(50)
+        )
+    ).scalars().all()
+
+    scored = []
+    for device in devices:
+        client = str(device.client_name or "").casefold()
+        mesh = str(device.mesh_name or "").casefold()
+        name = str(device.name or "").casefold()
+        company_name = str(company_names.get(device.company_id) or "").casefold()
+
+        score = 0
+        for term in company_terms:
+            for value in (client, mesh, company_name):
+                if value == term:
+                    score += 100
+                elif value and term in value:
+                    score += 60
+        for term in person_terms:
+            for value in (client, mesh):  # free-form PC names only match exactly
+                if value == term:
+                    score += 80
+                elif value and term in value:
+                    score += 40
+            if name == term:
+                score += 80
+        if score < 60:  # a weak substring is not enough to suggest a PC
+            continue
+        if device.is_online:
+            score += 5
+        if device.is_pinned:
+            score += 2
+        scored.append((score, device))
+
+    scored.sort(key=lambda pair: (
+        -pair[0],
+        not pair[1].is_online,
+        (pair[1].name or "").casefold(),
+    ))
+    return [
+        {
+            "id": device.id,
+            "name": device.name,
+            "client_name": device.client_name or device.mesh_name or "Unassigned",
+            "is_online": bool(device.is_online),
+        }
+        for _score, device in scored[:5]
+    ]
+
+
 @router.get('/tickets/{ticket_id}', response_class=HTMLResponse)
 async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession = Depends(get_session)):
     """View ticket details with comments and history"""
@@ -15540,6 +15671,21 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
             select(Project).where(Project.id == ticket.related_project_id)
         )).scalar_one_or_none()
 
+    # One-click Remote Support hand-off (never expose setup links or secrets here)
+    from app.models.meshcentral import MeshCentralSettings
+    mc_enabled = False
+    mc_matching_devices: list[dict] = []
+    mc_default_client_label = ""
+    mc_settings = (await db.execute(
+        select(MeshCentralSettings).where(MeshCentralSettings.workspace_id == user.workspace_id)
+    )).scalar_one_or_none()
+    if mc_settings and mc_settings.enabled and mc_settings.server_url:
+        mc_enabled = True
+        mc_default_client_label, company_terms, person_terms = _ticket_remote_labels(ticket, related_project)
+        mc_matching_devices = await _ticket_remote_matching_devices(
+            db, user.workspace_id, company_terms, person_terms
+        )
+
     # Get closed_by user if exists
     closed_by_user = None
     if ticket.closed_by_id:
@@ -15586,6 +15732,10 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         'timer': timer,
         'signatures': signatures,
         'user_names': user_names,
+        'mc_enabled': mc_enabled,
+        'mc_matching_devices': mc_matching_devices,
+        'mc_default_client_label': mc_default_client_label,
+        'hide_mc_setup_nav': True,
     })
 
 

@@ -563,7 +563,16 @@
 
       <!-- Recently Connected Quick-Jump -->
       <div class="bg-white rounded-xl border border-slate-200 p-4">
-        <h2 class="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">Recent Sessions</h2>
+        <h2 class="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3 flex items-center justify-between gap-2">
+          <span>Recent Sessions</span>
+          {% if is_admin %}
+          <a href="/web/remote/audit/export.csv"
+             class="inline-flex items-center gap-1 normal-case tracking-normal text-[11px] font-semibold text-blue-700 hover:text-blue-900"
+             title="Download the full remote session audit log as CSV">
+            <i class="fas fa-file-export"></i> Export CSV
+          </a>
+          {% endif %}
+        </h2>
         {% if recent_logs %}
         <div class="space-y-2">
           {% for log in recent_logs %}

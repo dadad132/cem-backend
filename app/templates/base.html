@@ -652,12 +652,15 @@
             <span>Email Settings</span>
           </a>
 
+          {# Ticket pages offer 1-click Remote Support only; never surface MeshCentral setup links there. #}
+          {% if not hide_mc_setup_nav %}
           <a href="/web/remote/settings" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/remote/settings' in current_path else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
             </svg>
             <span>MeshCentral Setup</span>
           </a>
+          {% endif %}
 
           <a href="/web/admin/updates" class="nav-item px-4 py-2.5 rounded-lg hover:bg-gray-700/50 text-gray-300 hover:text-white flex items-center gap-3 transition-all {{ 'active' if '/web/admin/updates' in current_path else '' }}">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

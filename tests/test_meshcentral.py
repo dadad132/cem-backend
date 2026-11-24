@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import re
 import secrets
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
@@ -1783,5 +1786,243 @@ async def test_remote_dashboard_exposes_auto_refresh_and_inline_linux_copy(seede
     assert "notify(msg" in x_data
     assert "refreshDevices" in x_data
     assert "toast: null" in x_data
+
+
+# ---------------------------------------------------------------------------
+# Slice 2: ticket -> remote support hand-off and admin audit CSV export
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_remote_audit_export_is_admin_only_workspace_scoped_and_formula_safe(seeded):
+    from app.web.meshcentral_routes import web_remote_audit_export
+
+    db, ws1, ws2, admin, tech, other_admin = seeded
+
+    injected_tech = User(
+        username="injected", full_name="\ufeff=CMD('from-name')", hashed_password="x",
+        email="injected@acme.test", workspace_id=ws1.id, is_admin=False, is_active=True,
+    )
+    db.add(injected_tech)
+    await db.flush()
+    db.add_all([
+        MeshCentralSessionLog(
+            workspace_id=ws1.id,
+            device_id=7,
+            node_id="=CMD('calc.exe')",
+            device_name='+SUM(1+1), "unsafe"',
+            user_id=admin.id,
+            view_mode="desktop",
+            started_at=datetime(2026, 11, 24, 8, 30),
+        ),
+        MeshCentralSessionLog(
+            workspace_id=ws1.id,
+            device_id=8,
+            node_id="@HYPERLINK(\"http://evil.invalid\")",
+            device_name="Reception PC",
+            user_id=tech.id,
+            view_mode="terminal",
+            started_at=datetime(2026, 11, 24, 9, 15),
+        ),
+        MeshCentralSessionLog(
+            workspace_id=ws1.id,
+            device_id=10,
+            node_id="SAFE10",
+            device_name="Injected Name PC",
+            user_id=injected_tech.id,
+            view_mode="desktop",
+            started_at=datetime(2026, 11, 24, 9, 30),
+        ),
+        MeshCentralSessionLog(
+            workspace_id=ws2.id,
+            device_id=9,
+            node_id="RIVAL-NODE-SECRET",
+            device_name="Rival Machine",
+            user_id=other_admin.id,
+            view_mode="desktop",
+            started_at=datetime(2026, 11, 24, 9, 45),
+        ),
+    ])
+    await db.commit()
+
+    with pytest.raises(HTTPException) as denied:
+        await web_remote_audit_export(_request(tech.id, "/web/remote/audit/export.csv"), db)
+    assert denied.value.status_code == 403
+
+    response = await web_remote_audit_export(_request(admin.id, "/web/remote/audit/export.csv"), db)
+    assert response.status_code == 200
+    assert response.media_type.startswith("text/csv")
+    assert response.headers["cache-control"] == "no-store"
+    assert "attachment" in response.headers["content-disposition"]
+
+    rows = list(csv.reader(io.StringIO(response.body.decode())))
+    assert any("Technician" in cell for cell in rows[0])
+    assert any("Device" in cell for cell in rows[0])
+    assert any("Node" in cell for cell in rows[0])
+    assert any("Mode" in cell for cell in rows[0])
+    assert any("Started" in cell for cell in rows[0])
+    assert len(rows) == 4  # header + only this workspace's three sessions
+
+    flat = [cell for row in rows[1:] for cell in row]
+    assert not any("RIVAL-NODE-SECRET" in cell or "Rival Machine" in cell for cell in flat)
+    assert any(cell.startswith("'=CMD('calc.exe')") for cell in flat)
+    assert any(cell.startswith("'+SUM(1+1)") for cell in flat)
+    assert any(cell.startswith("'@HYPERLINK") for cell in flat)
+    assert any(cell.startswith("'\ufeff=CMD('from-name')") for cell in flat)  # invisible leader too
+    assert any(cell == "'+SUM(1+1), \"unsafe\"" for cell in flat)  # comma/quote stays one CSV cell
+    assert any("Alice Admin" in cell or "admin" in cell for cell in flat)
+    assert any("Tom Tech" in cell or "tech" in cell for cell in flat)
+
+    rival = await web_remote_audit_export(_request(other_admin.id, "/web/remote/audit/export.csv"), db)
+    rival_rows = list(csv.reader(io.StringIO(rival.body.decode())))
+    assert len(rival_rows) == 2
+    assert any("RIVAL-NODE-SECRET" in cell for cell in rival_rows[1])
+    assert not any("=CMD" in cell for cell in rival_rows[1])
+
+
+@pytest.mark.asyncio
+async def test_remote_dashboard_export_link_is_visible_only_to_admins(seeded):
+    db, _ws1, _ws2, admin, tech, _other = seeded
+
+    admin_html = bytes((await web_remote_dashboard(_request(admin.id), db=db)).body).decode()
+    assert 'href="/web/remote/audit/export.csv"' in admin_html
+    assert "Export CSV" in admin_html
+
+    tech_html = bytes((await web_remote_dashboard(_request(tech.id), db=db)).body).decode()
+    assert 'href="/web/remote/audit/export.csv"' not in tech_html
+    assert "Export CSV" not in tech_html
+
+
+@pytest.mark.asyncio
+async def test_ticket_remote_support_card_is_gated_and_never_leaks_meshcentral_settings(seeded):
+    from app.models.company import Company
+    from app.models.ticket import Ticket
+    from app.web.routes import web_tickets_detail
+
+    db, ws1, ws2, admin, tech, other_admin = seeded
+
+    company = Company(name="Northwind HQ", workspace_id=ws1.id, created_by=admin.id)
+    rival_device = MeshCentralDevice(
+        workspace_id=ws2.id, node_id="RIVAL999", name="Rival Reception PC", client_name="Northwind HQ",
+        is_online=True,
+    )
+    db.add(company)
+    db.add(rival_device)
+    await db.flush()
+    ticket = Ticket(
+        ticket_number="TKT-REM-2",
+        subject="Printer offline",
+        workspace_id=ws1.id,
+        created_by_id=admin.id,
+        guest_company="Northwind HQ",
+        guest_name="Sarah",
+        guest_surname="Reception",
+    )
+    db.add(ticket)
+    await db.flush()
+    db.add_all([
+        MeshCentralDevice(
+            workspace_id=ws1.id, node_id="MATCH001", name="Sarah Reception PC",
+            client_name="Northwind HQ", mesh_name="Northwind HQ", company_id=company.id,
+            is_online=True,
+        ),
+        MeshCentralDevice(
+            workspace_id=ws1.id, node_id="MATCH002", name="Archive Server",
+            mesh_name="Northwind HQ", is_online=False,
+        ),
+        MeshCentralDevice(
+            workspace_id=ws1.id, node_id="OTHER001", name="Unrelated PC",
+            client_name="Somebody Else", is_online=True,
+        ),
+    ])
+    settings = MeshCentralSettings(
+        workspace_id=ws1.id,
+        enabled=True,
+        server_url="https://mesh.acme.test",
+        username="svc-mesh",
+        password_encrypted=mc.encrypt_secret("PlainTextPassword123"),
+        login_token_key_encrypted=mc.encrypt_secret("LoginTokenSecret123"),
+        default_mesh_id="mesh//G1",
+        default_mesh_name="Northwind HQ",
+    )
+    db.add(settings)
+    await db.commit()
+
+    request = _request(admin.id, f"/web/tickets/{ticket.id}")
+    html = bytes((await web_tickets_detail(request, ticket.id, db=db)).body).decode()
+
+    assert 'id="ticket-remote-support-card"' in html, "enabled workspace should show Remote Support"
+    assert "Remote Support" in html
+    assert f"/web/remote/session/{rival_device.id}" not in html
+    device_ids = re.findall(r'/web/remote/session/(\d+)\?mode=desktop', html)
+    assert len(device_ids) == 2, "only this workspace's matching PCs are offered"
+    assert any(f"/web/remote/session/{device_id}?mode=terminal" in html for device_id in device_ids)
+    assert "Send 15-Min Support Link" in html
+    assert 'name="client_name" value="Northwind HQ"' in html
+    assert 'name="expires_minutes" value="15"' in html
+    assert 'name="mesh_id"' not in html  # invite uses the workspace default group, not a fuzzy match
+    assert "/web/remote/invites" in html
+    assert "data.invite.share_url" in html  # generated /web/client/remote/get/<token> URL
+    assert "link.textContent = shareUrl" in html
+    assert "Copy Link" in html and "Copy Client Message" in html
+
+    for leak in (
+        "https://mesh.acme.test", "mesh.acme.test", "/web/remote/settings", "MeshCentral Setup",
+        "PlainTextPassword123", "LoginTokenSecret123", "password_encrypted", "login_token_key",
+        "svc-mesh", "Rival Reception PC",
+    ):
+        assert leak not in html, f"ticket page leaked {leak!r}"
+
+    # Technicians need the same 1-click hand-off, but no CSV/admin export.
+    tech_html = bytes((await web_tickets_detail(
+        _request(tech.id, f"/web/tickets/{ticket.id}"), ticket.id, db=db
+    )).body).decode()
+    assert 'id="ticket-remote-support-card"' in tech_html
+    assert "/web/remote/audit/export.csv" not in tech_html
+
+    settings.enabled = False
+    await db.commit()
+    disabled_html = bytes((await web_tickets_detail(request, ticket.id, db=db)).body).decode()
+    assert 'id="ticket-remote-support-card"' not in disabled_html
+    assert "Send 15-Min Support Link" not in disabled_html
+    assert "/web/remote/invites" not in disabled_html
+    assert "/web/remote/session/" not in disabled_html
+    assert "https://mesh.acme.test" not in disabled_html
+
+
+@pytest.mark.asyncio
+async def test_ticket_remote_matching_ignores_short_ambiguous_names(seeded):
+    from app.models.ticket import Ticket
+    from app.web.routes import web_tickets_detail
+
+    db, ws1, _ws2, admin, _tech, _other = seeded
+
+    ticket = Ticket(
+        ticket_number="TKT-REM-3", subject="Laptop slow", workspace_id=ws1.id,
+        created_by_id=admin.id, guest_company="IT", guest_name="Ann",
+    )
+    db.add(ticket)
+    await db.flush()
+    db.add_all([
+        MeshCentralDevice(
+            workspace_id=ws1.id, node_id="KITCHEN", name="Kitchen PC",
+            client_name="Other Clients", is_online=True,
+        ),
+        MeshCentralDevice(
+            workspace_id=ws1.id, node_id="BANNER", name="Banner Server",
+            mesh_name="Other Clients", is_online=True,
+        ),
+    ])
+    db.add(MeshCentralSettings(
+        workspace_id=ws1.id, enabled=True, server_url="https://mesh.acme.test",
+    ))
+    await db.commit()
+
+    html = bytes((await web_tickets_detail(
+        _request(admin.id, f"/web/tickets/{ticket.id}"), ticket.id, db=db
+    )).body).decode()
+    assert 'id="ticket-remote-support-card"' in html
+    assert "Kitchen PC" not in html and "Banner Server" not in html
+    assert "/web/remote/session/" not in html
+    assert 'name="client_name" value="IT"' in html
 
 

@@ -1,6 +1,8 @@
 """Web routes for the custom MeshCentral Remote Client Access dashboard."""
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import secrets
 from datetime import datetime, timedelta
@@ -195,6 +197,26 @@ def _device_stats(devices, groups) -> dict:
     }
 
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t")
+
+
+def _csv_safe_cell(value) -> str:
+    """Keep spreadsheet apps from evaluating audit data as a formula.
+
+    csv.writer handles commas and quotes, but a cell starting with =, +, -, @
+    or a tab is still executed by Excel/LibreOffice. Prefixing those with an
+    apostrophe keeps the original text visible while making it inert. Invisible
+    Unicode leaders (BOM/zero-width marks) and newlines are handled too, so one
+    database row can never become multiple CSV rows or smuggle a formula.
+    """
+    text = "" if value is None else str(value)
+    text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    leading = text.lstrip().lstrip("\ufeff\u200b\u200e\u200f")
+    if leading and (leading[0] in _CSV_FORMULA_PREFIXES):
+        text = "'" + text
+    return text
+
+
 async def _workspace_device_rows(db: AsyncSession, workspace_id: int) -> list:
     """Workspace-scoped device query shared by the page and refresh endpoint."""
     return (
@@ -308,6 +330,7 @@ async def web_remote_dashboard(request: Request, db: AsyncSession = Depends(get_
             "request": request,
             "user": user,
             "workspace": workspace,
+            "is_admin": bool(user.is_admin),
             "header_title": "Remote Client Access",
             "mc_settings": mc_settings,
             "is_configured": is_configured,
@@ -325,6 +348,68 @@ async def web_remote_dashboard(request: Request, db: AsyncSession = Depends(get_
             "stats": stats,
             "flash_message": flash_message,
             "flash_type": flash_type,
+        },
+    )
+
+
+@router.get("/remote/audit/export.csv")
+async def web_remote_audit_export(request: Request, db: AsyncSession = Depends(get_session)):
+    """Admin-only CSV export of this workspace's remote session audit trail."""
+    user, redirect = await _require_workspace_admin(request, db)
+    if redirect:
+        return redirect
+
+    logs = (
+        await db.execute(
+            select(MeshCentralSessionLog)
+            .where(MeshCentralSessionLog.workspace_id == user.workspace_id)
+            .order_by(desc(MeshCentralSessionLog.started_at), desc(MeshCentralSessionLog.id))
+        )
+    ).scalars().all()
+
+    user_ids = {log.user_id for log in logs if log.user_id}
+    technicians: dict[int, User] = {}
+    if user_ids:
+        technicians = {
+            row.id: row
+            for row in (
+                await db.execute(
+                    select(User).where(
+                        User.id.in_(user_ids),
+                        User.workspace_id == user.workspace_id,
+                    )
+                )
+            ).scalars().all()
+        }
+
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, lineterminator="\r\n")
+    writer.writerow([
+        "Started At (UTC)",
+        "Technician Username",
+        "Technician Name",
+        "Device Name",
+        "Node ID",
+        "Mode",
+    ])
+    for log in logs:
+        tech = technicians.get(log.user_id)
+        writer.writerow([
+            _csv_safe_cell(log.started_at.strftime("%Y-%m-%d %H:%M:%S") if log.started_at else ""),
+            _csv_safe_cell(tech.username if tech else ""),
+            _csv_safe_cell((tech.shown_name or tech.full_name) if tech else ""),
+            _csv_safe_cell(log.device_name),
+            _csv_safe_cell(log.node_id),
+            _csv_safe_cell(log.view_mode),
+        ])
+
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="remote-session-audit.csv"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
         },
     )
 
