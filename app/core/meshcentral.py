@@ -96,6 +96,9 @@ AGENT_PLATFORMS: Dict[str, Dict[str, Any]] = {
         "short_label": "macOS",
         "agent_id": 10005,
         "fallback_agent_id": 29,
+        # Some MeshCentral builds serve the legacy macOS agent here instead of
+        # /meshagents. Try it after the regular fallback before giving up.
+        "fallback_endpoint": "meshosxagent",
         "ext": ".pkg",
         "content_type": "application/octet-stream",
         "icon": "fab fa-apple",
@@ -120,11 +123,37 @@ _PASSWORD_RE = re.compile(r"(password|passwd|pwd)\s*[:=]\s*[^\s,;]+", re.IGNOREC
 # Installer bodies are streamed to clients with a trusted brand name, so refuse
 # absurdly large or clearly non-installer responses from an upstream server.
 MAX_AGENT_INSTALLER_BYTES = 200 * 1024 * 1024
+# Trusted installer prefixes per platform. macOS is deliberately permissive:
+# the modern agent is a `xar!` .pkg, while legacy agent id=29 can be a Mach-O
+# binary (including universal/fat) or even a shell installer from
+# /meshosxagent. Accepting those keeps the fallback paths usable.
 _AGENT_MAGIC = {
-    "windows64": b"MZ",
-    "windows32": b"MZ",
-    "macos": b"xar!",
+    "windows64": (b"MZ",),
+    "windows32": (b"MZ",),
+    "macos": (
+        b"xar!",                 # signed installer package (xar archive)
+        b"\xcf\xfa\xed\xfe",     # 64-bit Mach-O
+        b"\xce\xfa\xed\xfe",     # 32-bit Mach-O
+        b"\xfe\xed\xfa\xcf",     # swapped 64-bit Mach-O
+        b"\xfe\xed\xfa\xce",     # swapped 32-bit Mach-O
+        b"\xca\xfe\xba\xbe",     # universal / fat Mach-O
+        b"#!",                   # legacy shell installer
+    ),
 }
+
+
+def _installer_body_is_valid(
+    platform: str, payload: bytes, endpoint: str = "meshagents"
+) -> bool:
+    """Cheap magic-byte gate before streaming an upstream body to a client.
+
+    A shell installer is only expected from the legacy macOS endpoint. If the
+    primary `/meshagents?id=10005` answers with a script, keep walking the
+    fallback chain instead of silently serving the wrong installer as a .pkg.
+    """
+    if platform == "macos" and payload.startswith(b"#!") and endpoint != "meshosxagent":
+        return False
+    return any(payload.startswith(prefix) for prefix in _AGENT_MAGIC.get(platform, ()))
 
 
 def redact_meshcentral_text(value: Any) -> str:
@@ -1511,17 +1540,23 @@ def _safe_brand_slug(brand_name: Optional[str]) -> str:
     return (cleaned or "RemoteSupport")[:32]
 
 
+_AGENT_ENDPOINTS = frozenset({"meshagents", "meshosxagent"})
+
+
 def _agent_download_url_for_base(
     base: str,
     mesh_id: str,
     platform: str,
     install_mode: str,
     agent_id_override: Optional[int],
+    endpoint: str = "meshagents",
 ) -> str:
-    """Build a `/meshagents` URL against an arbitrary (public or loopback) base."""
+    """Build a MeshCentral agent URL against a public or loopback base."""
     spec = AGENT_PLATFORMS.get(platform)
     if not spec:
         raise ValueError(f"Unsupported installer platform: {platform}")
+    if endpoint not in _AGENT_ENDPOINTS:
+        raise ValueError(f"Unsupported MeshCentral agent endpoint: {endpoint}")
     clean_mesh = normalize_mesh_id(mesh_id)
     if platform == "linux":
         return f"{base}meshagents?script=1"
@@ -1532,7 +1567,7 @@ def _agent_download_url_for_base(
         {"id": str(agent_id), "meshid": clean_mesh, "installflags": str(install_flags)},
         safe="@$",
     )
-    return f"{base}meshagents?{query}"
+    return f"{base}{endpoint}?{query}"
 
 
 def build_agent_download_url(
@@ -1606,15 +1641,21 @@ async def proxy_agent_installer(
         p_b64 = base64.b64encode(password.encode("utf-8")).decode("ascii")
         headers["x-meshauth"] = f"{u_b64},{p_b64}"
 
-    agent_ids = [spec["agent_id"]]
+    # (agent id, endpoint) attempts, in priority order. Windows uses a single
+    # known agent; macOS tries modern id=10005, then legacy id=29 on both the
+    # standard and legacy `/meshosxagent` endpoints.
+    attempts: list[tuple[int, str]] = [(spec["agent_id"], "meshagents")]
     if spec.get("fallback_agent_id"):
-        agent_ids.append(spec["fallback_agent_id"])
+        fallback_id = spec["fallback_agent_id"]
+        attempts.append((fallback_id, "meshagents"))
+        if spec.get("fallback_endpoint"):
+            attempts.append((fallback_id, spec["fallback_endpoint"]))
 
     default_error = "Could not fetch installer from MeshCentral."
     last_error = default_error
     bases = build_control_http_bases(settings_row)
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
-        for aid in agent_ids:
+        for aid, endpoint in attempts:
             for base in bases:
                 url = _agent_download_url_for_base(
                     base,
@@ -1622,6 +1663,7 @@ async def proxy_agent_installer(
                     platform=platform,
                     install_mode=install_mode,
                     agent_id_override=aid,
+                    endpoint=endpoint,
                 )
                 try:
                     async with session.get(url, headers=headers, ssl=ssl_param) as resp:
@@ -1646,11 +1688,15 @@ async def proxy_agent_installer(
                             if len(payload) > MAX_AGENT_INSTALLER_BYTES:
                                 last_error = "MeshCentral installer exceeds the allowed size."
                                 continue
-                            magic = _AGENT_MAGIC.get(platform)
-                            if magic and not payload.startswith(magic):
+                            if not _installer_body_is_valid(platform, payload, endpoint):
                                 last_error = f"unexpected {platform} installer body."
                                 continue
-                            return payload, filename, spec["content_type"]
+                            body_filename = filename
+                            body_content_type = spec["content_type"]
+                            if platform == "macos" and payload.startswith(b"#!"):
+                                body_filename = f"{slug}-Support-macOS.sh"
+                                body_content_type = "text/x-shellscript"
+                            return payload, body_filename, body_content_type
                         elif resp.status == 404:
                             last_error = (
                                 "MeshCentral returned HTTP 404 fetching installer. "

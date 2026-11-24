@@ -6,6 +6,7 @@
 <script id="remote-devices-data" type="application/json">{{ devices_payload | tojson }}</script>
 <script id="remote-groups-data" type="application/json">{{ mesh_groups | tojson }}</script>
 <script id="remote-invites-data" type="application/json">{{ invites_payload | tojson }}</script>
+<script id="remote-stats-data" type="application/json">{{ stats | tojson }}</script>
 <div class="space-y-6"
      x-data="{
        devices: JSON.parse(document.getElementById('remote-devices-data').textContent || '[]'),
@@ -18,6 +19,11 @@
        showAddModal: false,
        showInstallModal: false,
        syncing: false,
+       autoRefresh: false,
+       refreshTimer: null,
+       refreshing: false,
+       refreshSeq: 0,
+       liveStats: JSON.parse(document.getElementById('remote-stats-data').textContent || '{}'),
        toast: null,
        toastType: 'success',
        // Inline modal feedback: the page-level toast sits BEHIND the z-50 modal,
@@ -106,6 +112,13 @@
          });
          if (this.installMeshId) params.set('mesh_id', this.installMeshId);
          return `/web/remote/agent/download?${params.toString()}`;
+       },
+       linuxOneLineCommand() {
+         const inv = this.latestInvite;
+         // Gate on the invite's platform, not the current dropdown value: a
+         // Windows/macOS invite must never produce a `| sudo bash` command.
+         if (!inv || inv.platform !== 'linux' || !inv.is_active || !inv.share_url) return '';
+         return `curl -fsSL ${inv.share_url}/download | sudo bash`;
        },
        async createGroupNow() {
          const name = this.newGroupName.trim();
@@ -213,6 +226,54 @@
          this.toastType = type;
          setTimeout(() => { if (this.toast === msg) this.toast = null; }, 5000);
        },
+       async refreshDevices(announce = true) {
+         if (this.refreshing) return [];  // one request at a time
+         this.refreshing = true;
+         const seq = ++this.refreshSeq;
+         try {
+           const res = await fetch('/web/remote/devices/json', { cache: 'no-store' });
+           const data = await res.json();
+           // Never let a slow, earlier response overwrite a newer one.
+           if (seq !== this.refreshSeq || !data.success || !Array.isArray(data.devices)) return [];
+           const previouslyOnline = new Set(
+             this.devices.filter(d => d.is_online).map(d => d.node_id || d.id)
+           );
+           this.devices = data.devices;
+           if (data.stats) this.liveStats = data.stats;
+           const newcomers = data.devices.filter(
+             d => d.is_online && !previouslyOnline.has(d.node_id || d.id)
+           );
+           if (announce && newcomers.length) {
+             const names = newcomers.slice(0, 3).map(d => d.name).join(', ');
+             this.notify(
+               `${newcomers.length} client PC${newcomers.length === 1 ? '' : 's'} just came online — ${names} ready to connect.`,
+               'success'
+             );
+           }
+           return newcomers;
+         } catch (err) {
+           return [];
+         } finally {
+           this.refreshing = false;
+         }
+       },
+       async toggleAutoRefresh() {
+         this.autoRefresh = !this.autoRefresh;
+         if (this.refreshTimer) {
+           clearInterval(this.refreshTimer);
+           this.refreshTimer = null;
+         }
+         if (this.autoRefresh) {
+           await this.refreshDevices(false);  // immediate first check
+           if (!this.autoRefresh) return;     // toggled off while it was in flight
+           this.refreshTimer = setInterval(() => {
+             if (!document.hidden) this.refreshDevices(true);
+           }, 30000);
+           this.notify('Auto-refresh on — checking for new client PCs every 30s.', 'success');
+         } else {
+           this.notify('Auto-refresh turned off.', 'success');
+         }
+       },
        async syncNow() {
          if (this.syncing) return;
          this.syncing = true;
@@ -220,8 +281,15 @@
            const res = await fetch('/web/remote/sync', { method: 'POST' });
            const data = await res.json();
            if (data.success) {
-             this.notify(`Synced ${data.synced} device(s) across ${data.groups} group(s) (${data.online} online). Reloading...`, 'success');
-             setTimeout(() => window.location.reload(), 700);
+             // Live-update the list instead of reloading the whole page.
+             const newcomers = await this.refreshDevices(false);
+             const extra = newcomers.length
+               ? ` ${newcomers.length} new client PC${newcomers.length === 1 ? '' : 's'} online — ready to connect.`
+               : '';
+             this.notify(
+               `Synced ${data.synced} device(s) across ${data.groups} group(s) (${data.online} online). Device list updated.${extra}`,
+               'success'
+             );
            } else {
              this.notify(data.error || 'Sync failed', 'error');
            }
@@ -280,6 +348,8 @@
           <p class="text-slate-300 text-sm mt-1">
             Connect directly to client PCs — Desktop, Terminal &amp; File Transfer — right inside your dashboard.
           </p>
+          <p class="text-slate-300 text-xs mt-1"
+             x-text="`${liveStats.online}/${liveStats.total} online · ${liveStats.pinned} pinned · ${liveStats.groups} groups`"></p>
         </div>
       </div>
 
@@ -297,6 +367,16 @@
                 class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 text-white text-sm font-semibold transition disabled:opacity-60">
           <i class="fas fa-rotate" :class="syncing ? 'fa-spin' : ''"></i>
           <span x-text="syncing ? 'Syncing...' : 'Sync Devices'"></span>
+        </button>
+        {% endif %}
+
+        {% if is_configured %}
+        <button type="button" @click="toggleAutoRefresh" :aria-pressed="autoRefresh ? 'true' : 'false'"
+                class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 text-white text-sm font-semibold transition"
+                title="Poll for newly installed client PCs every 30 seconds">
+          <i class="fas fa-clock-rotate-left"></i>
+          <span x-text="autoRefresh ? 'Auto-refresh (30s): On' : 'Auto-refresh (30s)'"></span>
+          <span class="w-2 h-2 rounded-full" :class="autoRefresh ? 'bg-emerald-400' : 'bg-slate-300'"></span>
         </button>
         {% endif %}
 
@@ -878,6 +958,24 @@
                 <i class="fas fa-copy mr-1"></i>Copy Link
               </button>
             </div>
+            <template x-if="latestInvite && latestInvite.platform === 'linux' && latestInvite.is_active">
+              <div class="rounded-lg border border-slate-800 bg-slate-900 p-3 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                  <p class="text-xs font-bold text-white">
+                    <i class="fab fa-linux mr-2 text-emerald-400"></i>1-line Linux install command
+                  </p>
+                  <button type="button" @click="copyText(linuxOneLineCommand(), 'Linux 1-line command copied!')"
+                          class="px-3 py-1.5 rounded-md bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold flex-shrink-0">
+                    <i class="fas fa-copy mr-1"></i>Copy 1-Line Command
+                  </button>
+                </div>
+                <code class="block px-3 py-2 rounded bg-black/40 border border-white/15 text-[11px] font-mono text-emerald-200 break-all"
+                      x-text="linuxOneLineCommand()"></code>
+                <p class="text-[11px] text-slate-300">
+                  Paste this on the Linux PC in a terminal and press Enter — downloads and installs in one line, with no chmod or CRLF fixes.
+                </p>
+              </div>
+            </template>
             <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
               <button type="button" @click="copyText(clientShareMessage(latestInvite), 'Ready-to-send client message copied!')"
                       class="font-semibold text-blue-700 hover:underline">

@@ -1556,6 +1556,232 @@ async def test_linux_installer_single_quotes_dollar_mesh_ids_and_passes_bash_syn
     assert check.returncode == 0, check.stderr
 
 
+# ---------------------------------------------------------------------------
+# Overnight slice: all-OS installers, Linux 1-line portal command, live refresh
+# ---------------------------------------------------------------------------
 
+@pytest.mark.asyncio
+async def test_linux_public_portal_shows_one_line_command_without_upstream_leak(seeded):
+    from datetime import datetime, timedelta
+    from app.models.meshcentral import MeshCentralAgentInvite
+    from app.web.meshcentral_routes import web_remote_public_invite_page
+
+    db, ws1, _ws2, admin, _tech, _other = seeded
+    db.add(MeshCentralSettings(
+        workspace_id=ws1.id,
+        enabled=True,
+        server_url="https://mesh.hubconnect.co.za:4433",
+        username="admin",
+        password_encrypted=mc.encrypt_secret("Pass123-super-secret"),
+        default_mesh_id="mesh//GROUP1",
+    ))
+    now = datetime.utcnow()
+    for platform, token in (("linux", "linux-token123"), ("windows64", "win-token123"), ("macos", "mac-token123")):
+        db.add(MeshCentralAgentInvite(
+            workspace_id=ws1.id,
+            token=token,
+            mesh_id="mesh//GROUP1",
+            mesh_name="Acme Clients",
+            client_name="Sarah — Reception",
+            platform=platform,
+            install_mode="install",
+            created_by_id=admin.id,
+            created_at=now,
+            expires_at=now + timedelta(minutes=15),
+        ))
+    await db.commit()
+
+    def public_page(token):
+        req = _request(None, f"/web/client/remote/get/{token}")
+        req.url = SimpleNamespace(
+            path=f"/web/client/remote/get/{token}",
+            scheme="https",
+            netloc="tickets.hubconnect.co.za",
+        )
+        return web_remote_public_invite_page(req, token, db=db)
+
+    linux_html = bytes((await public_page("linux-token123")).body).decode()
+    one_line = (
+        "curl -fsSL https://tickets.hubconnect.co.za"
+        "/web/client/remote/get/linux-token123/download | sudo bash"
+    )
+    assert one_line in linux_html
+    assert "Copy Command" in linux_html
+    assert "1-Click" in linux_html
+    assert "Step 1" in linux_html and "Step 2" in linux_html
+    assert "sudo bash" in linux_html
+    # Nothing about the upstream MeshCentral server may reach the public page.
+    for leak in (
+        "mesh.hubconnect.co.za", "4433", "meshagents", "x-meshauth",
+        "Pass123-super-secret", "mesh//GROUP1", "/meshcentral-data/",
+    ):
+        assert leak not in linux_html, f"public page leaked {leak!r}"
+
+    win_html = bytes((await public_page("win-token123")).body).decode()
+    assert "SmartScreen" in win_html or "More info" in win_html
+    assert "sudo bash" not in win_html
+
+    mac_html = bytes((await public_page("mac-token123")).body).decode()
+    assert ".pkg" in mac_html.lower() and "double-click" in mac_html.lower()
+    assert "sudo bash" not in mac_html
+
+    # A spoofed Host header must never end up inside a `curl | sudo bash` command.
+    spoof_req = _request(None, "/web/client/remote/get/linux-token123")
+    spoof_req.url = SimpleNamespace(
+        path="/web/client/remote/get/linux-token123",
+        scheme="https",
+        netloc="evil.example.invalid",
+    )
+    spoof_html = bytes((await web_remote_public_invite_page(
+        spoof_req, "linux-token123", db=db
+    )).body).decode()
+    assert "evil.example.invalid" not in spoof_html
+    assert (
+        "curl -fsSL https://tickets.hubconnect.co.za"
+        "/web/client/remote/get/linux-token123/download | sudo bash"
+    ) in spoof_html
+
+
+@pytest.mark.asyncio
+async def test_devices_json_requires_auth_and_enforces_workspace_isolation(seeded):
+    from app.web.meshcentral_routes import web_remote_devices_json
+
+    db, ws1, ws2, _admin, tech, other_admin = seeded
+    db.add_all([
+        MeshCentralDevice(workspace_id=ws1.id, node_id="node-a1", name="Acme PC 1",
+                          client_name="Acme Alpha", is_online=True, is_pinned=True),
+        MeshCentralDevice(workspace_id=ws1.id, node_id="node-a2", name="Acme PC 2",
+                          client_name="Acme Alpha", is_online=False),
+        MeshCentralDevice(workspace_id=ws1.id, node_id="node-a3", name="Acme PC 3",
+                          client_name="Acme Beta", is_online=True),
+        MeshCentralDevice(workspace_id=ws2.id, node_id="node-r1", name="Rival PC",
+                          client_name="Rival Office", is_online=True),
+    ])
+    await db.commit()
+
+    unauth = await web_remote_devices_json(_request(None), db=db)
+    assert unauth.status_code == 401
+    assert json.loads(unauth.body)["success"] is False
+
+    ws1_resp = await web_remote_devices_json(_request(tech.id), db=db)
+    assert ws1_resp.status_code == 200
+    ws1_data = json.loads(ws1_resp.body)
+    assert ws1_data["success"] is True
+    assert {d["name"] for d in ws1_data["devices"]} == {"Acme PC 1", "Acme PC 2", "Acme PC 3"}
+    assert ws1_data["stats"] == {
+        "total": 3, "online": 2, "offline": 1, "pinned": 1, "groups": 2,
+    }
+
+    ws2_resp = await web_remote_devices_json(_request(other_admin.id), db=db)
+    ws2_data = json.loads(ws2_resp.body)
+    assert {d["name"] for d in ws2_data["devices"]} == {"Rival PC"}
+    assert ws2_data["stats"] == {
+        "total": 1, "online": 1, "offline": 0, "pinned": 0, "groups": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_macos_installer_magic_accepts_pkg_macho_and_shell_fallback(monkeypatch):
+    cfg = _mc_settings()
+
+    # Primary macOS agent (id=10005) is a normal xar! .pkg archive.
+    state = _fake_aiohttp(monkeypatch, get_responses=[(200, b"xar!-signed-pkg-body")])
+    payload, filename, ctype = await mc.proxy_agent_installer(cfg, "mesh//GROUP1", platform="macos")
+    assert payload == b"xar!-signed-pkg-body"
+    assert filename.endswith(".pkg")
+    assert ctype == "application/octet-stream"
+    assert "id=10005" in state["get_calls"][0]["url"]
+
+    # If 10005 is unavailable, agent id=29 may return a Mach-O binary.
+    state = _fake_aiohttp(monkeypatch, get_responses=[
+        (404, b""), (200, b"\xcf\xfa\xed\xfe-macho-agent"),
+    ])
+    payload, _filename, _ctype = await mc.proxy_agent_installer(cfg, "mesh//GROUP1", platform="macos")
+    assert payload.startswith(b"\xcf\xfa\xed\xfe")
+    assert "id=29" in state["get_calls"][1]["url"]
+
+    # Some MeshCentral versions serve the legacy macOS installer at
+    # /meshosxagent?id=29 as a shell script; accept it rather than fail closed.
+    state = _fake_aiohttp(monkeypatch, get_responses=[
+        (404, b""), (404, b""), (200, b"#!/bin/bash\necho macos installer\n"),
+    ])
+    payload, _filename, _ctype = await mc.proxy_agent_installer(cfg, "mesh//GROUP1", platform="macos")
+    assert payload.startswith(b"#!/bin/bash")
+    assert any("meshosxagent" in call["url"] and "id=29" in call["url"]
+               for call in state["get_calls"])
+
+    # A shell body from the primary macOS endpoint is not a valid .pkg: keep
+    # walking the fallbacks instead of accepting it and hiding id=29.
+    state = _fake_aiohttp(monkeypatch, get_responses=[
+        (200, b"#!/bin/sh\necho not-the-pkg"),
+        (404, b""),
+        (200, b"#!/bin/bash\necho legacy-shell-agent\n"),
+    ])
+    payload, filename, ctype = await mc.proxy_agent_installer(cfg, "mesh//GROUP1", platform="macos")
+    assert len(state["get_calls"]) == 3
+    assert payload.startswith(b"#!/bin/bash")
+    assert filename.endswith(".sh")
+    assert ctype == "text/x-shellscript"
+    assert "id=10005" in state["get_calls"][0]["url"]
+    assert "meshosxagent" in state["get_calls"][2]["url"]
+
+    # Windows agent IDs and Linux script mode stay distinct.
+    for platform, expected_id in (("windows64", "4"), ("windows32", "3")):
+        state = _fake_aiohttp(monkeypatch, get_responses=[(200, b"MZ-agent")])
+        await mc.proxy_agent_installer(cfg, "mesh//GROUP1", platform=platform)
+        assert f"id={expected_id}" in state["get_calls"][0]["url"]
+    state = _fake_aiohttp(monkeypatch)
+    payload, _filename, _ctype = await mc.proxy_agent_installer(
+        cfg, "mesh//GROUP1", platform="linux"
+    )
+    assert b"meshagents?script=1" in payload
+    assert state["get_calls"] == []  # Linux is generated locally; no upstream call
+
+
+@pytest.mark.asyncio
+async def test_remote_dashboard_exposes_auto_refresh_and_inline_linux_copy(seeded):
+    from html.parser import HTMLParser
+    from app.web.meshcentral_routes import web_remote_dashboard
+
+    db, ws1, _ws2, _admin, tech, _other = seeded
+    db.add(MeshCentralSettings(
+        workspace_id=ws1.id, enabled=True,
+        server_url="https://mesh.hubconnect.co.za:4433", verify_ssl=True,
+    ))
+    await db.commit()
+
+    page = await web_remote_dashboard(_request(tech.id), db=db)
+    html = bytes(page.body).decode()
+    assert "Auto-refresh (30s)" in html
+    assert "autoRefresh" in html
+    assert "/web/remote/devices/json" in html
+    assert "Copy 1-Line Command" in html
+    assert "latestInvite.platform === 'linux'" in html
+    assert "inv.platform !== 'linux'" in html
+    assert "linuxOneLineCommand" in html
+    assert "refreshing: false" in html and "refreshSeq: 0" in html
+    assert "seq !== this.refreshSeq" in html
+    assert "remote-stats-data" in html
+
+    # `tojson` output contains quotes; embedding it directly in the x-data
+    # attribute would truncate the Alpine component at `liveStats: {`.
+    class _XDataCollector(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.values: list[str] = []
+
+        def handle_starttag(self, tag, attrs):
+            for name, value in attrs:
+                if name == "x-data" and value:
+                    self.values.append(value)
+
+    collector = _XDataCollector()
+    collector.feed(html)
+    assert collector.values, "dashboard x-data attribute missing"
+    x_data = "\n".join(collector.values)
+    assert "liveStats:" in x_data
+    assert "notify(msg" in x_data
+    assert "refreshDevices" in x_data
+    assert "toast: null" in x_data
 
 

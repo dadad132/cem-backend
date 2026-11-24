@@ -80,22 +80,65 @@
         <span>Download Remote Support Tool</span>
       </a>
 
-      <!-- Simple 3-step instructions for the client -->
+      {% if is_valid and platform == 'linux' %}
+      <!-- Linux: one command, no chmod +x and no CRLF headaches -->
+      <div class="mt-4 rounded-xl border-2 border-slate-900 bg-slate-900 p-4 shadow-sm">
+        <div class="flex items-center justify-between gap-2 mb-2">
+          <p class="text-sm font-bold text-white"><i class="fab fa-linux mr-2 text-emerald-400"></i>1-Click Copy Linux Command</p>
+          <span class="text-[10px] font-semibold uppercase tracking-wide text-emerald-300">No chmod needed</span>
+        </div>
+        <p class="text-xs text-slate-300 mb-3">
+          Copy the command, open a terminal on the Linux PC, paste it and press Enter. The agent downloads and installs in one step — no file permissions, no CRLF issues.
+        </p>
+        <div class="flex flex-col sm:flex-row gap-2">
+          <code id="linuxInstallCommand"
+                class="flex-1 block px-3 py-2.5 rounded-lg bg-black/40 border border-white/15 text-xs font-mono text-emerald-200 break-all">{{ linux_install_command }}</code>
+          <button type="button" id="copyLinuxCommand"
+                  class="px-4 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold flex-shrink-0 flex items-center justify-center gap-2">
+            <i class="fas fa-copy"></i><span id="copyLinuxCommandLabel">Copy Command</span>
+          </button>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Simple, OS-tailored instructions for the client -->
       <div class="mt-6 pt-5 border-t border-slate-200">
+        {% if platform == 'linux' %}
+        <h2 class="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">Install Linux in 2 quick steps</h2>
+        {% else %}
         <h2 class="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">How to connect in 3 quick steps</h2>
+        {% endif %}
         <ol class="space-y-2.5 text-sm text-slate-700">
+          {% if platform == 'linux' %}
+          <li class="flex items-start gap-2.5">
+            <span class="w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">1</span>
+            <span><strong>Step 1:</strong> Click <strong>Copy Command</strong> in the black box above.</span>
+          </li>
+          <li class="flex items-start gap-2.5">
+            <span class="w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">2</span>
+            <span><strong>Step 2:</strong> Open a terminal on the Linux PC, paste the command and press <strong>Enter</strong>. Enter your sudo password if asked — the rest is automatic.</span>
+          </li>
+          {% else %}
           <li class="flex items-start gap-2.5">
             <span class="w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">1</span>
             <span>Click <strong>Download Remote Support Tool</strong> above.</span>
           </li>
+          {% if platform == 'macos' %}
           <li class="flex items-start gap-2.5">
             <span class="w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">2</span>
-            <span>Open the downloaded file (if Windows asks for permission, click <strong>Yes</strong> or <strong>More info → Run anyway</strong>).</span>
+            <span>Open your Downloads folder and <strong>double-click the <span class="font-mono">.pkg</span> file</strong>, then follow the macOS installer prompts. If macOS warns about an unidentified developer, choose <strong>Open</strong> to continue.</span>
           </li>
+          {% else %}
+          <li class="flex items-start gap-2.5">
+            <span class="w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">2</span>
+            <span>Open the downloaded file. If <strong>Windows SmartScreen</strong> warns you, click <strong>More info → Run anyway</strong> (or <strong>Yes</strong> when asked for permission).</span>
+          </li>
+          {% endif %}
           <li class="flex items-start gap-2.5">
             <span class="w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">3</span>
             <span>Click <strong>{% if invite.install_mode == 'connect' %}Connect{% else %}Install{% endif %}</strong> and tell your technician — they will connect directly to assist you.</span>
           </li>
+          {% endif %}
         </ol>
       </div>
 
@@ -104,6 +147,28 @@
           let remaining = {{ remaining_seconds | int }};
           const textEl = document.getElementById('countdownText');
           const btnEl = document.getElementById('downloadBtn');
+          const copyBtn = document.getElementById('copyLinuxCommand');
+          if (copyBtn) {
+            copyBtn.addEventListener('click', async function () {
+              const codeEl = document.getElementById('linuxInstallCommand');
+              const label = document.getElementById('copyLinuxCommandLabel');
+              const command = (codeEl ? codeEl.textContent : '').trim();
+              try {
+                await navigator.clipboard.writeText(command);
+                if (label) label.textContent = 'Copied!';
+              } catch (e) {
+                if (codeEl) {
+                  const range = document.createRange();
+                  range.selectNodeContents(codeEl);
+                  const selection = window.getSelection();
+                  selection.removeAllRanges();
+                  selection.addRange(range);
+                }
+                if (label) label.textContent = 'Press Ctrl+C';
+              }
+              setTimeout(() => { if (label) label.textContent = 'Copy Command'; }, 2500);
+            });
+          }
           function render() {
             if (remaining <= 0) {
               textEl.textContent = '00:00';

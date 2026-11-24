@@ -5,12 +5,14 @@ import logging
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.database import get_session
 from app.core.meshcentral import (
     AGENT_PLATFORMS,
@@ -147,64 +149,9 @@ def _remember_local_port(settings_row: MeshCentralSettings, autolink: Optional[d
         pass
 
 
-# ---------------------------------------------------------------------------
-# Custom Remote Client Access Dashboard
-# ---------------------------------------------------------------------------
-
-@router.get("/remote", response_class=HTMLResponse)
-async def web_remote_dashboard(request: Request, db: AsyncSession = Depends(get_session)):
-    user, redirect = await _require_workspace_user(request, db)
-    if redirect:
-        return redirect
-
-    workspace = (
-        await db.execute(select(Workspace).where(Workspace.id == user.workspace_id))
-    ).scalar_one_or_none()
-    mc_settings = await _get_or_none_settings(db, user.workspace_id)
-    if mc_settings is None:
-        mc_settings = await auto_import_local_meshcentral_if_present(db, user.workspace_id)
-
-    devices = (
-        await db.execute(
-            select(MeshCentralDevice)
-            .where(MeshCentralDevice.workspace_id == user.workspace_id)
-            .order_by(
-                desc(MeshCentralDevice.is_pinned),
-                desc(MeshCentralDevice.is_online),
-                MeshCentralDevice.name.asc(),
-            )
-        )
-    ).scalars().all()
-
-    companies = (
-        await db.execute(
-            select(Company)
-            .where(Company.workspace_id == user.workspace_id)
-            .order_by(Company.name.asc())
-        )
-    ).scalars().all()
-
-    recent_logs = (
-        await db.execute(
-            select(MeshCentralSessionLog)
-            .where(MeshCentralSessionLog.workspace_id == user.workspace_id)
-            .order_by(desc(MeshCentralSessionLog.started_at))
-            .limit(8)
-        )
-    ).scalars().all()
-
-    # Build group summary counts for the left client-group rail
-    group_map: dict[str, dict] = {}
-    for dev in devices:
-        label = (dev.client_name or dev.mesh_name or "Unassigned").strip() or "Unassigned"
-        bucket = group_map.setdefault(label, {"name": label, "total": 0, "online": 0})
-        bucket["total"] += 1
-        if dev.is_online:
-            bucket["online"] += 1
-    groups = sorted(group_map.values(), key=lambda g: (-g["online"], g["name"].lower()))
-
-    # Serialize devices cleanly for instant client-side Alpine.js filtering
-    devices_payload = [
+def _serialize_devices_for_dashboard(devices) -> list[dict]:
+    """Serialize devices identically for the initial page and the refresh API."""
+    return [
         {
             "id": d.id,
             "node_id": d.node_id,
@@ -224,8 +171,86 @@ async def web_remote_dashboard(request: Request, db: AsyncSession = Depends(get_
         for d in devices
     ]
 
+
+def _group_summary(devices) -> list[dict]:
+    """Build the left-rail client-group summary counts for the dashboard."""
+    group_map: dict[str, dict] = {}
+    for dev in devices:
+        label = (dev.client_name or dev.mesh_name or "Unassigned").strip() or "Unassigned"
+        bucket = group_map.setdefault(label, {"name": label, "total": 0, "online": 0})
+        bucket["total"] += 1
+        if dev.is_online:
+            bucket["online"] += 1
+    return sorted(group_map.values(), key=lambda g: (-g["online"], g["name"].lower()))
+
+
+def _device_stats(devices, groups) -> dict:
     online_count = sum(1 for d in devices if d.is_online)
-    pinned_count = sum(1 for d in devices if d.is_pinned)
+    return {
+        "total": len(devices),
+        "online": online_count,
+        "offline": len(devices) - online_count,
+        "pinned": sum(1 for d in devices if d.is_pinned),
+        "groups": len(groups),
+    }
+
+
+async def _workspace_device_rows(db: AsyncSession, workspace_id: int) -> list:
+    """Workspace-scoped device query shared by the page and refresh endpoint."""
+    return (
+        await db.execute(
+            select(MeshCentralDevice)
+            .where(MeshCentralDevice.workspace_id == workspace_id)
+            .order_by(
+                desc(MeshCentralDevice.is_pinned),
+                desc(MeshCentralDevice.is_online),
+                MeshCentralDevice.name.asc(),
+            )
+        )
+    ).scalars().all()
+
+
+# ---------------------------------------------------------------------------
+# Custom Remote Client Access Dashboard
+# ---------------------------------------------------------------------------
+
+@router.get("/remote", response_class=HTMLResponse)
+async def web_remote_dashboard(request: Request, db: AsyncSession = Depends(get_session)):
+    user, redirect = await _require_workspace_user(request, db)
+    if redirect:
+        return redirect
+
+    workspace = (
+        await db.execute(select(Workspace).where(Workspace.id == user.workspace_id))
+    ).scalar_one_or_none()
+    mc_settings = await _get_or_none_settings(db, user.workspace_id)
+    if mc_settings is None:
+        mc_settings = await auto_import_local_meshcentral_if_present(db, user.workspace_id)
+
+    devices = await _workspace_device_rows(db, user.workspace_id)
+
+    companies = (
+        await db.execute(
+            select(Company)
+            .where(Company.workspace_id == user.workspace_id)
+            .order_by(Company.name.asc())
+        )
+    ).scalars().all()
+
+    recent_logs = (
+        await db.execute(
+            select(MeshCentralSessionLog)
+            .where(MeshCentralSessionLog.workspace_id == user.workspace_id)
+            .order_by(desc(MeshCentralSessionLog.started_at))
+            .limit(8)
+        )
+    ).scalars().all()
+
+    # Group rail counts and Alpine-friendly payload (shared with the refresh API)
+    groups = _group_summary(devices)
+    devices_payload = _serialize_devices_for_dashboard(devices)
+    stats = _device_stats(devices, groups)
+
     is_configured = bool(mc_settings and mc_settings.enabled and mc_settings.server_url)
     has_sso = bool(
         mc_settings
@@ -297,17 +322,27 @@ async def web_remote_dashboard(request: Request, db: AsyncSession = Depends(get_
             "agent_platforms": AGENT_PLATFORMS,
             "companies": companies,
             "recent_logs": recent_logs,
-            "stats": {
-                "total": len(devices),
-                "online": online_count,
-                "offline": len(devices) - online_count,
-                "pinned": pinned_count,
-                "groups": len(groups),
-            },
+            "stats": stats,
             "flash_message": flash_message,
             "flash_type": flash_type,
         },
     )
+
+
+@router.get("/remote/devices/json")
+async def web_remote_devices_json(request: Request, db: AsyncSession = Depends(get_session)):
+    """Lightweight workspace-scoped device payload for live dashboard refresh."""
+    user, redirect = await _require_workspace_user(request, db)
+    if redirect:
+        return JSONResponse({"success": False, "error": "Authentication required"}, status_code=401)
+
+    devices = await _workspace_device_rows(db, user.workspace_id)
+    groups = _group_summary(devices)
+    return JSONResponse({
+        "success": True,
+        "devices": _serialize_devices_for_dashboard(devices),
+        "stats": _device_stats(devices, groups),
+    }, headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------------------
@@ -797,13 +832,32 @@ async def web_remote_settings_test(request: Request, db: AsyncSession = Depends(
 # ---------------------------------------------------------------------------
 
 def _request_public_origin(request: Request) -> str:
-    """Return the browser-facing origin (e.g. https://tickets.hubconnect.co.za)."""
+    """Return the browser-facing origin (e.g. https://tickets.hubconnect.co.za).
+
+    Public share links and the copyable Linux command must not be built from an
+    arbitrary Host header. Trust the request host only when it matches the
+    configured public domain (or is a loopback dev address); otherwise pin the
+    link to the canonical configured domain.
+    """
     scheme = getattr(request.url, "scheme", "https") or "https"
     netloc = getattr(request.url, "netloc", "") or ""
     if not netloc:
-        from app.core.config import get_settings
         return get_settings().public_base_url.rstrip("/")
-    return f"{scheme}://{netloc}".rstrip("/")
+
+    origin = f"{scheme}://{netloc}".rstrip("/")
+    hostname = (urlparse(origin).hostname or "").lower()
+    if hostname in {"localhost", "127.0.0.1", "::1"}:
+        return origin
+
+    configured = (get_settings().app_domain or "").strip().rstrip("/")
+    if not configured:
+        return origin
+    parsed_configured = urlparse(configured if "://" in configured else f"//{configured}")
+    configured_host = (parsed_configured.hostname or "").lower()
+    configured_netloc = parsed_configured.netloc or configured
+    if configured_host and hostname == configured_host:
+        return origin
+    return f"{scheme}://{configured_netloc}".rstrip("/")
 
 
 def _serialize_invite(
@@ -1403,6 +1457,15 @@ async def web_remote_public_invite_page(
     site_title = (workspace.site_title or workspace.name) if workspace else "Remote Support"
     primary_color = (workspace.primary_color if workspace and workspace.primary_color else "#dc2626")
 
+    platform = invite.platform if invite else "windows64"
+    # The one-line command targets THIS public host only. No MeshCentral URL,
+    # credentials or internal paths are ever rendered on the public page.
+    public_origin = _request_public_origin(request)
+    linux_install_command = (
+        f"curl -fsSL {public_origin}/web/client/remote/get/{invite.token}/download | sudo bash"
+        if is_valid and invite and platform == "linux" else ""
+    )
+
     status_code = 200 if is_valid else 410
     return templates.TemplateResponse(
         "remote/client_download.html",
@@ -1416,6 +1479,8 @@ async def web_remote_public_invite_page(
             "remaining_seconds": remaining,
             "expired_reason": reason,
             "platform_meta": platform_meta,
+            "platform": platform,
+            "linux_install_command": linux_install_command,
         },
         status_code=status_code,
     )
