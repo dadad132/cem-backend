@@ -5,6 +5,7 @@ import asyncio
 import csv
 import io
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -862,7 +863,7 @@ async def test_agent_direct_download_and_expiring_client_invite_lifecycle(seeded
     )
     await db.commit()
 
-    async def fake_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0):
+    async def fake_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0, format="auto"):
         return b"MZ-FAKE-MESHAGENT-BINARY", f"Acme-IT-Support-{platform}.exe", "application/octet-stream"
 
     monkeypatch.setattr("app.web.meshcentral_routes.proxy_agent_installer", fake_proxy)
@@ -972,7 +973,7 @@ async def test_remote_group_selection_rejects_unknown_and_cross_tenant_mesh_ids(
         assert denied_invite.status_code == 400
         assert json.loads(denied_invite.body)["success"] is False
 
-    async def fake_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0):
+    async def fake_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0, format="auto"):
         assert mesh_id == "mesh//MINE"
         return b"AGENT", "agent.exe", "application/octet-stream"
 
@@ -1012,7 +1013,7 @@ async def test_public_invite_pages_and_downloads_are_no_store_and_unindexable(se
     db.add(invite)
     await db.commit()
 
-    async def fake_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0):
+    async def fake_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0, format="auto"):
         return b"AGENT-SCRIPT", "agent.sh", "text/x-shellscript"
 
     monkeypatch.setattr("app.web.meshcentral_routes.proxy_agent_installer", fake_proxy)
@@ -1061,7 +1062,7 @@ async def test_public_invite_download_caps_uses_and_rechecks_after_proxy(seeded,
     db.add(invite)
     await db.commit()
 
-    async def fake_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0):
+    async def fake_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0, format="auto"):
         return b"AGENT-BINARY", "agent.exe", "application/octet-stream"
 
     monkeypatch.setattr("app.web.meshcentral_routes.proxy_agent_installer", fake_proxy)
@@ -1084,7 +1085,7 @@ async def test_public_invite_download_caps_uses_and_rechecks_after_proxy(seeded,
     invite.expires_at = datetime.utcnow() + timedelta(minutes=10)
     await db.commit()
 
-    async def revoking_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0):
+    async def revoking_proxy(settings_row, mesh_id, platform="windows64", install_mode="install", brand_name="RemoteSupport", timeout=30.0, format="auto"):
         other_engine = create_async_engine(db.get_bind().url)
         try:
             async with AsyncSession(other_engine, expire_on_commit=False) as other:
@@ -2110,7 +2111,7 @@ async def test_linux_installer_single_quotes_dollar_mesh_ids_and_passes_bash_syn
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_linux_public_portal_shows_one_line_command_without_upstream_leak(seeded):
+async def test_linux_public_portal_shows_one_line_command_without_upstream_leak(seeded, monkeypatch):
     from datetime import datetime, timedelta
     from app.models.meshcentral import MeshCentralAgentInvite
     from app.web.meshcentral_routes import web_remote_public_invite_page
@@ -2149,16 +2150,20 @@ async def test_linux_public_portal_shows_one_line_command_without_upstream_leak(
         )
         return web_remote_public_invite_page(req, token, db=db)
 
-    linux_html = bytes((await public_page("linux-token123")).body).decode()
+    linux_html = unescape(bytes((await public_page("linux-token123")).body).decode())
+    linux_url = (
+        "https://tickets.hubconnect.co.za/web/client/remote/get/linux-token123/download"
+    )
     one_line = (
-        "curl -fsSL https://tickets.hubconnect.co.za"
-        "/web/client/remote/get/linux-token123/download | sudo bash"
+        f"(curl -fsSL {linux_url} -o /tmp/cem-remote.sh || "
+        f"wget -qO /tmp/cem-remote.sh {linux_url}) && "
+        "sudo bash /tmp/cem-remote.sh; rm -f /tmp/cem-remote.sh"
     )
     assert one_line in linux_html
     assert "Copy Command" in linux_html
     assert "1-Click" in linux_html
     assert "Step 1" in linux_html and "Step 2" in linux_html
-    assert "sudo bash" in linux_html
+    assert "| sudo bash" not in linux_html
     # Nothing about the upstream MeshCentral server may reach the public page.
     for leak in (
         "mesh.hubconnect.co.za", "4433", "meshagents", "x-meshauth",
@@ -2166,13 +2171,27 @@ async def test_linux_public_portal_shows_one_line_command_without_upstream_leak(
     ):
         assert leak not in linux_html, f"public page leaked {leak!r}"
 
-    win_html = bytes((await public_page("win-token123")).body).decode()
+    win_html = unescape(bytes((await public_page("win-token123")).body).decode())
     assert "SmartScreen" in win_html or "More info" in win_html
     assert "sudo bash" not in win_html
+    assert "cem-remote.sh" not in win_html
 
-    mac_html = bytes((await public_page("mac-token123")).body).decode()
-    assert ".pkg" in mac_html.lower() and "double-click" in mac_html.lower()
-    assert "sudo bash" not in mac_html
+    mac_html = unescape(bytes((await public_page("mac-token123")).body).decode())
+    mac_command = (
+        "curl -fsSL https://tickets.hubconnect.co.za"
+        "/web/client/remote/get/mac-token123/download?format=script"
+        " -o /tmp/cem-remote.sh && sudo bash /tmp/cem-remote.sh; rm -f /tmp/cem-remote.sh"
+    )
+    assert mac_command in mac_html
+    assert "1-Click Copy macOS Terminal Command" in mac_html
+    assert "Screen Recording" in mac_html and "Accessibility" in mac_html
+    assert "Download Remote Support Tool" in mac_html
+    assert "| sudo bash" not in mac_html
+    for leak in (
+        "mesh.hubconnect.co.za", "4433", "meshagents", "x-meshauth",
+        "Pass123-super-secret", "mesh//GROUP1", "/meshcentral-data/",
+    ):
+        assert leak not in mac_html, f"macOS public page leaked {leak!r}"
 
     # A spoofed Host header must never end up inside a `curl | sudo bash` command.
     spoof_req = _request(None, "/web/client/remote/get/linux-token123")
@@ -2186,9 +2205,63 @@ async def test_linux_public_portal_shows_one_line_command_without_upstream_leak(
     )).body).decode()
     assert "evil.example.invalid" not in spoof_html
     assert (
-        "curl -fsSL https://tickets.hubconnect.co.za"
-        "/web/client/remote/get/linux-token123/download | sudo bash"
-    ) in spoof_html
+        "(curl -fsSL https://tickets.hubconnect.co.za"
+        "/web/client/remote/get/linux-token123/download -o /tmp/cem-remote.sh || "
+        "wget -qO /tmp/cem-remote.sh https://tickets.hubconnect.co.za"
+        "/web/client/remote/get/linux-token123/download) && "
+        "sudo bash /tmp/cem-remote.sh; rm -f /tmp/cem-remote.sh"
+    ) in unescape(spoof_html)
+
+    # Even with APP_DOMAIN unset, Host-header shell metacharacters must never
+    # reach a copyable command: fall back to the configured public base URL.
+    monkeypatch.setattr(
+        "app.web.meshcentral_routes.get_settings",
+        lambda: SimpleNamespace(
+            app_domain="", public_base_url="https://tickets.hubconnect.co.za"
+        ),
+    )
+    injection_req = _request(None, "/web/client/remote/get/linux-token123")
+    injection_req.url = SimpleNamespace(
+        path="/web/client/remote/get/linux-token123",
+        scheme="https",
+        netloc="x;touch /tmp/pwned",
+    )
+    injection_html = unescape(bytes((await web_remote_public_invite_page(
+        injection_req, "linux-token123", db=db
+    )).body).decode())
+    assert "touch /tmp/pwned" not in injection_html
+    assert linux_url in injection_html
+
+    userinfo_req = _request(None, "/web/client/remote/get/linux-token123")
+    userinfo_req.url = SimpleNamespace(
+        path="/web/client/remote/get/linux-token123",
+        scheme="https",
+        netloc="evil;touch@good.test",
+    )
+    userinfo_html = unescape(bytes((await web_remote_public_invite_page(
+        userinfo_req, "linux-token123", db=db
+    )).body).decode())
+    assert "touch@good.test" not in userinfo_html
+    assert linux_url in userinfo_html
+
+    monkeypatch.setattr(
+        "app.web.meshcentral_routes.get_settings",
+        lambda: SimpleNamespace(
+            app_domain="tickets.hubconnect.co.za",
+            public_base_url="https://tickets.hubconnect.co.za",
+        ),
+    )
+    scheme_req = _request(None, "/web/client/remote/get/linux-token123")
+    scheme_req.url = SimpleNamespace(
+        path="/web/client/remote/get/linux-token123",
+        scheme="https;touch /tmp/pwned",
+        netloc="tickets.hubconnect.co.za",
+    )
+    scheme_html = unescape(bytes((await web_remote_public_invite_page(
+        scheme_req, "linux-token123", db=db
+    )).body).decode())
+    assert "touch /tmp/pwned" not in scheme_html
+    assert linux_url in scheme_html
 
 
 @pytest.mark.asyncio
@@ -2230,49 +2303,52 @@ async def test_devices_json_requires_auth_and_enforces_workspace_isolation(seede
 
 
 @pytest.mark.asyncio
-async def test_macos_installer_magic_accepts_pkg_macho_and_shell_fallback(monkeypatch):
+async def test_macos_auto_only_serves_genuine_pkg_otherwise_returns_command_script(monkeypatch):
     cfg = _mc_settings()
 
-    # Primary macOS agent (id=10005) is a normal xar! .pkg archive.
+    # A genuine `xar!` package is still served directly as a .pkg.
     state = _fake_aiohttp(monkeypatch, get_responses=[(200, b"xar!-signed-pkg-body")])
     payload, filename, ctype = await mc.proxy_agent_installer(cfg, "mesh//GROUP1", platform="macos")
     assert payload == b"xar!-signed-pkg-body"
     assert filename.endswith(".pkg")
     assert ctype == "application/octet-stream"
     assert "id=10005" in state["get_calls"][0]["url"]
+    assert len(state["get_calls"]) == 1
 
-    # If 10005 is unavailable, agent id=29 may return a Mach-O binary.
+    # id=10006 is the second (and last) package candidate.
     state = _fake_aiohttp(monkeypatch, get_responses=[
-        (404, b""), (200, b"\xcf\xfa\xed\xfe-macho-agent"),
-    ])
-    payload, _filename, _ctype = await mc.proxy_agent_installer(cfg, "mesh//GROUP1", platform="macos")
-    assert payload.startswith(b"\xcf\xfa\xed\xfe")
-    assert "id=29" in state["get_calls"][1]["url"]
-
-    # Some MeshCentral versions serve the legacy macOS installer at
-    # /meshosxagent?id=29 as a shell script; accept it rather than fail closed.
-    state = _fake_aiohttp(monkeypatch, get_responses=[
-        (404, b""), (404, b""), (200, b"#!/bin/bash\necho macos installer\n"),
-    ])
-    payload, _filename, _ctype = await mc.proxy_agent_installer(cfg, "mesh//GROUP1", platform="macos")
-    assert payload.startswith(b"#!/bin/bash")
-    assert any("meshosxagent" in call["url"] and "id=29" in call["url"]
-               for call in state["get_calls"])
-
-    # A shell body from the primary macOS endpoint is not a valid .pkg: keep
-    # walking the fallbacks instead of accepting it and hiding id=29.
-    state = _fake_aiohttp(monkeypatch, get_responses=[
-        (200, b"#!/bin/sh\necho not-the-pkg"),
-        (404, b""),
-        (200, b"#!/bin/bash\necho legacy-shell-agent\n"),
+        (404, b""), (200, b"xar!-other-pkg"),
     ])
     payload, filename, ctype = await mc.proxy_agent_installer(cfg, "mesh//GROUP1", platform="macos")
-    assert len(state["get_calls"]) == 3
-    assert payload.startswith(b"#!/bin/bash")
-    assert filename.endswith(".sh")
+    assert payload.startswith(b"xar!")
+    assert filename.endswith(".pkg")
+    assert "id=10006" in state["get_calls"][1]["url"]
+
+    # A raw Mach-O from id=10005 must NEVER be served with a .pkg filename.
+    macho = b"\xcf\xfa\xed\xfe-macho-not-a-pkg"
+    state = _fake_aiohttp(monkeypatch, get_responses=[
+        (200, macho), (404, b""),
+    ])
+    payload, filename, ctype = await mc.proxy_agent_installer(cfg, "mesh//GROUP1", platform="macos")
+    assert payload.startswith(b"#!/usr/bin/env bash")
+    assert filename.endswith(".command")
     assert ctype == "text/x-shellscript"
-    assert "id=10005" in state["get_calls"][0]["url"]
-    assert "meshosxagent" in state["get_calls"][2]["url"]
+    assert macho not in payload  # raw Mach-O is never disguised as a .pkg
+    assert len(state["get_calls"]) == 2
+
+    # 404s / HTML error pages also fall back to the working installer script.
+    state = _fake_aiohttp(monkeypatch, get_responses=[
+        (404, b""), (404, b""),
+    ])
+    payload, filename, _ctype = await mc.proxy_agent_installer(cfg, "mesh//GROUP1", platform="macos")
+    assert filename.endswith(".command")
+    assert "arch64" in payload.decode() or "arm64" in payload.decode()
+
+    state = _fake_aiohttp(monkeypatch, get_responses=[
+        (200, b"<html>not a package</html>"), (200, b"<html>still not a package</html>"),
+    ])
+    payload, filename, _ctype = await mc.proxy_agent_installer(cfg, "mesh//GROUP1", platform="macos")
+    assert filename.endswith(".command")
 
     # Windows agent IDs and Linux script mode stay distinct.
     for platform, expected_id in (("windows64", "4"), ("windows32", "3")):
@@ -2308,6 +2384,11 @@ async def test_remote_dashboard_exposes_auto_refresh_and_inline_linux_copy(seede
     assert "latestInvite.platform === 'linux'" in html
     assert "inv.platform !== 'linux'" in html
     assert "linuxOneLineCommand" in html
+    assert "| sudo bash" not in html
+    assert "macosOneLineCommand" in html
+    assert "latestInvite.platform === 'macos'" in html
+    assert "format=script" in html
+    assert "1-line macOS Terminal command" in html
     assert "refreshing: false" in html and "refreshSeq: 0" in html
     assert "seq !== this.refreshSeq" in html
     assert "remote-stats-data" in html
@@ -2606,5 +2687,255 @@ async def test_ticket_remote_matching_ignores_short_ambiguous_names(seeded):
     assert "Kitchen PC" not in html and "Banner Server" not in html
     assert "/web/remote/session/" not in html
     assert 'name="client_name" value="IT"' in html
+
+
+# ---------------------------------------------------------------------------
+# Slice 5: hardened Linux and macOS one-click installers
+# ---------------------------------------------------------------------------
+
+def _assert_valid_bash(script_text: str) -> None:
+    check = subprocess.run(["bash", "-n"], input=script_text, text=True, capture_output=True)
+    assert check.returncode == 0, check.stderr
+
+
+@pytest.mark.asyncio
+async def test_generated_download_helper_falls_back_from_curl_to_wget(tmp_path):
+    cfg = MeshCentralSettings(
+        workspace_id=1, enabled=True, server_url="https://mesh.acme.test", verify_ssl=True,
+    )
+    payload, _filename, _ctype = await mc.proxy_agent_installer(
+        cfg, "mesh//GROUP1", platform="linux"
+    )
+    helper_prefix = payload.decode().split('TMP_DIR="$(mktemp', 1)[0]
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    curl_stub = bin_dir / "curl"
+    curl_stub.write_text("#!/bin/sh\nexit 7\n")
+    curl_stub.chmod(0o755)
+    wget_stub = bin_dir / "wget"
+    wget_stub.write_text(
+        '#!/bin/sh\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "-O" ]; then shift; printf fallback > "$1"; exit 0; fi\n'
+        '  shift\n'
+        'done\nexit 1\n'
+    )
+    wget_stub.chmod(0o755)
+
+    dest = tmp_path / "agent"
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+    probe = subprocess.run(
+        ["bash", "-c", helper_prefix + '\ndownload_file "https://example.invalid/agent" "$1"',
+         "bash", str(dest)],
+        env=env, text=True, capture_output=True,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert dest.read_text() == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_linux_installer_is_self_contained_arch_aware_and_handles_both_modes():
+    import shlex
+
+    cfg = MeshCentralSettings(
+        workspace_id=1, enabled=True,
+        server_url="https://tickets.hubconnect.co.za:4433",
+        verify_ssl=True, username="admin",
+        password_encrypted=mc.encrypt_secret("Pass123-super-secret"),
+    )
+    mesh_id = "mesh//abc$sUsy@123"
+    brand = "Kyotech's Remote Support"
+    install_payload, install_filename, install_ctype = await mc.proxy_agent_installer(
+        cfg, mesh_id, platform="linux", install_mode="install", brand_name=brand,
+    )
+    connect_payload, _connect_filename, _connect_ctype = await mc.proxy_agent_installer(
+        cfg, mesh_id, platform="linux", install_mode="connect", brand_name=brand,
+    )
+    install_script = install_payload.decode("utf-8")
+    connect_script = connect_payload.decode("utf-8")
+
+    assert install_filename == "Kyotech-s-Remote-Support-Support-Linux.sh"
+    assert install_ctype == "text/x-shellscript"
+    assert shlex.quote(f"Downloading {brand} Remote Support agent...") in install_script
+    assert "'abc$sUsy@123'" in install_script
+    assert '"abc$sUsy@123"' not in install_script
+
+    for script in (install_script, connect_script):
+        _assert_valid_bash(script)
+        assert script.startswith("#!/usr/bin/env bash\nset -euo pipefail\n")
+        assert "\\r" in script and "tr -d '\\r'" in script
+        assert "command -v curl" in script and "command -v wget" in script
+        assert "curl -fsSL$CURL_TLS \"$url\" -o \"$dest\"; then" in script
+        assert "wget -q$WGET_TLS -O \"$dest\" \"$url\"; then" in script
+        assert "uname -m" in script
+        for arch in ("x86_64|amd64", "aarch64|arm64", "armv7l|armv6l|armhf", "i686|i386"):
+            assert arch in script
+        assert "ARCH_ID=6" in script and "ARCH_ID=26" in script
+        assert "ARCH_ID=25" in script and "ARCH_ID=5" in script
+        assert "meshagents?id=$ARCH_ID" in script
+        assert "MESH_ID_URL" in script and "meshsettings?id=$MESH_ID_URL" in script
+        assert "MeshID=" in script and "MeshServer=" in script
+        assert "x-meshauth" not in script and "Pass123-super-secret" not in script
+        assert "7f454c46" in script
+        assert "head -c 4" in script
+        assert "chmod 755" in script
+        assert 'cd "$TMP_DIR"' in script  # meshinstall.sh writes to cwd
+        assert "meshagents?script=1" in script
+        assert 'bash "$TMP_SCRIPT" "$SERVER_BASE" "$MESH_ID"' in script
+
+    assert "MODE=install\n" in install_script
+    assert '-install' in install_script
+    assert "MODE=connect\n" in connect_script
+    assert '"$TMP_DIR/meshagent" -connect' in connect_script
+    assert 'chown "$SUDO_USER" "$TMP_DIR" "$TMP_DIR/meshagent" "$TMP_DIR/meshagent.msh"' in connect_script
+    assert 'sudo -H -u "$SUDO_USER"' in connect_script
+    assert 'DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}"' in connect_script
+    assert "sudo \"$TMP_DIR/meshagent\" -install" in install_script
+
+
+@pytest.mark.asyncio
+async def test_macos_script_installer_is_arch_aware_and_syntax_valid(monkeypatch):
+    import shlex
+
+    state = _fake_aiohttp(monkeypatch)
+    cfg = _mc_settings(verify_ssl=False)
+    mesh_id = "mesh//abc$sUsy@123"
+    brand = "Acme Mac Support"
+    install_payload, install_filename, install_ctype = await mc.proxy_agent_installer(
+        cfg, mesh_id, platform="macos", install_mode="install",
+        format="script", brand_name=brand,
+    )
+    connect_payload, _connect_filename, connect_ctype = await mc.proxy_agent_installer(
+        cfg, mesh_id, platform="macos", install_mode="connect",
+        format="script", brand_name=brand,
+    )
+    install_script = install_payload.decode("utf-8")
+    connect_script = connect_payload.decode("utf-8")
+
+    assert install_filename.endswith("-Support-macOS.command")
+    assert install_ctype == "text/x-shellscript"
+    assert connect_ctype == "text/x-shellscript"
+    assert state["get_calls"] == []  # script mode never probes MeshCentral packages
+    assert shlex.quote(f"Downloading {brand} Remote Support agent...") in install_script
+    assert "'abc$sUsy@123'" in install_script
+    assert '"abc$sUsy@123"' not in install_script
+
+    for script in (install_script, connect_script):
+        _assert_valid_bash(script)
+        assert script.startswith("#!/usr/bin/env bash\nset -euo pipefail\n")
+        assert "command -v curl" in script and "command -v wget" in script
+        assert "--no-check-certificate" in script and "CURL_TLS=' -k'" in script
+        assert "uname -m" in script
+        assert "arm64)" in script and "ARCH_ID=29" in script
+        assert "x86_64)" in script and "ARCH_ID=16" in script
+        assert "id=10005" in script and "meshid=" in script and "installflags=0" in script
+        assert "xar!" in script and "78617221" in script
+        assert "xattr -dr com.apple.quarantine" in script
+        assert "sudo installer -pkg" in script and "-target /" in script
+        assert "meshagents?id=$ARCH_ID" in script
+        assert "meshosxagent?id=$ARCH_ID" in script
+        assert "cffaedfe" in script and "cafebabe" in script
+        assert "MESH_ID_URL" in script and "meshsettings?id=$MESH_ID_URL" in script
+        assert "MeshID=" in script and "MeshServer=" in script
+        assert "xattr -cr" in script and "chmod 755" in script
+        assert "Screen Recording" in script and "Accessibility" in script
+        assert "System Settings" in script and "Privacy & Security" in script
+        assert "x-apple.systempreferences:com.apple.preference.security" in script
+
+    assert "MODE=install\n" in install_script
+    assert '"$TMP_DIR/meshagent" -install' in install_script
+    assert "MODE=connect\n" in connect_script
+    assert '"$TMP_DIR/meshagent" -connect' in connect_script
+    assert 'chown "$SUDO_USER" "$TMP_DIR" "$TMP_DIR/meshagent" "$TMP_DIR/meshagent.msh"' in connect_script
+    assert 'sudo -H -u "$SUDO_USER"' in connect_script
+
+
+@pytest.mark.asyncio
+async def test_generated_installers_url_encode_special_mesh_ids():
+    cfg = MeshCentralSettings(
+        workspace_id=1, enabled=True, server_url="https://mesh.acme.test",
+        verify_ssl=True,
+    )
+    payload, _filename, _ctype = await mc.proxy_agent_installer(
+        cfg, "mesh//abc+def", platform="linux"
+    )
+    script = payload.decode()
+    assert "MESH_ID_URL=abc%2Bdef" in script
+    assert 'meshsettings?id=$MESH_ID"' not in script
+
+
+@pytest.mark.asyncio
+async def test_installer_format_is_normalized_on_both_download_routes(seeded, monkeypatch):
+    from datetime import datetime, timedelta
+    from app.models.meshcentral import MeshCentralAgentInvite
+    from app.web.meshcentral_routes import (
+        web_remote_agent_download,
+        web_remote_public_invite_download,
+    )
+
+    db, ws1, _ws2, _admin, tech, _other = seeded
+    db.add(MeshCentralSettings(
+        workspace_id=ws1.id, enabled=True,
+        server_url="https://mesh.acme.test", default_mesh_id="mesh//GROUP1",
+    ))
+    invite = MeshCentralAgentInvite(
+        workspace_id=ws1.id, token="format-token", mesh_id="mesh//GROUP1",
+        platform="macos", install_mode="install",
+        created_by_id=tech.id, created_at=datetime.utcnow(),
+        expires_at=datetime.utcnow() + timedelta(minutes=10),
+    )
+    db.add(invite)
+    await db.commit()
+
+    seen_formats = []
+    seen_modes = []
+
+    async def fake_proxy(settings_row, mesh_id, platform="windows64", install_mode="install",
+                         brand_name="RemoteSupport", timeout=30.0, format="auto"):
+        seen_formats.append(format)
+        seen_modes.append(install_mode)
+        return b"#!/usr/bin/env bash\n", "Acme-Support-macOS.command", "text/x-shellscript"
+
+    monkeypatch.setattr("app.web.meshcentral_routes.proxy_agent_installer", fake_proxy)
+
+    direct = await web_remote_agent_download(
+        _request(tech.id, "/web/remote/agent/download"),
+        mesh_id="mesh//GROUP1", platform="macos", format="script", db=db,
+    )
+    assert direct.status_code == 200
+    assert seen_formats == ["script"]
+
+    invalid = await web_remote_public_invite_download(
+        _request(None), invite.token, format="not-a-format", db=db,
+    )
+    assert invalid.status_code == 200
+    assert seen_formats == ["script", "auto"]
+
+    scripted = await web_remote_public_invite_download(
+        _request(None), invite.token, format="script", db=db,
+    )
+    assert scripted.status_code == 200
+    assert seen_formats == ["script", "auto", "script"]
+    assert seen_modes == ["install", "install", "install"]
+
+    direct_connect = await web_remote_agent_download(
+        _request(tech.id, "/web/remote/agent/download"),
+        mesh_id="mesh//GROUP1", platform="macos", install_mode="connect",
+        format="auto", db=db,
+    )
+    assert direct_connect.status_code == 200
+    assert seen_formats[-1] == "script" and seen_modes[-1] == "connect"
+
+    # A one-time macOS session must never fall back to a persistent .pkg.
+    invite.install_mode = "connect"
+    await db.commit()
+    connect = await web_remote_public_invite_download(
+        _request(None), invite.token, format="auto", db=db,
+    )
+    assert connect.status_code == 200
+    assert connect.media_type == "text/x-shellscript"
+    assert seen_formats[-1] == "script" and seen_modes[-1] == "connect"
 
 

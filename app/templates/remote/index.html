@@ -118,12 +118,24 @@
          if (this.installMeshId) params.set('mesh_id', this.installMeshId);
          return `/web/remote/agent/download?${params.toString()}`;
        },
+       terminalDownloadUrl(inv) {
+         return inv && inv.share_url ? `${inv.share_url}/download` : '';
+       },
        linuxOneLineCommand() {
          const inv = this.latestInvite;
          // Gate on the invite's platform, not the current dropdown value: a
-         // Windows/macOS invite must never produce a `| sudo bash` command.
+         // Windows/macOS invite must never produce a Linux command.
          if (!inv || inv.platform !== 'linux' || !inv.is_active || !inv.share_url) return '';
-         return `curl -fsSL ${inv.share_url}/download | sudo bash`;
+         const url = this.terminalDownloadUrl(inv);
+         const tmp = '/tmp/cem-remote.sh';
+         return `(curl -fsSL ${url} -o ${tmp} || wget -qO ${tmp} ${url}) && sudo bash ${tmp}; rm -f ${tmp}`;
+       },
+       macosOneLineCommand() {
+         const inv = this.latestInvite;
+         if (!inv || inv.platform !== 'macos' || !inv.is_active || !inv.share_url) return '';
+         const url = `${this.terminalDownloadUrl(inv)}?format=script`;
+         const tmp = '/tmp/cem-remote.sh';
+         return `curl -fsSL ${url} -o ${tmp} && sudo bash ${tmp}; rm -f ${tmp}`;
        },
        async createGroupNow() {
          const name = this.newGroupName.trim();
@@ -1055,6 +1067,24 @@
                       x-text="linuxOneLineCommand()"></code>
                 <p class="text-[11px] text-slate-300">
                   Paste this on the Linux PC in a terminal and press Enter — downloads and installs in one line, with no chmod or CRLF fixes.
+                </p>
+              </div>
+            </template>
+            <template x-if="latestInvite && latestInvite.platform === 'macos' && latestInvite.is_active">
+              <div class="rounded-lg border border-slate-800 bg-slate-900 p-3 space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                  <p class="text-xs font-bold text-white">
+                    <i class="fab fa-apple mr-2 text-emerald-400"></i>1-line macOS Terminal command
+                  </p>
+                  <button type="button" @click="copyText(macosOneLineCommand(), 'macOS 1-line command copied!')"
+                          class="px-3 py-1.5 rounded-md bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold flex-shrink-0">
+                    <i class="fas fa-copy mr-1"></i>Copy 1-Line Command
+                  </button>
+                </div>
+                <code class="block px-3 py-2 rounded bg-black/40 border border-white/15 text-[11px] font-mono text-emerald-200 break-all"
+                      x-text="macosOneLineCommand()"></code>
+                <p class="text-[11px] text-slate-300">
+                  Paste in Terminal on the Mac. It auto-detects Apple Silicon vs Intel, clears download quarantine and works on Sonoma/Sequoia. After install, grant Screen Recording and Accessibility under System Settings → Privacy &amp; Security so the technician can see and control the Mac.
                 </p>
               </div>
             </template>

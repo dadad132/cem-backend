@@ -23,7 +23,7 @@ import shutil
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
 from sqlalchemy import select
@@ -1543,6 +1543,257 @@ def _safe_brand_slug(brand_name: Optional[str]) -> str:
     return (cleaned or "RemoteSupport")[:32]
 
 
+def normalize_installer_format(value: Optional[str]) -> str:
+    """Only the explicit ``script`` format changes behavior; everything else is auto."""
+    if isinstance(value, str) and value.strip().lower() == "script":
+        return "script"
+    return "auto"
+
+
+def _shell_download_helper(verify_ssl: bool) -> str:
+    """Portable curl/wget download helper embedded in generated installer scripts."""
+    curl_tls = " -k" if not verify_ssl else ""
+    wget_tls = " --no-check-certificate" if not verify_ssl else ""
+    return (
+        f"CURL_TLS={shlex.quote(curl_tls)}\n"
+        f"WGET_TLS={shlex.quote(wget_tls)}\n"
+        "download_file() {\n"
+        '    local url="$1"\n'
+        '    local dest="$2"\n'
+        "    if command -v curl >/dev/null 2>&1 && "
+        'curl -fsSL$CURL_TLS "$url" -o "$dest"; then\n'
+        "        return 0\n"
+        "    fi\n"
+        "    if command -v wget >/dev/null 2>&1 && "
+        'wget -q$WGET_TLS -O "$dest" "$url"; then\n'
+        "        return 0\n"
+        "    fi\n"
+        '    echo "ERROR: install curl or wget to download the remote support agent." >&2\n'
+        "    return 1\n"
+        "}\n"
+    )
+
+
+def _build_linux_installer_script(
+    server_base: str,
+    mesh_id: str,
+    install_mode: str,
+    brand_name: Optional[str],
+    verify_ssl: bool,
+) -> str:
+    """Generate a self-contained Linux agent installer (permanent or one-time)."""
+    mode = "connect" if install_mode == "connect" else "install"
+    script_url = f"{server_base}/meshagents?script=1"
+    q_mode = shlex.quote(mode)
+    q_server_base = shlex.quote(server_base)
+    q_mesh_id = shlex.quote(mesh_id)
+    mesh_url_id = urlencode({"id": mesh_id}, safe="@$").partition("=")[2]
+    q_mesh_url_id = shlex.quote(mesh_url_id)
+    q_script_url = shlex.quote(script_url)
+    q_brand = shlex.quote(f"Downloading {brand_name or 'RemoteSupport'} Remote Support agent...")
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"echo {q_brand}\n"
+        f"MODE={q_mode}\n"
+        f"SERVER_BASE={q_server_base}\n"
+        f"MESH_ID={q_mesh_id}\n"
+        f"MESH_ID_URL={q_mesh_url_id}\n"
+        f"SCRIPT_URL={q_script_url}\n"
+        + _shell_download_helper(verify_ssl)
+        + 'TMP_DIR="$(mktemp -d /tmp/cem-remote.XXXXXX)"\n'
+        "trap 'rm -rf \"$TMP_DIR\"' EXIT\n"
+        "\n"
+        "# Refuse HTML error pages: a real Linux agent starts with ELF magic 7f454c46.\n"
+        "elf_is_valid() {\n"
+        '    [ -s "$1" ] && [ "$(head -c 4 "$1" | od -An -tx1 | tr -d \' \\n\')" = "7f454c46" ]\n'
+        "}\n"
+        "\n"
+        "config_is_valid() {\n"
+        "    grep -q 'MeshID=' \"$1\" && grep -q 'MeshServer=' \"$1\"\n"
+        "}\n"
+        "\n"
+        "download_native_agent() {\n"
+        '    ARCH_ID=""\n'
+        '    case "$(uname -m)" in\n'
+        "        x86_64|amd64) ARCH_ID=6 ;;\n"
+        "        aarch64|arm64) ARCH_ID=26 ;;\n"
+        "        armv7l|armv6l|armhf) ARCH_ID=25 ;;\n"
+        "        i686|i386) ARCH_ID=5 ;;\n"
+        '        *) echo "ERROR: unsupported Linux CPU architecture $(uname -m)." >&2; return 1 ;;\n'
+        "    esac\n"
+        '    echo "Downloading native Linux agent (architecture id $ARCH_ID)..."\n'
+        '    if ! download_file "$SERVER_BASE/meshagents?id=$ARCH_ID" "$TMP_DIR/meshagent"; then\n'
+        '        echo "ERROR: could not download the Linux agent." >&2\n'
+        '        return 1\n'
+        '    fi\n'
+        '    if ! elf_is_valid "$TMP_DIR/meshagent"; then\n'
+        '        echo "ERROR: MeshCentral did not return a valid Linux agent binary." >&2\n'
+        "        return 1\n"
+        "    fi\n"
+        '    if ! download_file "$SERVER_BASE/meshsettings?id=$MESH_ID_URL" "$TMP_DIR/meshagent.msh"; then\n'
+        '        echo "ERROR: could not download the group configuration." >&2\n'
+        '        return 1\n'
+        '    fi\n'
+        '    if ! config_is_valid "$TMP_DIR/meshagent.msh"; then\n'
+        '        echo "ERROR: MeshCentral did not return a valid group configuration." >&2\n'
+        "        return 1\n"
+        "    fi\n"
+        '    chmod 755 "$TMP_DIR/meshagent"\n'
+        "}\n"
+        "\n"
+        "if [ \"$MODE\" = 'install' ]; then\n"
+        '    TMP_SCRIPT="$TMP_DIR/meshinstall.sh"\n'
+        '    cd "$TMP_DIR"  # MeshCentral meshinstall.sh writes here; keep cleanup effective\n'
+        '    if download_file "$SCRIPT_URL" "$TMP_SCRIPT"; then\n'
+        '        tr -d \'\\r\' < "$TMP_SCRIPT" > "$TMP_DIR/meshinstall.clean.sh"\n'
+        '        mv "$TMP_DIR/meshinstall.clean.sh" "$TMP_SCRIPT"\n'
+        '        chmod 755 "$TMP_SCRIPT"\n'
+        '        if [ "$(head -c 2 "$TMP_SCRIPT")" = "#!" ] && '
+        'bash "$TMP_SCRIPT" "$SERVER_BASE" "$MESH_ID"; then\n'
+        '            echo "Remote Support agent installed."\n'
+        "            exit 0\n"
+        "        fi\n"
+        '        echo "MeshCentral shell installer unavailable; using the native agent instead." >&2\n'
+        "    fi\n"
+        "    download_native_agent\n"
+        '    if [ "$(id -u)" -eq 0 ]; then\n'
+        '        "$TMP_DIR/meshagent" -install\n'
+        "    else\n"
+        '        sudo "$TMP_DIR/meshagent" -install\n'
+        "    fi\n"
+        "else\n"
+        "    download_native_agent\n"
+        '    # The copyable command starts with sudo; run the one-time agent as the\n'
+        '    # invoking user so the session stays user-level and cleanup still works.\n'
+        '    if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then\n'
+        '        chown "$SUDO_USER" "$TMP_DIR" "$TMP_DIR/meshagent" "$TMP_DIR/meshagent.msh"\n'
+        '        sudo -H -u "$SUDO_USER" -- env DISPLAY="${DISPLAY:-}" '
+        'XAUTHORITY="${XAUTHORITY:-}" DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" '
+        '"$TMP_DIR/meshagent" -connect\n'
+        "    else\n"
+        '        "$TMP_DIR/meshagent" -connect\n'
+        "    fi\n"
+        "fi\n"
+        'echo "Done. Tell your technician the Linux agent is ready."\n'
+    )
+
+
+def _build_macos_installer_script(
+    server_base: str,
+    mesh_id: str,
+    install_mode: str,
+    brand_name: Optional[str],
+    verify_ssl: bool,
+) -> str:
+    """Generate a Gatekeeper-safe macOS .command installer for Intel and Apple Silicon."""
+    mode = "connect" if install_mode == "connect" else "install"
+    pkg_query = urlencode(
+        {"id": "10005", "meshid": mesh_id, "installflags": "0"}, safe="@$"
+    )
+    q_mode = shlex.quote(mode)
+    q_server_base = shlex.quote(server_base)
+    q_mesh_id = shlex.quote(mesh_id)
+    mesh_url_id = urlencode({"id": mesh_id}, safe="@$").partition("=")[2]
+    q_mesh_url_id = shlex.quote(mesh_url_id)
+    q_pkg_url = shlex.quote(f"{server_base}/meshagents?{pkg_query}")
+    q_brand = shlex.quote(f"Downloading {brand_name or 'RemoteSupport'} Remote Support agent...")
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"echo {q_brand}\n"
+        f"MODE={q_mode}\n"
+        f"SERVER_BASE={q_server_base}\n"
+        f"MESH_ID={q_mesh_id}\n"
+        f"MESH_ID_URL={q_mesh_url_id}\n"
+        f"PKG_URL={q_pkg_url}\n"
+        + _shell_download_helper(verify_ssl)
+        + 'TMP_DIR="$(mktemp -d /tmp/cem-macos.XXXXXX)"\n'
+        "trap 'rm -rf \"$TMP_DIR\"' EXIT\n"
+        "\n"
+        "show_permissions() {\n"
+        '    echo ""\n'
+        '    echo "Next steps on this Mac:"\n'
+        "    echo \"1. Open System Settings → Privacy & Security.\"\n"
+        '    echo "2. Allow Screen Recording for the Remote Support agent so your technician can see the screen."\n'
+        '    echo "3. Allow Accessibility so your technician can control the mouse and keyboard."\n'
+        '    echo "Tip: open \\"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility\\" to jump there."\n'
+        "}\n"
+        "\n"
+        "# A genuine macOS .pkg is a xar archive: first four bytes are 78 61 72 21 (xar!).\n"
+        "# agent_is_valid() accepts 64/32-bit Mach-O and universal/fat binaries, never HTML.\n"
+        "agent_is_valid() {\n"
+        '    local magic\n'
+        '    magic="$(head -c 4 "$1" | od -An -tx1 | tr -d \' \\n\')"\n'
+        "    case \"$magic\" in\n"
+        "        cffaedfe|cefaedfe|cafebabe|cafebabf|feedfacf|feedface) return 0 ;;\n"
+        "        *) return 1 ;;\n"
+        "    esac\n"
+        "}\n"
+        "\n"
+        "config_is_valid() {\n"
+        "    grep -q 'MeshID=' \"$1\" && grep -q 'MeshServer=' \"$1\"\n"
+        "}\n"
+        "\n"
+        "download_native_agent() {\n"
+        '    ARCH_ID=""\n'
+        '    case "$(uname -m)" in\n'
+        "        arm64) ARCH_ID=29 ;;\n"
+        "        x86_64) ARCH_ID=16 ;;\n"
+        '        *) echo "ERROR: unsupported Mac architecture $(uname -m)." >&2; return 1 ;;\n'
+        "    esac\n"
+        '    echo "Downloading native macOS agent (architecture id $ARCH_ID)..."\n'
+        '    if ! download_file "$SERVER_BASE/meshagents?id=$ARCH_ID" "$TMP_DIR/meshagent"; then\n'
+        '        if ! download_file "$SERVER_BASE/meshosxagent?id=$ARCH_ID" "$TMP_DIR/meshagent"; then\n'
+        '            echo "ERROR: could not download the macOS agent." >&2\n'
+        '            return 1\n'
+        '        fi\n'
+        "    fi\n"
+        '    if ! agent_is_valid "$TMP_DIR/meshagent"; then\n'
+        '        echo "ERROR: MeshCentral did not return a valid macOS agent binary." >&2\n'
+        "        return 1\n"
+        "    fi\n"
+        '    if ! download_file "$SERVER_BASE/meshsettings?id=$MESH_ID_URL" "$TMP_DIR/meshagent.msh"; then\n'
+        '        echo "ERROR: could not download the group configuration." >&2\n'
+        '        return 1\n'
+        '    fi\n'
+        '    if ! config_is_valid "$TMP_DIR/meshagent.msh"; then\n'
+        '        echo "ERROR: MeshCentral did not return a valid group configuration." >&2\n'
+        "        return 1\n"
+        "    fi\n"
+        '    xattr -cr "$TMP_DIR" 2>/dev/null || true\n'
+        '    chmod 755 "$TMP_DIR/meshagent"\n'
+        "}\n"
+        "\n"
+        "if [ \"$MODE\" = 'install' ]; then\n"
+        '    if download_file "$PKG_URL" "$TMP_DIR/meshagent.pkg"; then\n'
+        '        if [ "$(head -c 4 "$TMP_DIR/meshagent.pkg" | od -An -tx1 | tr -d \' \\n\')" = "78617221" ]; then\n'
+        '            xattr -dr com.apple.quarantine "$TMP_DIR/meshagent.pkg" 2>/dev/null || true\n'
+        '            if sudo installer -pkg "$TMP_DIR/meshagent.pkg" -target /; then\n'
+        '                echo "Remote Support package installed."\n'
+        "                show_permissions\n"
+        "                exit 0\n"
+        "            fi\n"
+        "        fi\n"
+        '        echo "No valid universal package; using the native macOS agent instead." >&2\n'
+        "    fi\n"
+        "    download_native_agent\n"
+        '    sudo "$TMP_DIR/meshagent" -install\n'
+        "else\n"
+        "    download_native_agent\n"
+        '    # Keep one-time Quick Support at the user level (Screen Recording /\n'
+        '    # Accessibility permissions belong to the logged-in user).\n'
+        '    if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then\n'
+        '        chown "$SUDO_USER" "$TMP_DIR" "$TMP_DIR/meshagent" "$TMP_DIR/meshagent.msh"\n'
+        '        sudo -H -u "$SUDO_USER" -- "$TMP_DIR/meshagent" -connect\n'
+        "    else\n"
+        '        "$TMP_DIR/meshagent" -connect\n'
+        "    fi\n"
+        "fi\n"
+        "show_permissions\n"
+    )
+
+
 _AGENT_ENDPOINTS = frozenset({"meshagents", "meshosxagent"})
 
 
@@ -1587,6 +1838,75 @@ def build_agent_download_url(
     return _agent_download_url_for_base(base, mesh_id, platform, install_mode, agent_id_override)
 
 
+async def _fetch_installer_payload(
+    session: Any,
+    aiohttp: Any,
+    settings_row: MeshCentralSettings,
+    bases: List[str],
+    headers: Dict[str, str],
+    ssl_param: Any,
+    attempts: List[Tuple[int, str]],
+    platform: str,
+    clean_mesh: str,
+    install_mode: str,
+    body_is_valid: Callable[[bytes, str], bool],
+) -> Tuple[Optional[bytes], str]:
+    """Fetch the first upstream body accepted by ``body_is_valid`` over all bases."""
+    default_error = "Could not fetch installer from MeshCentral."
+    last_error = default_error
+    for aid, endpoint in attempts:
+        for base in bases:
+            url = _agent_download_url_for_base(
+                base,
+                clean_mesh,
+                platform=platform,
+                install_mode=install_mode,
+                agent_id_override=aid,
+                endpoint=endpoint,
+            )
+            try:
+                async with session.get(url, headers=headers, ssl=ssl_param) as resp:
+                    if resp.status == 200:
+                        headers_map = getattr(resp, "headers", None)
+                        declared = (
+                            headers_map.get("Content-Length")
+                            if hasattr(headers_map, "get")
+                            else None
+                        )
+                        if declared:
+                            try:
+                                if int(declared) > MAX_AGENT_INSTALLER_BYTES:
+                                    last_error = "MeshCentral installer exceeds size limit."
+                                    continue
+                            except (TypeError, ValueError):
+                                pass
+                        payload = await resp.read()
+                        if not payload:
+                            last_error = "MeshCentral returned an empty installer file."
+                            continue
+                        if len(payload) > MAX_AGENT_INSTALLER_BYTES:
+                            last_error = "MeshCentral installer exceeds the allowed size."
+                            continue
+                        if not body_is_valid(payload, endpoint):
+                            last_error = f"unexpected {platform} installer body."
+                            continue
+                        return payload, last_error
+                    if resp.status == 404:
+                        last_error = (
+                            "MeshCentral returned HTTP 404 fetching installer. "
+                            "On first startup MeshCentral downloads ~119 MB of agent binaries from GitHub (takes ~1 minute); "
+                            "wait 30 seconds and try again."
+                        )
+                    else:
+                        last_error = f"MeshCentral returned HTTP {resp.status} fetching installer."
+            except (OSError, RuntimeError, getattr(aiohttp, "ClientError", OSError)) as exc:
+                # Programming errors must surface; keep the first meaningful
+                # upstream error rather than the last fallback's failure.
+                if last_error == default_error:
+                    last_error = str(actionable_meshcentral_error(exc, settings_row))
+    return None, last_error
+
+
 async def proxy_agent_installer(
     settings_row: MeshCentralSettings,
     mesh_id: str,
@@ -1594,8 +1914,14 @@ async def proxy_agent_installer(
     install_mode: str = "install",
     brand_name: str = "RemoteSupport",
     timeout: float = 30.0,
+    format: str = "auto",
 ) -> Tuple[bytes, str, str]:
-    """Download the client MeshAgent installer from MeshCentral to stream through CEM."""
+    """Download or generate the client installer to stream through CEM.
+
+    Linux and macOS ``format=script`` installers are generated locally so they
+    are self-contained, architecture-aware and never depend on a raw Mach-O
+    being mislabeled as a macOS ``.pkg``.
+    """
     spec = AGENT_PLATFORMS.get(platform)
     if not spec:
         raise ValueError(f"Unsupported installer platform: {platform}")
@@ -1608,35 +1934,29 @@ async def proxy_agent_installer(
         "linux": "Linux",
     }.get(platform, platform)
     filename = f"{slug}-Support-{plat_suffix}{spec['ext']}"
+    installer_format = normalize_installer_format(format)
+    server_base = _base_with_domain(settings_row.server_url or "", settings_row.domain).rstrip("/")
+    mode = "connect" if install_mode == "connect" else "install"
+    verify_ssl = bool(settings_row.verify_ssl)
 
     if platform == "linux":
-        server_base = _base_with_domain(settings_row.server_url or "", settings_row.domain).rstrip("/")
-        script_url = f"{server_base}/meshagents?script=1"
-        insecure_flag = " -k" if not settings_row.verify_ssl else ""
-        q_brand = shlex.quote(f"Downloading {brand_name} Remote Support agent...")
-        q_script_url = shlex.quote(script_url)
-        q_server_base = shlex.quote(server_base)
-        q_mesh_id = shlex.quote(clean_mesh)
-        script = (
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            f"echo {q_brand}\n"
-            'TMP_DIR="$(mktemp -d /tmp/meshinstall.XXXXXX)"\n'
-            'trap \'rm -rf "$TMP_DIR"\' EXIT\n'
-            'TMP_SCRIPT="$TMP_DIR/meshinstall.sh"\n'
-            f'curl -fsSL{insecure_flag} {q_script_url} | tr -d \'\\r\' > "$TMP_SCRIPT"\n'
-            'chmod 755 "$TMP_SCRIPT"\n'
-            'cd "$TMP_DIR"\n'
-            'if [ "$(id -u)" -eq 0 ]; then\n'
-            f'  bash "$TMP_SCRIPT" {q_server_base} {q_mesh_id}\n'
-            'else\n'
-            f'  sudo bash "$TMP_SCRIPT" {q_server_base} {q_mesh_id}\n'
-            'fi\n'
+        script = _build_linux_installer_script(
+            server_base, clean_mesh, mode, brand_name, verify_ssl
         )
         return script.encode("utf-8"), filename, spec["content_type"]
 
+    if platform == "macos" and installer_format == "script":
+        script = _build_macos_installer_script(
+            server_base, clean_mesh, mode, brand_name, verify_ssl
+        )
+        return (
+            script.encode("utf-8"),
+            f"{slug}-Support-macOS.command",
+            "text/x-shellscript",
+        )
+
     aiohttp = _require_aiohttp()
-    ssl_param: Any = None if settings_row.verify_ssl else False
+    ssl_param: Any = None if verify_ssl else False
     headers: Dict[str, str] = {}
     password = decrypt_secret(settings_row.password_encrypted)
     if settings_row.username and password:
@@ -1644,79 +1964,39 @@ async def proxy_agent_installer(
         p_b64 = base64.b64encode(password.encode("utf-8")).decode("ascii")
         headers["x-meshauth"] = f"{u_b64},{p_b64}"
 
-    # (agent id, endpoint) attempts, in priority order. Windows uses a single
-    # known agent; macOS tries modern id=10005, then legacy id=29 on both the
-    # standard and legacy `/meshosxagent` endpoints.
-    attempts: list[tuple[int, str]] = [(spec["agent_id"], "meshagents")]
-    if spec.get("fallback_agent_id"):
-        fallback_id = spec["fallback_agent_id"]
-        attempts.append((fallback_id, "meshagents"))
-        if spec.get("fallback_endpoint"):
-            attempts.append((fallback_id, spec["fallback_endpoint"]))
-
-    default_error = "Could not fetch installer from MeshCentral."
-    last_error = default_error
     bases = build_control_http_bases(settings_row)
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
-        for aid, endpoint in attempts:
-            for base in bases:
-                url = _agent_download_url_for_base(
-                    base,
-                    clean_mesh,
-                    platform=platform,
-                    install_mode=install_mode,
-                    agent_id_override=aid,
-                    endpoint=endpoint,
-                )
-                try:
-                    async with session.get(url, headers=headers, ssl=ssl_param) as resp:
-                        if resp.status == 200:
-                            headers_map = getattr(resp, "headers", None)
-                            declared = (
-                                headers_map.get("Content-Length")
-                                if hasattr(headers_map, "get")
-                                else None
-                            )
-                            if declared:
-                                try:
-                                    if int(declared) > MAX_AGENT_INSTALLER_BYTES:
-                                        last_error = "MeshCentral installer exceeds size limit."
-                                        continue
-                                except (TypeError, ValueError):
-                                    pass
-                            payload = await resp.read()
-                            if not payload:
-                                last_error = "MeshCentral returned an empty installer file."
-                                continue
-                            if len(payload) > MAX_AGENT_INSTALLER_BYTES:
-                                last_error = "MeshCentral installer exceeds the allowed size."
-                                continue
-                            if not _installer_body_is_valid(platform, payload, endpoint):
-                                last_error = f"unexpected {platform} installer body."
-                                continue
-                            body_filename = filename
-                            body_content_type = spec["content_type"]
-                            if platform == "macos" and payload.startswith(b"#!"):
-                                body_filename = f"{slug}-Support-macOS.sh"
-                                body_content_type = "text/x-shellscript"
-                            return payload, body_filename, body_content_type
-                        elif resp.status == 404:
-                            last_error = (
-                                "MeshCentral returned HTTP 404 fetching installer. "
-                                "On first startup MeshCentral downloads ~119 MB of agent binaries from GitHub (takes ~1 minute); "
-                                "wait 30 seconds and try again."
-                            )
-                        else:
-                            last_error = (
-                                f"MeshCentral returned HTTP {resp.status} fetching installer."
-                            )
-                except (OSError, RuntimeError, getattr(aiohttp, "ClientError", OSError)) as exc:
-                    # Programming errors must surface; keep the first meaningful
-                    # upstream error rather than the last fallback's failure.
-                    if last_error == default_error:
-                        last_error = str(actionable_meshcentral_error(exc, settings_row))
+    if platform == "macos":
+        # Only a genuine xar! package may be served as a .pkg. A Mach-O, HTML
+        # error page or 404 falls back to the working .command installer script.
+        attempts: List[Tuple[int, str]] = [(10005, "meshagents"), (10006, "meshagents")]
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            payload, _last_error = await _fetch_installer_payload(
+                session, aiohttp, settings_row, bases, headers, ssl_param,
+                attempts, platform, clean_mesh, mode,
+                lambda body, _endpoint: body.startswith(b"xar!"),
+            )
+        if payload is not None:
+            return payload, filename, spec["content_type"]
+        script = _build_macos_installer_script(
+            server_base, clean_mesh, mode, brand_name, verify_ssl
+        )
+        return (
+            script.encode("utf-8"),
+            f"{slug}-Support-macOS.command",
+            "text/x-shellscript",
+        )
 
-    raise RuntimeError(last_error)
+    # Windows uses one known agent id (with a loopback base fallback).
+    attempts = [(spec["agent_id"], "meshagents")]
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+        payload, last_error = await _fetch_installer_payload(
+            session, aiohttp, settings_row, bases, headers, ssl_param,
+            attempts, platform, clean_mesh, mode,
+            lambda body, endpoint: _installer_body_is_valid(platform, body, endpoint),
+        )
+    if payload is None:
+        raise RuntimeError(last_error)
+    return payload, filename, spec["content_type"]
 
 
 # ---------------------------------------------------------------------------

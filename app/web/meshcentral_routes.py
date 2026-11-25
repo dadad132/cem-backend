@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
@@ -34,6 +35,7 @@ from app.core.meshcentral import (
     normalize_domain,
     normalize_mesh_id,
     normalize_node_id,
+    normalize_installer_format,
     normalize_server_url,
     proxy_agent_installer,
     redact_meshcentral_text,
@@ -97,6 +99,33 @@ def _wants_interactive_controls(show_controls) -> bool:
 def _form_text(value) -> Optional[str]:
     """Treat FastAPI's Form default object as 'field omitted' on direct calls."""
     return value if isinstance(value, str) else None
+
+
+def _one_line_install_commands(origin: str, token: str) -> tuple[str, str]:
+    """Build public-host-only copy/paste commands for Linux and macOS.
+
+    Download to a temp file first: piping ``curl`` into ``sudo bash`` attaches
+    the password prompt to the pipe and breaks on many terminals. Linux also
+    falls back to wget for minimal distributions.
+    """
+    url = f"{origin}/web/client/remote/get/{token}/download"
+    temp = "/tmp/cem-remote.sh"
+    linux = (
+        f"(curl -fsSL {url} -o {temp} || wget -qO {temp} {url}) && "
+        f"sudo bash {temp}; rm -f {temp}"
+    )
+    macos = (
+        f"curl -fsSL {url}?format=script -o {temp} && "
+        f"sudo bash {temp}; rm -f {temp}"
+    )
+    return linux, macos
+
+
+def _resolved_installer_format(platform: str, mode: str, requested) -> str:
+    """Quick-support downloads must never fall back to a persistent .pkg."""
+    if platform == "macos" and str(mode).strip().lower() == "connect":
+        return "script"
+    return normalize_installer_format(requested)
 
 
 async def _get_or_none_settings(db: AsyncSession, workspace_id: int) -> Optional[MeshCentralSettings]:
@@ -1034,24 +1063,34 @@ async def web_remote_settings_test(request: Request, db: AsyncSession = Depends(
 def _request_public_origin(request: Request) -> str:
     """Return the browser-facing origin (e.g. https://tickets.hubconnect.co.za).
 
-    Public share links and the copyable Linux command must not be built from an
-    arbitrary Host header. Trust the request host only when it matches the
+    Public share links and the copyable install commands must not be built from
+    an arbitrary Host header. Trust the request host only when it matches the
     configured public domain (or is a loopback dev address); otherwise pin the
     link to the canonical configured domain.
     """
+    settings = get_settings()
+    public_base = settings.public_base_url.rstrip("/")
     scheme = getattr(request.url, "scheme", "https") or "https"
+    if scheme not in {"http", "https"}:
+        scheme = urlparse(public_base).scheme or "https"
     netloc = getattr(request.url, "netloc", "") or ""
     if not netloc:
-        return get_settings().public_base_url.rstrip("/")
+        return public_base
 
+    # Validate the full authority, not just urlparse().hostname: a Host header
+    # like `evil;touch@good.test` would otherwise keep a valid hostname while
+    # injecting shell metacharacters into a copyable install command.
+    ipv6_literal = bool(re.fullmatch(r"\[[0-9A-Fa-f:]+\](?::\d+)?", netloc))
+    if not ipv6_literal and not re.fullmatch(r"[A-Za-z0-9._:-]+", netloc):
+        return public_base
     origin = f"{scheme}://{netloc}".rstrip("/")
     hostname = (urlparse(origin).hostname or "").lower()
     if hostname in {"localhost", "127.0.0.1", "::1"}:
         return origin
 
-    configured = (get_settings().app_domain or "").strip().rstrip("/")
+    configured = (settings.app_domain or "").strip().rstrip("/")
     if not configured:
-        return origin
+        return public_base
     parsed_configured = urlparse(configured if "://" in configured else f"//{configured}")
     configured_host = (parsed_configured.hostname or "").lower()
     configured_netloc = parsed_configured.netloc or configured
@@ -1511,6 +1550,7 @@ async def web_remote_agent_download(
     mesh_id: Optional[str] = Query(default=None),
     platform: str = Query(default="windows64"),
     install_mode: str = Query(default="install"),
+    format: str = Query(default="auto"),
     db: AsyncSession = Depends(get_session),
 ):
     """Direct technician download of the pre-configured MeshAgent installer via CEM."""
@@ -1538,6 +1578,7 @@ async def web_remote_agent_download(
             platform=platform,
             install_mode=mode,
             brand_name=brand_name,
+            format=_resolved_installer_format(platform, mode, format),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1727,10 +1768,12 @@ async def web_remote_public_invite_page(
     # The one-line command targets THIS public host only. No MeshCentral URL,
     # credentials or internal paths are ever rendered on the public page.
     public_origin = _request_public_origin(request)
-    linux_install_command = (
-        f"curl -fsSL {public_origin}/web/client/remote/get/{invite.token}/download | sudo bash"
-        if is_valid and invite and platform == "linux" else ""
+    linux_command, macos_command = (
+        _one_line_install_commands(public_origin, invite.token)
+        if is_valid and invite else ("", "")
     )
+    linux_install_command = linux_command if platform == "linux" else ""
+    macos_install_command = macos_command if platform == "macos" else ""
 
     status_code = 200 if is_valid else 410
     return templates.TemplateResponse(
@@ -1747,6 +1790,7 @@ async def web_remote_public_invite_page(
             "platform_meta": platform_meta,
             "platform": platform,
             "linux_install_command": linux_install_command,
+            "macos_install_command": macos_install_command,
         },
         status_code=status_code,
         headers=PUBLIC_LINK_HEADERS,
@@ -1758,6 +1802,7 @@ async def web_remote_public_invite_page(
 async def web_remote_public_invite_download(
     request: Request,
     token: str,
+    format: str = Query(default="auto"),
     db: AsyncSession = Depends(get_session),
 ):
     """Stream the client installer directly through this website while the token is unexpired."""
@@ -1793,6 +1838,9 @@ async def web_remote_public_invite_download(
             platform=invite.platform,
             install_mode=invite.install_mode,
             brand_name=brand_name,
+            format=_resolved_installer_format(
+                invite.platform, invite.install_mode, format
+            ),
         )
         # A technician may revoke the link (or it may expire) while the upstream
         # installer is being fetched. Never stream a payload after that happens.

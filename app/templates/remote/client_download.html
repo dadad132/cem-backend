@@ -101,6 +101,27 @@
       </div>
       {% endif %}
 
+      {% if is_valid and platform == 'macos' %}
+      <!-- macOS: Terminal script avoids Gatekeeper .pkg blocks and detects Apple Silicon / Intel -->
+      <div class="mt-4 rounded-xl border-2 border-slate-900 bg-slate-900 p-4 shadow-sm">
+        <div class="flex items-center justify-between gap-2 mb-2">
+          <p class="text-sm font-bold text-white"><i class="fab fa-apple mr-2 text-emerald-400"></i>1-Click Copy macOS Terminal Command</p>
+          <span class="text-[10px] font-semibold uppercase tracking-wide text-emerald-300">M1/M2/M3/M4 + Intel</span>
+        </div>
+        <p class="text-xs text-slate-300 mb-3">
+          Copy the command, open <strong>Terminal</strong> on the Mac, paste it and press Enter. It automatically detects Apple Silicon vs Intel, avoids the broken raw-binary-as-.pkg and Gatekeeper quarantine issues, and works on macOS Sonoma/Sequoia.
+        </p>
+        <div class="flex flex-col sm:flex-row gap-2">
+          <code id="macosInstallCommand"
+                class="flex-1 block px-3 py-2.5 rounded-lg bg-black/40 border border-white/15 text-xs font-mono text-emerald-200 break-all">{{ macos_install_command }}</code>
+          <button type="button" id="copyMacosCommand"
+                  class="px-4 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold flex-shrink-0 flex items-center justify-center gap-2">
+            <i class="fas fa-copy"></i><span id="copyMacosCommandLabel">Copy Command</span>
+          </button>
+        </div>
+      </div>
+      {% endif %}
+
       <!-- Simple, OS-tailored instructions for the client -->
       <div class="mt-6 pt-5 border-t border-slate-200">
         {% if platform == 'linux' %}
@@ -126,7 +147,7 @@
           {% if platform == 'macos' %}
           <li class="flex items-start gap-2.5">
             <span class="w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">2</span>
-            <span>Open your Downloads folder and <strong>double-click the <span class="font-mono">.pkg</span> file</strong>, then follow the macOS installer prompts. If macOS warns about an unidentified developer, choose <strong>Open</strong> to continue.</span>
+            <span>Paste the <strong>Terminal command</strong> from the black box above (recommended on Sonoma/Sequoia). It removes the download quarantine and uses the correct build for your Mac. The Download button also works: {% if invite.install_mode == 'connect' %}it downloads a <span class="font-mono">.command</span> script for this one-time session.{% else %}if macOS blocks double-clicking a <span class="font-mono">.pkg</span>, run <code class="font-mono">sudo installer -pkg ~/Downloads/your-package.pkg -target /</code>.{% endif %}</span>
           </li>
           {% else %}
           <li class="flex items-start gap-2.5">
@@ -138,6 +159,16 @@
             <span class="w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">3</span>
             <span>Click <strong>{% if invite.install_mode == 'connect' %}Connect{% else %}Install{% endif %}</strong> and tell your technician — they will connect directly to assist you.</span>
           </li>
+          {% if platform == 'macos' %}
+          <li class="flex items-start gap-2.5">
+            <span class="w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">4</span>
+            <span>Open <strong>System Settings → Privacy &amp; Security</strong> and enable <strong>Screen Recording</strong> for the Remote Support agent so your technician can see your screen.</span>
+          </li>
+          <li class="flex items-start gap-2.5">
+            <span class="w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">5</span>
+            <span>In the same pane enable <strong>Accessibility</strong> so your technician can control the mouse and keyboard. Restart the agent if prompted.</span>
+          </li>
+          {% endif %}
           {% endif %}
         </ol>
       </div>
@@ -147,11 +178,16 @@
           let remaining = {{ remaining_seconds | int }};
           const textEl = document.getElementById('countdownText');
           const btnEl = document.getElementById('downloadBtn');
-          const copyBtn = document.getElementById('copyLinuxCommand');
-          if (copyBtn) {
+          const copyTargets = [
+            ['copyLinuxCommand', 'linuxInstallCommand', 'copyLinuxCommandLabel'],
+            ['copyMacosCommand', 'macosInstallCommand', 'copyMacosCommandLabel'],
+          ];
+          copyTargets.forEach(function (ids) {
+            const copyBtn = document.getElementById(ids[0]);
+            if (!copyBtn) return;
             copyBtn.addEventListener('click', async function () {
-              const codeEl = document.getElementById('linuxInstallCommand');
-              const label = document.getElementById('copyLinuxCommandLabel');
+              const codeEl = document.getElementById(ids[1]);
+              const label = document.getElementById(ids[2]);
               const command = (codeEl ? codeEl.textContent : '').trim();
               try {
                 await navigator.clipboard.writeText(command);
@@ -164,11 +200,11 @@
                   selection.removeAllRanges();
                   selection.addRange(range);
                 }
-                if (label) label.textContent = 'Press Ctrl+C';
+                if (label) label.textContent = ids[0] === 'copyMacosCommand' ? 'Press Cmd+C' : 'Press Ctrl+C';
               }
               setTimeout(() => { if (label) label.textContent = 'Copy Command'; }, 2500);
             });
-          }
+          });
           function render() {
             if (remaining <= 0) {
               textEl.textContent = '00:00';
