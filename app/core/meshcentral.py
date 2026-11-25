@@ -70,8 +70,11 @@ VIEW_MODE_MAP: Dict[str, int] = {
 }
 VIEW_MODE_BY_CODE: Dict[int, str] = {code: name for name, code in VIEW_MODE_MAP.items()}
 
-# Bitmask: 1=header, 2=tabs, 4=footer, 8=title, 16=left toolbar, 32=back buttons
-HIDE_CHROME_BITMASK = 63
+# Bitmask: 1=header, 2=tabs, 4=footer, 8=title, 16=left nav, 32=back/action buttons.
+# Keep bit 32 clear so MeshCentral's in-iframe device toolbar (Connect/Disconnect,
+# View-Only vs Control, Ctrl+Alt+Del, keyboard, monitors, scaling, quality, tools)
+# stays usable; only the outer application chrome is hidden.
+HIDE_CHROME_BITMASK = 31
 
 # Supported MeshAgent client installers proxied through CEM
 AGENT_PLATFORMS: Dict[str, Dict[str, Any]] = {

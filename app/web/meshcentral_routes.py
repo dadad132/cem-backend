@@ -87,6 +87,18 @@ async def _require_workspace_admin(request: Request, db: AsyncSession):
     return user, None
 
 
+def _wants_interactive_controls(show_controls) -> bool:
+    """Normalize the query flag (direct route calls may pass FastAPI's Query default)."""
+    if isinstance(show_controls, str):
+        return show_controls.strip().lower() in ("1", "true", "on", "yes")
+    return show_controls is True
+
+
+def _form_text(value) -> Optional[str]:
+    """Treat FastAPI's Form default object as 'field omitted' on direct calls."""
+    return value if isinstance(value, str) else None
+
+
 async def _get_or_none_settings(db: AsyncSession, workspace_id: int) -> Optional[MeshCentralSettings]:
     return (
         await db.execute(
@@ -162,6 +174,9 @@ def _serialize_devices_for_dashboard(devices) -> list[dict]:
             "name": d.name,
             "hostname": d.hostname or "",
             "client": (d.client_name or d.mesh_name or "Unassigned").strip() or "Unassigned",
+            # Keep the real company label separate from the derived display label so
+            # the Edit modal never copies a mesh/group name into client_name.
+            "client_name": d.client_name or "",
             "mesh_name": d.mesh_name or "",
             "os_desc": d.os_desc or "",
             "os_family": d.os_family or "other",
@@ -441,6 +456,7 @@ async def web_remote_session(
     request: Request,
     device_id: int,
     mode: Optional[str] = Query(default=None),
+    show_controls: bool = Query(default=False),
     db: AsyncSession = Depends(get_session),
 ):
     user, redirect = await _require_workspace_user(request, db)
@@ -460,7 +476,13 @@ async def web_remote_session(
         request.session["flash_type"] = "error"
         return RedirectResponse("/web/remote", status_code=303)
 
-    embed = await build_embed_url_async(mc_settings, device.node_id, mode=mode)
+    wants_controls = _wants_interactive_controls(show_controls)
+    embed = await build_embed_url_async(
+        mc_settings,
+        device.node_id,
+        mode=mode,
+        hide_chrome=False if wants_controls else None,
+    )
     direct_embed = await build_embed_url_async(
         mc_settings, device.node_id, mode=embed["mode"], hide_chrome=False
     )
@@ -511,13 +533,14 @@ async def web_remote_session(
             "device": device,
             "embed": embed,
             "direct_url": direct_url,
+            "show_controls": wants_controls,
             "sibling_devices": sibling_devices,
             "modes": [
-                {"key": "desktop", "label": "Desktop", "icon": "fa-desktop"},
-                {"key": "terminal", "label": "Terminal", "icon": "fa-terminal"},
-                {"key": "files", "label": "Files", "icon": "fa-folder-open"},
-                {"key": "console", "label": "Agent Console", "icon": "fa-code"},
-                {"key": "summary", "label": "Device Info", "icon": "fa-circle-info"},
+                {"key": "desktop", "label": "Desktop", "icon": "fa-desktop", "tip": "Remote Desktop (Mouse & Keyboard)"},
+                {"key": "terminal", "label": "Terminal", "icon": "fa-terminal", "tip": "Command Shell / Terminal"},
+                {"key": "files", "label": "Files", "icon": "fa-folder-open", "tip": "File Manager (Upload / Download)"},
+                {"key": "console", "label": "Agent Console", "icon": "fa-code", "tip": "Agent Console"},
+                {"key": "summary", "label": "Device Info", "icon": "fa-circle-info", "tip": "Device Info & Power"},
             ],
         },
     )
@@ -528,6 +551,7 @@ async def web_remote_session_embed_url(
     request: Request,
     device_id: int,
     mode: Optional[str] = Query(default="desktop"),
+    show_controls: bool = Query(default=False),
     db: AsyncSession = Depends(get_session),
 ):
     """Mint a fresh short-lived SSO embed URL for mode switching or reconnecting."""
@@ -543,7 +567,13 @@ async def web_remote_session_embed_url(
     if not device:
         return JSONResponse({"success": False, "error": "Device not found"}, status_code=404)
 
-    embed = await build_embed_url_async(mc_settings, device.node_id, mode=mode)
+    wants_controls = _wants_interactive_controls(show_controls)
+    embed = await build_embed_url_async(
+        mc_settings,
+        device.node_id,
+        mode=mode,
+        hide_chrome=False if wants_controls else None,
+    )
     direct_embed = await build_embed_url_async(
         mc_settings, device.node_id, mode=embed["mode"], hide_chrome=False
     )
@@ -565,12 +595,18 @@ async def web_remote_session_embed_url(
     )
     await db.commit()
 
+    # The embed URL carries a short-lived SSO token: never let caches retain it.
     return JSONResponse({
         "success": True,
         "embed_url": embed["url"],
         "direct_url": direct_url,
         "mode": embed["mode"],
         "sso_active": embed["sso_active"],
+        "show_controls": bool(wants_controls),
+    }, headers={
+        "Cache-Control": "no-store, private",
+        "X-Robots-Tag": "noindex, nofollow",
+        "X-Content-Type-Options": "nosniff",
     })
 
 
@@ -671,6 +707,85 @@ async def web_remote_device_create(
     return RedirectResponse("/web/remote", status_code=303)
 
 
+@router.post("/remote/devices/{device_id}/edit")
+async def web_remote_device_edit(
+    request: Request,
+    device_id: int,
+    name: Optional[str] = Form(None),
+    client_name: Optional[str] = Form(None),
+    mesh_name: Optional[str] = Form(None),
+    os_desc: Optional[str] = Form(None),
+    ip_address: Optional[str] = Form(None),
+    notes: Optional[str] = Form(None),
+    node_id: Optional[str] = Form(None),
+    db: AsyncSession = Depends(get_session),
+):
+    """Update a client PC's details; available to every workspace technician."""
+    user, redirect = await _require_workspace_user(request, db)
+    if redirect:
+        return JSONResponse({"success": False, "error": "Authentication required"}, status_code=401)
+
+    device = await _get_workspace_device(db, user.workspace_id, device_id)
+    if not device:
+        return JSONResponse({"success": False, "error": "Device not found"}, status_code=404)
+
+    form_name = _form_text(name)
+    clean_name = form_name.strip() if form_name is not None else (device.name or "").strip()
+    if not clean_name:
+        return JSONResponse({"success": False, "error": "Device name is required."}, status_code=400)
+
+    # Node ID identifies the actual MeshCentral device and is deliberately
+    # immutable here: the UI shows it read-only, and letting a crafted form
+    # repoint it would allow targeting a node outside this workspace.
+    form_node = _form_text(node_id)
+    if form_node:
+        try:
+            requested_node = normalize_node_id(form_node)
+        except ValueError as exc:
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=400)
+        if requested_node != device.node_id:
+            return JSONResponse({
+                "success": False,
+                "error": "Node ID cannot be changed after a client PC is added.",
+            }, status_code=400)
+
+    device.name = clean_name
+    form_client = _form_text(client_name)
+    if form_client is not None:
+        device.client_name = form_client.strip() or None
+    form_mesh = _form_text(mesh_name)
+    if form_mesh is not None:
+        device.mesh_name = form_mesh.strip() or None
+    form_os = _form_text(os_desc)
+    if form_os is not None:
+        clean_os = form_os.strip() or None
+        device.os_desc = clean_os
+        device.os_family = detect_os_family(clean_os) if clean_os else "other"
+    form_ip = _form_text(ip_address)
+    if form_ip is not None:
+        device.ip_address = form_ip.strip() or None
+    form_notes = _form_text(notes)
+    if form_notes is not None:
+        device.notes = form_notes.strip() or None
+    device.updated_at = datetime.utcnow()
+    await db.commit()
+
+    return JSONResponse({
+        "success": True,
+        "device": {
+            "id": device.id,
+            "node_id": device.node_id,
+            "name": device.name,
+            "client_name": device.client_name or "",
+            "mesh_name": device.mesh_name or "",
+            "os_desc": device.os_desc or "",
+            "os_family": device.os_family,
+            "ip_address": device.ip_address or "",
+            "notes": device.notes or "",
+        },
+    })
+
+
 @router.post("/remote/devices/{device_id}/notes")
 async def web_remote_device_notes(
     request: Request,
@@ -721,7 +836,7 @@ async def web_remote_device_delete(
     device_id: int,
     db: AsyncSession = Depends(get_session),
 ):
-    user, redirect = await _require_workspace_admin(request, db)
+    user, redirect = await _require_workspace_user(request, db)
     if redirect:
         return redirect
 

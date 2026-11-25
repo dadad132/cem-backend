@@ -10,6 +10,7 @@ import secrets
 import subprocess
 import sys
 from datetime import datetime
+from html import unescape
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
@@ -32,9 +33,11 @@ from app.models.meshcentral import (
 from app.models.user import User
 from app.models.workspace import Workspace
 from app.web.meshcentral_routes import (
+    web_remote_audit_export,
     web_remote_dashboard,
     web_remote_device_create,
     web_remote_device_delete,
+    web_remote_device_edit,
     web_remote_device_notes,
     web_remote_device_pin,
     web_remote_groups,
@@ -43,6 +46,7 @@ from app.web.meshcentral_routes import (
     web_remote_session_embed_url,
     web_remote_settings,
     web_remote_settings_autofill,
+    web_remote_settings_diagnostics,
     web_remote_settings_save,
     web_remote_settings_test,
     web_remote_sync,
@@ -149,6 +153,7 @@ def test_url_and_node_normalization_rejects_unsafe_inputs():
 
 
 def test_build_embed_url_includes_sso_token_viewmode_and_hide():
+    assert mc.HIDE_CHROME_BITMASK == 31  # hide outer chrome, keep in-iframe device controls
     key_hex = secrets.token_hex(32)
     cfg = MeshCentralSettings(
         workspace_id=1,
@@ -174,6 +179,14 @@ def test_build_embed_url_includes_sso_token_viewmode_and_hide():
     decoded = mc.decode_login_token(qs["login"][0], key_hex)
     assert decoded["u"] == "user//admin"
     assert decoded["a"] == 3
+
+    # Technicians can explicitly request full MeshCentral controls in the iframe.
+    interactive = mc.build_embed_url(cfg, "node//PCNodeABC123", mode="desktop", hide_chrome=False)
+    assert "hide=" not in interactive["url"]
+    assert interactive["hide_chrome"] is False
+    assert mc.VIEW_MODE_MAP == {
+        "summary": 10, "desktop": 11, "terminal": 12, "files": 13, "console": 15,
+    }
 
 
 def test_parse_inventory_messages_extracts_groups_and_online_status():
@@ -369,7 +382,7 @@ async def test_dashboard_device_lifecycle_sync_and_session_embedding(seeded, mon
     assert 'id="meshcentral-session-frame"' in sess_html
     assert "gotonode=RECEP001" in sess_html
     assert "viewmode=11" in sess_html
-    assert "hide=63" in sess_html
+    assert "hide=31" in sess_html
 
     # Mode switcher endpoint mints fresh URL for terminal
     switch_resp = await web_remote_session_embed_url(_request(tech.id), dev.id, mode="terminal", db=db)
@@ -392,7 +405,9 @@ async def test_dashboard_device_lifecycle_sync_and_session_embedding(seeded, mon
     tech_sess = await web_remote_session(_request(tech.id, f"/web/remote/session/{dev.id}"), dev.id, mode="desktop", db=db)
     tech_sess_html = bytes(tech_sess.body).decode()
     assert "/web/remote/settings" not in tech_sess_html
-    assert "Open Direct Tab" not in tech_sess_html
+    # Pop Out is a session tool, not an admin setting.
+    assert "Pop Out" in tech_sess_html
+    assert "Open Direct Tab" in tech_sess_html
 
     # Strict multi-tenant isolation: Rival MSP admin cannot open, pin, edit, or delete Acme's device
     with pytest.raises(HTTPException) as exc404:
@@ -402,18 +417,237 @@ async def test_dashboard_device_lifecycle_sync_and_session_embedding(seeded, mon
     rival_pin = await web_remote_device_pin(_request(other_admin.id), dev.id, db)
     assert rival_pin.status_code == 404
 
+    rival_edit = await web_remote_device_edit(
+        _request(other_admin.id), dev.id, name="Stolen", db=db
+    )
+    assert rival_edit.status_code == 404
+
     with pytest.raises(HTTPException) as exc_del:
         await web_remote_device_delete(_request(other_admin.id), dev.id, db)
     assert exc_del.value.status_code == 404
 
-    # Non-admin in same workspace cannot delete devices
-    with pytest.raises(HTTPException) as exc_non_admin:
-        await web_remote_device_delete(_request(tech.id), dev.id, db)
-    assert exc_non_admin.value.status_code == 403
-
-    # Admin in same workspace can delete
+    # Admin and non-admin technicians in the same workspace both manage client PCs.
     del_resp = await web_remote_device_delete(_request(admin.id), dev.id, db)
     assert del_resp.status_code == 303
+    remaining = (
+        await db.execute(select(MeshCentralDevice).where(MeshCentralDevice.workspace_id == ws1.id))
+    ).scalars().all()
+    assert len(remaining) == 1
+    tech_del = await web_remote_device_delete(_request(tech.id), remaining[0].id, db)
+    assert tech_del.status_code == 303
+
+
+@pytest.mark.asyncio
+async def test_non_admin_device_management_is_tenant_isolated(seeded, monkeypatch):
+    db, ws1, _ws2, _admin, tech, other_admin = seeded
+    db.add(MeshCentralSettings(
+        workspace_id=ws1.id,
+        enabled=True,
+        server_url="https://mesh.acme.test",
+        login_token_key_encrypted=mc.encrypt_secret(secrets.token_hex(32)),
+        default_view_mode=11,
+        hide_mesh_chrome=True,
+    ))
+    await db.commit()
+
+    # Any authenticated workspace user can create and configure a client PC.
+    add = await web_remote_device_create(
+        _request(tech.id, "/web/remote/devices"),
+        name="Front Desk PC",
+        node_id="node//DESK001",
+        client_name="Acme HQ",
+        os_desc="Windows 11 Pro",
+        ip_address="10.0.0.5",
+        notes="Ask Anna before rebooting",
+        db=db,
+    )
+    assert add.status_code == 303
+    dev = (
+        await db.execute(select(MeshCentralDevice).where(MeshCentralDevice.node_id == "DESK001"))
+    ).scalar_one()
+
+    edit = await web_remote_device_edit(
+        _request(tech.id),
+        dev.id,
+        name="Front Desk (new)",
+        client_name="Acme Branch",
+        mesh_name="Branch PCs",
+        os_desc="Ubuntu 24.04",
+        ip_address="10.0.0.9",
+        notes="Maintenance window 20:00",
+        node_id="node//DESK001",
+        db=db,
+    )
+    assert edit.status_code == 200
+    payload = json.loads(edit.body)
+    assert payload["success"] is True
+    assert payload["device"]["name"] == "Front Desk (new)"
+    assert payload["device"]["node_id"] == "DESK001"
+    await db.refresh(dev)
+    assert dev.name == "Front Desk (new)"
+    assert dev.client_name == "Acme Branch"
+    assert dev.mesh_name == "Branch PCs"
+    assert dev.os_desc == "Ubuntu 24.04"
+    assert dev.os_family == "linux"
+    assert dev.ip_address == "10.0.0.9"
+    assert dev.notes == "Maintenance window 20:00"
+    assert dev.node_id == "DESK001"
+
+    # Invalid input fails cleanly, and the device's MeshCentral identity cannot be
+    # repointed via a crafted form (the UI only shows Node ID read-only).
+    assert (await web_remote_device_edit(_request(tech.id), dev.id, name="   ", db=db)).status_code == 400
+    assert (
+        await web_remote_device_edit(
+            _request(tech.id), dev.id, name="Valid name", node_id="javascript:alert(1)", db=db
+        )
+    ).status_code == 400
+    retarget = await web_remote_device_edit(
+        _request(tech.id), dev.id, name="Stolen identity", node_id="node//OTHER-TENANT", db=db
+    )
+    assert retarget.status_code == 400
+    await db.refresh(dev)
+    assert dev.name == "Front Desk (new)"
+    assert dev.node_id == "DESK001"
+    unchanged = await web_remote_device_edit(_request(tech.id), dev.id, name="Still ours", db=db)
+    assert unchanged.status_code == 200
+
+    # Technicians may also create client groups.
+    async def created(*_args, **_kwargs):
+        return {"mesh_id": "mesh//TECH", "mesh_name": "Tech Clients"}
+
+    monkeypatch.setattr("app.web.meshcentral_routes.create_meshcentral_group", created)
+    group = await web_remote_groups_create(_request(tech.id), name="Tech Clients", db=db)
+    assert group.status_code == 200
+    assert json.loads(group.body)["success"] is True
+
+    # Cross-tenant edit / open / delete always 404, even for another admin.
+    rival_edit = await web_remote_device_edit(
+        _request(other_admin.id), dev.id, name="Stolen", db=db
+    )
+    assert rival_edit.status_code == 404
+    with pytest.raises(HTTPException) as exc:
+        await web_remote_session(_request(other_admin.id), dev.id, mode="desktop", db=db)
+    assert exc.value.status_code == 404
+    with pytest.raises(HTTPException) as exc:
+        await web_remote_device_delete(_request(other_admin.id), dev.id, db)
+    assert exc.value.status_code == 404
+
+    deleted = await web_remote_device_delete(_request(tech.id), dev.id, db)
+    assert deleted.status_code == 303
+    assert (
+        await db.execute(select(MeshCentralDevice).where(MeshCentralDevice.id == dev.id))
+    ).scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_session_view_modes_and_interactive_controls_for_technicians(seeded):
+    db, ws1, _ws2, _admin, tech, _other = seeded
+    db.add(MeshCentralSettings(
+        workspace_id=ws1.id,
+        enabled=True,
+        server_url="https://mesh.acme.test",
+        login_token_key_encrypted=mc.encrypt_secret(secrets.token_hex(32)),
+        default_view_mode=11,
+        hide_mesh_chrome=True,
+    ))
+    db.add(MeshCentralDevice(
+        workspace_id=ws1.id, node_id="DESK001", name="Front Desk PC", client_name="Acme",
+    ))
+    await db.commit()
+    dev = (
+        await db.execute(select(MeshCentralDevice).where(MeshCentralDevice.node_id == "DESK001"))
+    ).scalar_one()
+
+    page = await web_remote_session(
+        _request(tech.id), dev.id, mode="desktop", show_controls=False, db=db
+    )
+    text = bytes(page.body).decode()
+    assert 'id="meshcentral-session-frame"' in text
+    assert 'allow="autoplay; clipboard-read; clipboard-write; fullscreen; pointer-lock; focus-without-user-activation"' in text
+    assert 'tabindex="0"' in text
+    assert 'referrerpolicy="strict-origin-when-cross-origin"' in text
+    assert 'x-ref="frame"' in text
+    assert '@load="loading = false; iframeLoaded = true; focusScreen()"' in text
+    for needle in (
+        "focusScreen", "showControls", "sessionError", "10000", "hide=31",
+        "Pop Out", "Open Direct Tab", "Focus Screen", "Mesh Controls",
+        "history.replaceState", "_cem=", "about:blank", "cache: 'no-store'",
+        "show_controls=",
+    ):
+        assert needle in text, needle
+    assert '"showControls": false' in text
+    readable = unescape(text)
+    for tip in (
+        "Remote Desktop (Mouse &amp; Keyboard)", "Command Shell / Terminal",
+        "File Manager (Upload / Download)", "Agent Console", "Device Info &amp; Power",
+    ):
+        assert tip in text or tip in readable, tip
+    for tip in ("Mouse & Keyboard", "Device Info & Power"):
+        assert tip in readable, tip
+    for help_text in ("Screen Recording", "Accessibility", "Wayland", "UAC", "View-Only"):
+        assert help_text in text, help_text
+    for label in ("Desktop", "Terminal", "Files", "Agent Console", "Device Info"):
+        assert label in text, label
+    assert "/web/remote/settings" not in text
+    assert "/web/admin/site-settings" not in text
+
+    interactive = await web_remote_session(
+        _request(tech.id), dev.id, mode="desktop", show_controls=True, db=db
+    )
+    interactive_html = bytes(interactive.body).decode()
+    assert '"showControls": true' in interactive_html
+    assert "hide=" not in interactive_html
+    assert "gotonode=DESK001" in interactive_html
+
+    # Every view mode mints a fresh URL; show_controls=1 keeps MeshCentral's toolbars.
+    for mode, code in mc.VIEW_MODE_MAP.items():
+        resp = await web_remote_session_embed_url(
+            _request(tech.id), dev.id, mode=mode, show_controls=True, db=db
+        )
+        data = json.loads(resp.body)
+        assert data["success"] is True
+        assert data["mode"] == mode
+        assert data["show_controls"] is True
+        assert f"viewmode={code}" in data["embed_url"]
+        assert "hide=" not in data["embed_url"]
+
+    plain = await web_remote_session_embed_url(
+        _request(tech.id), dev.id, mode="desktop", show_controls=False, db=db
+    )
+    plain_data = json.loads(plain.body)
+    assert plain_data["show_controls"] is False
+    assert "hide=31" in plain_data["embed_url"]
+    assert "no-store" in plain.headers["Cache-Control"]
+    assert plain.headers["X-Content-Type-Options"] == "nosniff"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_edit_and_delete_controls_for_technicians(seeded):
+    db, ws1, _ws2, admin, tech, _other = seeded
+    db.add(MeshCentralDevice(
+        workspace_id=ws1.id, node_id="DESK001", name="Front Desk PC",
+        client_name="Acme HQ", os_desc="Windows 11 Pro", ip_address="10.0.0.5", notes="hello",
+    ))
+    await db.commit()
+
+    page = await web_remote_dashboard(_request(tech.id), db=db)
+    text = bytes(page.body).decode()
+    assert "Edit Client PC" in text
+    assert "showEditModal" in text
+    assert "openEditModal(dev)" in text
+    assert "saveEdit()" in text
+    assert "fa-pencil" in text
+    assert "/web/remote/devices/${d.id}/edit" in text
+    assert text.count("/web/remote/devices/${dev.id}/delete") >= 2  # grid card + list row
+    assert "MeshCentral Setup" not in text
+    assert "/web/remote/settings" not in text
+    assert "Export CSV" not in text
+
+    admin_page = await web_remote_dashboard(_request(admin.id), db=db)
+    admin_html = bytes(admin_page.body).decode()
+    assert "/web/remote/settings" in admin_html
+    assert "MeshCentral Setup" in admin_html
+    assert "Export CSV" in admin_html
 
 
 @pytest.mark.asyncio
@@ -1628,6 +1862,8 @@ async def test_non_admin_settings_routes_blocked_and_admin_hints_present(seeded)
         lambda: web_remote_settings_save(_request(tech.id), db=db),
         lambda: web_remote_settings_test(_request(tech.id), db=db),
         lambda: web_remote_settings_autofill(_request(tech.id), db=db),
+        lambda: web_remote_settings_diagnostics(_request(tech.id), db=db),
+        lambda: web_remote_audit_export(_request(tech.id), db=db),
     ]
     for invoke in admin_only_calls:
         with pytest.raises(HTTPException) as exc:
@@ -1639,10 +1875,14 @@ async def test_non_admin_settings_routes_blocked_and_admin_hints_present(seeded)
     tech_sess = await web_remote_session(_request(tech.id), 1, mode="desktop", db=db)
     sess_html = bytes(tech_sess.body).decode()
     for needle in (
-        "/web/remote/settings", "MeshCentral Setup", "config.json", "Pop Out", "Open Direct Tab",
+        "/web/remote/settings", "/web/admin/site-settings", "MeshCentral Setup",
+        "config.json", "Export CSV",
     ):
         assert needle not in dash_html
         assert needle not in sess_html
+    # Interactive session tools are available to every authenticated technician.
+    assert "Pop Out" in sess_html
+    assert "Open Direct Tab" in sess_html
 
     for page in (
         await web_remote_settings(_request(admin.id), db=db),
