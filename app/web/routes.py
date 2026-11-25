@@ -12133,8 +12133,19 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
         request.session.clear()
         return RedirectResponse('/web/login', status_code=303)
     
-    from app.models.ticket import Ticket
-    
+    from app.models.ticket import Ticket, TicketComment
+
+    # Latest activity for an active ticket: its newest comment (public or
+    # internal, from staff, guests, e-mail or the API), or its creation time
+    # when nobody has replied yet. Available with or without a search query.
+    last_comment_at = (
+        select(func.max(TicketComment.created_at))
+        .where(TicketComment.ticket_id == Ticket.id)
+        .correlate(Ticket)
+        .scalar_subquery()
+    )
+    activity_ts = func.coalesce(last_comment_at, Ticket.created_at)
+
     # Get filter parameters
     status_filter = request.query_params.get('status', 'all')
     priority_filter = request.query_params.get('priority', 'all')
@@ -12201,7 +12212,6 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
     # Search filter
     if search_query:
         from sqlalchemy import or_, exists, case, literal
-        from app.models.ticket import TicketComment
         search_pattern = f"%{search_query}%"
         
         # Subquery to find tickets with matching comments
@@ -12262,9 +12272,14 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
             (Ticket.subject.ilike(search_pattern), literal(2)),
             else_=literal(3)
         )
-        query = query.order_by(relevance, Ticket.created_at.desc())
+        query = query.order_by(relevance, activity_ts.asc(), Ticket.id.asc())
+    elif attention_filter:
+        # Team Overview drill-downs keep their existing oldest-created-first order.
+        query = query.order_by(Ticket.created_at.asc(), Ticket.id.asc())
     else:
-        query = query.order_by(Ticket.created_at.asc() if attention_filter else Ticket.created_at.desc())
+        # Oldest latest comment (or creation time) first: a new comment moves
+        # that ticket to the bottom of its Board column and the List view.
+        query = query.order_by(activity_ts.asc(), Ticket.id.asc())
     tickets = (await db.execute(query)).scalars().all()
     
     # Get user's projects for filter dropdown
