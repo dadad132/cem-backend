@@ -1,9 +1,10 @@
 """Slice 5: a new project needs a quotation/paperwork file before it exists.
 
 The browser offers one drag-and-drop/click-to-browse dropzone on the New Project
-form, but the server is the authority: no file (or an empty/disallowed one) means
-no Project row. Accepted files are written under a generated UUID name and the
-download route is workspace/member scoped.
+form, but the server is the authority: no file (or an empty/oversized one) means
+no Project row. Any non-empty file is accepted; photos/PDFs keep their verified
+extension while everything else is written under a generated UUID ``.bin`` name.
+The download route stays workspace/member scoped.
 """
 from __future__ import annotations
 
@@ -171,10 +172,8 @@ async def test_create_without_quotation_is_rejected_and_no_project_row(env):
 @pytest.mark.parametrize('filename,data,content_type', [
     ('', PDF, 'application/pdf'),                       # browser sent no filename
     ('quotation.pdf', b'', 'application/pdf'),          # 0-byte file
-    ('malware.exe', EXE, 'application/octet-stream'),   # disallowed extension
-    ('page.html', HTML, 'text/html'),                   # script-capable type
 ])
-async def test_create_with_missing_empty_or_disallowed_file_is_rejected(
+async def test_create_with_missing_or_empty_file_is_rejected(
     env, filename, data, content_type
 ):
     response, request = await _create(
@@ -332,22 +331,41 @@ async def test_download_rejects_a_traversal_name_stored_in_the_database(env):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('filename,data,content_type', [
-    ('notes.txt', HTML, 'text/plain'),
-    ('quote.csv', HTML, 'text/csv'),
-    ('order.docx', EXE, 'application/octet-stream'),
+@pytest.mark.parametrize('filename,data,content_type,expected_mime', [
+    ('notes.txt', HTML, 'text/plain', 'text/plain'),
+    ('quote.csv', HTML, 'text/csv', 'text/csv'),
+    ('order.docx', EXE, 'application/octet-stream',
+     'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+    ('malware.exe', EXE, 'application/octet-stream', 'application/octet-stream'),
+    ('page.html', HTML, 'text/html', 'application/octet-stream'),
+    ('bundle.7z', b'7z\xbc\xaf\x27\x1c', 'application/x-7z-compressed',
+     'application/x-7z-compressed'),
 ])
-async def test_active_or_executable_content_is_refused_with_a_safe_extension(
-    env, filename, data, content_type
+async def test_any_file_type_is_accepted_but_stored_with_a_safe_extension(
+    env, filename, data, content_type, expected_mime
 ):
     response, request = await _create(
-        env, env.people['ada'], _upload(filename, data, content_type)
+        env, env.people['ada'], _upload('../../' + filename, data, content_type)
     )
 
     assert response.status_code == 303
-    assert 'quotation' in request.session['error_message'].lower()
-    assert await _projects(env) == []
-    assert _stored_files(env) == []
+    assert 'error_message' not in request.session
+    projects = await _projects(env)
+    assert len(projects) == 1
+    project = projects[0]
+    assert project.quotation_filename.endswith('.bin')
+    assert project.quotation_original_name == filename
+    assert project.quotation_content_type == expected_mime
+    stored = env.tmp_path / 'private_uploads' / 'quotations' / project.quotation_filename
+    assert stored.read_bytes() == data
+
+    download = await web.web_project_quotation_download(
+        _request(env.people['ada']), project.id, db=env.db
+    )
+    assert download.headers['content-disposition'].startswith('attachment;')
+    assert filename in download.headers['content-disposition']
+    assert download.headers['x-content-type-options'] == 'nosniff'
+    assert download.headers['content-security-policy'] == "default-src 'none'"
 
 
 @pytest.mark.asyncio
@@ -566,7 +584,8 @@ async def test_new_project_form_has_required_multipart_dropzone(env):
     # No static disabled attribute: without JavaScript the native required file
     # input still works; with JavaScript syncRequired() disables it on load.
     assert '<button type="submit" data-dropzone-submit' in html
-    assert '.pdf' in html and '.docx' in html and '.xlsx' in html
+    assert 'Any file type · up to 25 MB' in html
+    assert 'accept=' not in html, 'the general file picker must not restrict types'
     assert 'CEMDropzone' in html  # reusable drag-and-drop script from Slice 3
 
 

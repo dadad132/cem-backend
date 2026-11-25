@@ -35,7 +35,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_session
 from app.core.attachment_upload import (
     MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_UPLOAD,
-    clean_upload_name, photo_type as _photo_type, validate_attachment,
+    SAFE_IMAGE_PREVIEW_MIMES, SAFE_INLINE_PREVIEW_MIMES,
+    attachment_rejection_reason, clean_upload_name,
+    photo_type as _photo_type, validate_attachment,
 )
 from app.core import project_quotation as quotations
 from app.core.project_quotation import (
@@ -94,6 +96,41 @@ from jinja2 import pass_context
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 templates = Jinja2Templates(directory=str(BASE_DIR / 'templates'))
+
+
+def _resolve_stored_upload(file_path: str | None) -> Path | None:
+    """Resolve a stored attachment path, or None if it is missing/unsafe.
+
+    Current uploads are recorded as ``app/uploads/<area>/<uuid>.<ext>``; older
+    rows may hold an absolute path or a path relative to the process CWD. Check
+    those shapes in order so old data stays downloadable without trusting a
+    tampered database row to escape the uploads tree.
+    """
+    if not file_path or not isinstance(file_path, str):
+        return None
+    raw = Path(file_path)
+    if '..' in raw.parts:
+        return None
+    # Compute the root from the current BASE_DIR (tests sandbox it) and check
+    # every candidate after resolution: an absolute DB value such as
+    # /etc/passwd must never become an arbitrary file read/download.
+    upload_root = (BASE_DIR / 'uploads').resolve()
+    candidates = []
+    if raw.is_absolute():
+        candidates.append(raw)
+    elif raw.parts and raw.parts[0] == 'app':
+        candidates.append(BASE_DIR.parent / raw)
+    candidates.extend((BASE_DIR / raw, Path.cwd() / raw))
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            if not resolved.is_relative_to(upload_root):
+                continue
+            if resolved.is_file():
+                return resolved
+        except (OSError, ValueError):
+            continue
+    return None
 
 # The tabs a user may choose as their landing page. These are the real paths
 # from base.html. A submitted value must match one exactly: never redirect to
@@ -7431,8 +7468,8 @@ async def web_projects_create(
     kind = validate_quotation(data, quotation_file.filename)
     if not kind:
         request.session['error_message'] = (
-            'The project quotation/paperwork must be a PDF, image or approved '
-            f'document under {quotations.DISPLAY_MAX_QUOTATION_MB} MB.'
+            'The project quotation/paperwork must be a non-empty file '
+            f'under {quotations.DISPLAY_MAX_QUOTATION_MB} MB.'
         )
         return RedirectResponse('/web/projects', status_code=303)
 
@@ -9791,12 +9828,12 @@ async def web_task_add_comment(
                 continue
             name = clean_upload_name(file.filename)
             file_content = await file.read(MAX_ATTACHMENT_BYTES + 1)
-            if len(file_content) > MAX_ATTACHMENT_BYTES:
-                skipped.append(f'{name} is larger than 10 MB')
-                continue
-            kind = validate_attachment(file_content, name, file.content_type)
+            kind = validate_attachment(file_content, name, file.content_type,
+                                       max_bytes=MAX_ATTACHMENT_BYTES)
             if not kind:
-                skipped.append(f'{name} is not an allowed file')
+                skipped.append(attachment_rejection_reason(
+                    name, file_content, MAX_ATTACHMENT_BYTES
+                ))
                 continue
             mime, ext = kind
             unique_filename = f"{uuid.uuid4()}{ext}"
@@ -9866,14 +9903,14 @@ async def web_task_add_attachment(
     if len(files) > MAX_ATTACHMENTS_PER_UPLOAD:
         skipped.append(f'{len(files) - MAX_ATTACHMENTS_PER_UPLOAD} file(s) were not uploaded (limit {MAX_ATTACHMENTS_PER_UPLOAD})')
     for file in files[:MAX_ATTACHMENTS_PER_UPLOAD]:
+        if not file.filename:
+            continue
         name = clean_upload_name(file.filename)
         data = await file.read(MAX_ATTACHMENT_BYTES + 1)
-        if len(data) > MAX_ATTACHMENT_BYTES:
-            skipped.append(f'{name} is larger than 10 MB')
-            continue
-        kind = validate_attachment(data, name, file.content_type)
+        kind = validate_attachment(data, name, file.content_type,
+                                   max_bytes=MAX_ATTACHMENT_BYTES)
         if not kind:
-            skipped.append(f'{name} is not an allowed file (images, PDF and documents up to 10 MB)')
+            skipped.append(attachment_rejection_reason(name, data, MAX_ATTACHMENT_BYTES))
             continue
         mime, ext = kind
         stored = f"{uuid.uuid4()}{ext}"
@@ -10105,35 +10142,24 @@ async def preview_comment_attachment(
     if not attachment:
         raise HTTPException(status_code=404, detail='Attachment not found')
     
-    # Handle both absolute paths (old) and relative paths (new)
-    file_path = Path(attachment.file_path)
-    logger.debug(f"Attachment file_path from DB: {attachment.file_path}")
-    logger.debug(f"Is absolute: {file_path.is_absolute()}")
-    
-    if not file_path.is_absolute():
-        # Relative path - resolve from current working directory
-        file_path = Path.cwd() / file_path
-    
-    logger.debug(f"Resolved file_path: {file_path}")
-    logger.debug(f"File exists: {file_path.exists()}")
-    
-    if not file_path.exists():
-        logger.error(f"File not found: {file_path}")
-        raise HTTPException(status_code=404, detail=f'File not found on disk: {file_path}')
-    
-    # Serve file inline for preview with proper headers for PDF embedding.
-    # clean_upload_name() keeps old rows with hostile names from forging a
-    # second Content-Disposition parameter.
+    file_path = _resolve_stored_upload(attachment.file_path)
+    if not file_path:
+        raise HTTPException(status_code=404, detail='File not found on disk')
+
+    # Only bytes-verified images and PDFs may be served inline. Everything else
+    # (notably HTML, SVG and script) is forced to a download with octet-stream.
     display_name = clean_upload_name(attachment.filename)
+    inline = attachment.content_type in SAFE_INLINE_PREVIEW_MIMES
+    disposition = 'inline' if inline else 'attachment'
     return FileResponse(
         path=str(file_path),
-        media_type=attachment.content_type,
+        media_type=attachment.content_type if inline else 'application/octet-stream',
         filename=display_name,
         headers={
-            'Content-Disposition': f'inline; filename="{display_name}"',
+            'Content-Disposition': f'{disposition}; filename="{display_name}"',
             'X-Content-Type-Options': 'nosniff',
-            'Content-Security-Policy': "frame-ancestors 'self'"
-        }
+            'Content-Security-Policy': "default-src 'none'",
+        },
     )
 
 
@@ -10166,19 +10192,20 @@ async def download_comment_attachment(
     if not attachment:
         raise HTTPException(status_code=404, detail='Attachment not found')
     
-    # Handle both absolute paths (old) and relative paths (new)
-    file_path = Path(attachment.file_path)
-    if not file_path.is_absolute():
-        # Relative path - resolve from current working directory
-        file_path = Path.cwd() / file_path
-    
-    if not file_path.exists():
+    file_path = _resolve_stored_upload(attachment.file_path)
+    if not file_path:
         raise HTTPException(status_code=404, detail='File not found on disk')
-    
+
+    display_name = clean_upload_name(attachment.filename)
     return FileResponse(
         path=str(file_path),
-        filename=attachment.filename,
-        media_type=attachment.content_type
+        filename=display_name,
+        media_type=attachment.content_type or 'application/octet-stream',
+        headers={
+            'Content-Disposition': f'attachment; filename="{display_name}"',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "default-src 'none'",
+        },
     )
 
 
@@ -10216,15 +10243,12 @@ async def delete_comment_attachment(
     if not user.is_admin and (not comment or comment.user_id != user.id):
         return JSONResponse(status_code=403, content={'detail': 'Permission denied'})
     
-    # Delete file from disk
-    file_path = Path(attachment.file_path)
-    if not file_path.is_absolute():
-        file_path = Path.cwd() / file_path
-    
-    if file_path.exists():
+    # Delete file from disk only when the stored path stays inside uploads/.
+    file_path = _resolve_stored_upload(attachment.file_path)
+    if file_path:
         try:
-            file_path.unlink()
-        except Exception as e:
+            file_path.unlink(missing_ok=True)
+        except OSError:
             pass  # File may already be deleted
     
     # Delete from database
@@ -12655,52 +12679,62 @@ async def web_tickets_guest_submit(
         db.add(ticket)
         await db.flush()
         
-        # Handle file attachments (including camera photos)
+        # Handle file attachments (including camera photos) with the same
+        # validation as every other upload route: any type is accepted, but
+        # active/unknown types are written with a passive .bin extension.
         attachment_count = 0
+        skipped = []
         if all_files:
-            # Create uploads directory if it doesn't exist
             upload_dir = BASE_DIR / 'uploads' / 'tickets'
             upload_dir.mkdir(parents=True, exist_ok=True)
-            
-            for file in all_files:
-                if file.filename:  # Only process if file was actually uploaded
-                    # Read file content
-                    file_content = await file.read()
-                    
-                    # Validate file size (max 10MB)
-                    if len(file_content) > 10 * 1024 * 1024:
-                        continue  # Skip files that are too large
-                    
-                    # Generate unique filename
-                    file_extension = os.path.splitext(file.filename)[1]
-                    unique_filename = f"{uuid.uuid4()}{file_extension}"
-                    file_path = upload_dir / unique_filename
-                    
-                    # Save file to disk
-                    with open(file_path, 'wb') as f:
-                        f.write(file_content)
-                    
-                    # Store relative path from app directory
-                    relative_path = f"app/uploads/tickets/{unique_filename}"
-                    
-                    # Create attachment record
-                    attachment = TicketAttachment(
-                        ticket_id=ticket.id,
-                        filename=file.filename,
-                        file_path=relative_path,
-                        file_size=len(file_content),
-                        mime_type=file.content_type or 'application/octet-stream',
-                        uploaded_by_id=None  # Guest upload
-                    )
-                    db.add(attachment)
-                    attachment_count += 1
+            if len(all_files) > MAX_ATTACHMENTS_PER_UPLOAD:
+                skipped.append(
+                    f'{len(all_files) - MAX_ATTACHMENTS_PER_UPLOAD} file(s) were not '
+                    f'uploaded (limit {MAX_ATTACHMENTS_PER_UPLOAD})'
+                )
+
+            for file in all_files[:MAX_ATTACHMENTS_PER_UPLOAD]:
+                if not file.filename:
+                    continue
+                name = clean_upload_name(file.filename)
+                file_content = await file.read(MAX_ATTACHMENT_BYTES + 1)
+                kind = validate_attachment(file_content, name, file.content_type,
+                                           max_bytes=MAX_ATTACHMENT_BYTES)
+                if not kind:
+                    skipped.append(attachment_rejection_reason(
+                        name, file_content, MAX_ATTACHMENT_BYTES
+                    ))
+                    continue
+                mime_type, ext = kind
+                unique_filename = f"{uuid.uuid4()}{ext}"
+                file_path = (upload_dir / unique_filename).resolve()
+                if not file_path.is_relative_to(upload_dir.resolve()):
+                    skipped.append(f'{name} could not be stored safely')
+                    continue
+                with open(file_path, 'wb') as f:
+                    f.write(file_content)
+
+                db.add(TicketAttachment(
+                    ticket_id=ticket.id,
+                    filename=name,
+                    file_path=f"app/uploads/tickets/{unique_filename}",
+                    file_size=len(file_content),
+                    mime_type=mime_type,
+                    uploaded_by_id=None,  # Guest upload
+                ))
+                attachment_count += 1
         
-        # Create history entry
+        # Create history entry, including any files the server had to refuse.
+        history_value = f'Guest ticket created from {guest_email}'
+        if attachment_count:
+            history_value += f' with {attachment_count} attachment(s)'
+        if skipped:
+            history_value += f'; skipped: {"; ".join(skipped)}'
         history = TicketHistory(
             ticket_id=ticket.id,
             user_id=None,
             action='created',
-            new_value=f'Guest ticket created from {guest_email}' + (f' with {attachment_count} attachment(s)' if attachment_count > 0 else '')
+            new_value=history_value,
         )
         db.add(history)
         
@@ -12798,6 +12832,7 @@ async def web_tickets_guest_submit(
             'ticket_number': ticket_number,
             'guest_email': guest_email,
             'email_sent': email_sent,
+            'file_upload_warning': '; '.join(skipped),
             'workspace': workspace,
         })
 
@@ -16081,7 +16116,7 @@ async def web_tickets_add_photos(
     photos: List[UploadFile] = File(default=[]),
     db: AsyncSession = Depends(get_session)
 ):
-    """Photos a technician took or picked on the tablet, saved with the ticket's files"""
+    """Any photo or file a technician took/picked on the tablet, saved with the ticket"""
     is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
     user_id = request.session.get('user_id')
     if not user_id:
@@ -16110,21 +16145,25 @@ async def web_tickets_add_photos(
     upload_dir.mkdir(parents=True, exist_ok=True)
     saved, skipped = 0, []
     if len(photos) > TICKET_PHOTOS_PER_UPLOAD:
-        skipped.append(f'{len(photos) - TICKET_PHOTOS_PER_UPLOAD} photo(s) were not uploaded (limit {TICKET_PHOTOS_PER_UPLOAD})')
+        skipped.append(f'{len(photos) - TICKET_PHOTOS_PER_UPLOAD} file(s) were not uploaded (limit {TICKET_PHOTOS_PER_UPLOAD})')
     for photo in photos[:TICKET_PHOTOS_PER_UPLOAD]:
         name = clean_upload_name(photo.filename, 'photo')
         data = await photo.read(TICKET_PHOTO_MAX_BYTES + 1)
-        if len(data) > TICKET_PHOTO_MAX_BYTES:
-            skipped.append(f'{name} is larger than 15 MB')
-            continue
-        kind = _photo_type(data) if data else None
+        kind = validate_attachment(data, name, photo.content_type,
+                                   max_bytes=TICKET_PHOTO_MAX_BYTES)
         if not kind:
-            skipped.append(f'{name} is not a photo')
+            skipped.append(attachment_rejection_reason(
+                name, data, TICKET_PHOTO_MAX_BYTES
+            ))
             continue
         mime_type, ext = kind
         stored = f"{uuid.uuid4()}{ext}"
         (upload_dir / stored).write_bytes(data)
-        if not name.lower().endswith(ext) and not (ext == '.jpg' and name.lower().endswith('.jpeg')):
+        # Only a bytes-verified photo gets its display extension normalized;
+        # e.g. data.csv must keep its original name in the attachment list.
+        if _photo_type(data) and not name.lower().endswith(ext) and not (
+            ext == '.jpg' and name.lower().endswith('.jpeg')
+        ):
             name = f"{Path(name).stem or 'photo'}{ext}"
         db.add(TicketAttachment(
             ticket_id=ticket_id,
@@ -16140,19 +16179,20 @@ async def web_tickets_add_photos(
         db.add(TicketHistory(
             ticket_id=ticket_id,
             user_id=user_id,
+            # Keep the legacy action name so reports/history filters still work.
             action='photos_added',
-            new_value=f"{saved} photo{'' if saved == 1 else 's'}"
+            new_value=f"{saved} file(s)"
         ))
         ticket.updated_at = datetime.utcnow()
         await db.commit()
 
     if is_ajax:
-        error = None if saved else ('; '.join(skipped) or 'No photo was received.')
+        error = None if saved else ('; '.join(skipped) or 'No file was received.')
         return JSONResponse({'saved': saved, 'skipped': skipped, 'error': error}, status_code=200 if saved else 400)
     if saved:
-        request.session['success_message'] = f"{saved} photo{'' if saved == 1 else 's'} added to ticket #{ticket.ticket_number}."
+        request.session['success_message'] = f"{saved} file(s) added to ticket #{ticket.ticket_number}."
     else:
-        request.session['error_message'] = 'No photo was added: ' + ('; '.join(skipped) or 'no file was received.')
+        request.session['error_message'] = 'No file was added: ' + ('; '.join(skipped) or 'no file was received.')
     if skipped and saved:
         request.session['error_message'] = '; '.join(skipped)
     return RedirectResponse(f'/web/tickets/{ticket_id}#photos', status_code=303)
@@ -16391,14 +16431,12 @@ Thank you.
                 continue
             name = clean_upload_name(file.filename)
             file_content = await file.read(MAX_ATTACHMENT_BYTES + 1)
-            if len(file_content) > MAX_ATTACHMENT_BYTES:
-                skipped.append(f'{name} is larger than 10 MB')
-                write_log(f"⚠️ File {name} is larger than 10 MB")
-                continue
-            kind = validate_attachment(file_content, name, file.content_type)
+            kind = validate_attachment(file_content, name, file.content_type,
+                                       max_bytes=MAX_ATTACHMENT_BYTES)
             if not kind:
-                skipped.append(f'{name} is not an allowed file')
-                write_log(f"⚠️ File {name} was rejected: wrong type")
+                reason = attachment_rejection_reason(name, file_content, MAX_ATTACHMENT_BYTES)
+                skipped.append(reason)
+                write_log(f"⚠️ {reason}")
                 continue
             mime, ext = kind
             unique_filename = f"{uuid.uuid4()}{ext}"
@@ -17592,16 +17630,20 @@ async def web_ticket_attachment_download(
     if not ticket:
         raise HTTPException(status_code=403, detail="Access denied")
     
-    # Build file path
-    file_path = BASE_DIR.parent / attachment.file_path if attachment.file_path.startswith('app/') else BASE_DIR / attachment.file_path
-    
-    if not file_path.exists():
+    file_path = _resolve_stored_upload(attachment.file_path)
+    if not file_path:
         raise HTTPException(status_code=404, detail="File not found on disk")
-    
+
+    display_name = clean_upload_name(attachment.filename)
     return FileResponse(
         path=str(file_path),
-        filename=attachment.filename,
-        media_type=attachment.mime_type or 'application/octet-stream'
+        filename=display_name,
+        media_type=attachment.mime_type or 'application/octet-stream',
+        headers={
+            'Content-Disposition': f'attachment; filename="{display_name}"',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "default-src 'none'",
+        },
     )
 
 
@@ -17642,19 +17684,25 @@ async def web_ticket_attachment_preview(
     if not ticket:
         raise HTTPException(status_code=403, detail="Access denied")
     
-    # Only allow preview for images
-    if not attachment.mime_type or not attachment.mime_type.startswith('image/'):
+    # A bytes-verified raster image is the only thing this endpoint may serve
+    # inline: image/svg+xml and text/html can execute script on our origin.
+    if attachment.mime_type not in SAFE_IMAGE_PREVIEW_MIMES:
         raise HTTPException(status_code=400, detail="Preview only available for images")
-    
-    # Build file path
-    file_path = BASE_DIR.parent / attachment.file_path if attachment.file_path.startswith('app/') else BASE_DIR / attachment.file_path
-    
-    if not file_path.exists():
+
+    file_path = _resolve_stored_upload(attachment.file_path)
+    if not file_path:
         raise HTTPException(status_code=404, detail="File not found on disk")
-    
+
+    display_name = clean_upload_name(attachment.filename)
     return FileResponse(
         path=str(file_path),
-        media_type=attachment.mime_type
+        filename=display_name,
+        media_type=attachment.mime_type,
+        headers={
+            'Content-Disposition': f'inline; filename="{display_name}"',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "default-src 'none'",
+        },
     )
 
 
@@ -17713,13 +17761,13 @@ async def web_ticket_attachment_delete(
             content={"detail": "You don't have permission to delete this attachment"}
         )
     
-    # Delete file from disk
-    file_path = BASE_DIR.parent / attachment.file_path if attachment.file_path.startswith('app/') else BASE_DIR / attachment.file_path
-    try:
-        if file_path.exists():
-            file_path.unlink()
-    except Exception as e:
-        logger.error(f"Failed to delete attachment file {file_path}: {e}")
+    # Delete file from disk only when the stored path stays inside uploads/.
+    file_path = _resolve_stored_upload(attachment.file_path)
+    if file_path:
+        try:
+            file_path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.error(f"Failed to delete attachment file {file_path}: {e}")
     
     # Delete from database
     await db.delete(attachment)
@@ -17779,16 +17827,20 @@ async def web_task_attachment_download(
     if not project:
         raise HTTPException(status_code=403, detail="Access denied")
     
-    # Build file path
-    file_path = BASE_DIR.parent / attachment.file_path if attachment.file_path.startswith('app/') else BASE_DIR / attachment.file_path
-    
-    if not file_path.exists():
+    file_path = _resolve_stored_upload(attachment.file_path)
+    if not file_path:
         raise HTTPException(status_code=404, detail="File not found on disk")
-    
+
+    display_name = clean_upload_name(attachment.filename)
     return FileResponse(
         path=str(file_path),
-        filename=clean_upload_name(attachment.filename),
-        media_type=attachment.file_type or 'application/octet-stream'
+        filename=display_name,
+        media_type=attachment.file_type or 'application/octet-stream',
+        headers={
+            'Content-Disposition': f'attachment; filename="{display_name}"',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "default-src 'none'",
+        },
     )
 
 
@@ -17859,13 +17911,13 @@ async def web_task_attachment_delete(
             content={"detail": "You don't have permission to delete this attachment"}
         )
     
-    # Delete file from disk
-    file_path = BASE_DIR.parent / attachment.file_path if attachment.file_path.startswith('app/') else BASE_DIR / attachment.file_path
-    try:
-        if file_path.exists():
-            file_path.unlink()
-    except Exception as e:
-        logger.error(f"Failed to delete task attachment file {file_path}: {e}")
+    # Delete file from disk only when the stored path stays inside uploads/.
+    file_path = _resolve_stored_upload(attachment.file_path)
+    if file_path:
+        try:
+            file_path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.error(f"Failed to delete task attachment file {file_path}: {e}")
     
     # Delete from database
     await db.delete(attachment)
@@ -18184,18 +18236,20 @@ async def download_chat_attachment(
     if not membership:
         raise HTTPException(status_code=403, detail='Access denied')
     
-    # Handle both absolute paths (old) and relative paths (new)
-    file_path = Path(attachment.file_path)
-    if not file_path.is_absolute():
-        file_path = Path.cwd() / file_path
-    
-    if not file_path.exists():
+    file_path = _resolve_stored_upload(attachment.file_path)
+    if not file_path:
         raise HTTPException(status_code=404, detail='File not found on disk')
-    
+
+    display_name = clean_upload_name(attachment.filename)
     return FileResponse(
         path=str(file_path),
-        filename=attachment.filename,
-        media_type=attachment.mime_type or 'application/octet-stream'
+        filename=display_name,
+        media_type=attachment.mime_type or 'application/octet-stream',
+        headers={
+            'Content-Disposition': f'attachment; filename="{display_name}"',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "default-src 'none'",
+        },
     )
 
 
@@ -18237,47 +18291,52 @@ async def web_chat_send_message(
     db.add(message)
     await db.flush()  # Get message ID
     
-    # Handle file attachments
+    # Handle file attachments with the same rules as every other upload route:
+    # any type is accepted, active/unknown types are stored with a passive .bin.
+    saved_attachments = []
+    skipped = []
     if attachments:
-        import uuid
-        from pathlib import Path
-        
-        upload_dir = Path('app/uploads/chat_messages')
+        from app.models.chat import MessageAttachment
+
+        upload_dir = BASE_DIR / 'uploads' / 'chat_messages'
         upload_dir.mkdir(parents=True, exist_ok=True)
-        
-        for file in attachments:
-            if file.filename:
-                # Read file content first for validation
-                content_bytes = await file.read()
-                
-                # Validate file size (max 10MB)
-                if len(content_bytes) > 10 * 1024 * 1024:
-                    continue  # Skip files that are too large
-                
-                # Block dangerous file extensions
-                file_ext = Path(file.filename).suffix.lower()
-                blocked_extensions = {'.exe', '.bat', '.cmd', '.sh', '.php', '.py', '.rb', '.pl', '.cgi', '.js', '.msi', '.ps1', '.vbs', '.wsf'}
-                if file_ext in blocked_extensions:
-                    continue  # Skip dangerous file types
-                
-                # Generate unique filename
-                unique_filename = f"{uuid.uuid4()}{file_ext}"
-                file_path = upload_dir / unique_filename
-                
-                # Save file
-                with open(file_path, 'wb') as f:
-                    f.write(content_bytes)
-                
-                # Create attachment record
-                from app.models.chat import MessageAttachment
-                attachment = MessageAttachment(
-                    message_id=message.id,
-                    filename=file.filename,
-                    file_path=str(file_path),
-                    file_size=len(content_bytes),
-                    mime_type=file.content_type
-                )
-                db.add(attachment)
+        if len(attachments) > MAX_ATTACHMENTS_PER_UPLOAD:
+            skipped.append(
+                f'{len(attachments) - MAX_ATTACHMENTS_PER_UPLOAD} file(s) were not '
+                f'uploaded (limit {MAX_ATTACHMENTS_PER_UPLOAD})'
+            )
+
+        for file in attachments[:MAX_ATTACHMENTS_PER_UPLOAD]:
+            if not file.filename:
+                skipped.append('unnamed file was not uploaded')
+                continue
+            name = clean_upload_name(file.filename)
+            data = await file.read(MAX_ATTACHMENT_BYTES + 1)
+            kind = validate_attachment(data, name, file.content_type,
+                                       max_bytes=MAX_ATTACHMENT_BYTES)
+            if not kind:
+                skipped.append(attachment_rejection_reason(
+                    name, data, MAX_ATTACHMENT_BYTES
+                ))
+                continue
+            mime_type, ext = kind
+            unique_filename = f"{uuid.uuid4()}{ext}"
+            file_path = (upload_dir / unique_filename).resolve()
+            if not file_path.is_relative_to(upload_dir.resolve()):
+                skipped.append(f'{name} could not be stored safely')
+                continue
+            with open(file_path, 'wb') as f:
+                f.write(data)
+
+            attachment = MessageAttachment(
+                message_id=message.id,
+                filename=name,
+                file_path=f"app/uploads/chat_messages/{unique_filename}",
+                file_size=len(data),
+                mime_type=mime_type,
+            )
+            db.add(attachment)
+            saved_attachments.append(attachment)
     
     # Create notifications for other chat members
     chat_members = (await db.execute(
@@ -18301,20 +18360,18 @@ async def web_chat_send_message(
             preview_text = preview_text[:47] + "..."
         message_preview = f": {preview_text}"
     
-    # Check for attachments and add to summary
+    # Summarize only the files that were actually stored, using the derived
+    # (passive) MIME types rather than the browser's untrusted declaration.
     attachment_summary = ""
-    if attachments and len(attachments) > 0:
-        attachment_count = len(attachments)
-        
-        # Analyze attachment types
-        image_count = sum(1 for f in attachments if f.content_type and f.content_type.startswith('image/'))
-        video_count = sum(1 for f in attachments if f.content_type and f.content_type.startswith('video/'))
-        doc_count = sum(1 for f in attachments if f.content_type and (
-            'pdf' in (f.content_type or '') or 
-            'document' in (f.content_type or '') or
-            'word' in (f.content_type or '') or
-            'sheet' in (f.content_type or '') or
-            'text' in (f.content_type or '')
+    if saved_attachments:
+        attachment_count = len(saved_attachments)
+        saved_types = [att.mime_type or 'application/octet-stream'
+                       for att in saved_attachments]
+        image_count = sum(1 for mime in saved_types if mime.startswith('image/'))
+        video_count = sum(1 for mime in saved_types if mime.startswith('video/'))
+        doc_count = sum(1 for mime in saved_types if (
+            'pdf' in mime or 'document' in mime or 'word' in mime
+            or 'sheet' in mime or 'text' in mime
         ))
         
         # Build attachment description
@@ -18358,7 +18415,9 @@ async def web_chat_send_message(
         db.add(notification)
     
     await db.commit()
-    
+
+    if skipped:
+        request.session['error_message'] = '; '.join(skipped)
     return RedirectResponse(f'/web/chats/{chat_id}', status_code=303)
 
 
@@ -19909,12 +19968,13 @@ async def web_admin_storage_delete_archived(request: Request, db: AsyncSession =
                 select(TicketAttachment).where(TicketAttachment.ticket_id == tid)
             )).scalars().all()
             for att in attachments:
+                file_path = _resolve_stored_upload(att.file_path)
+                if not file_path:
+                    continue
                 try:
-                    file_path = Path(att.file_path)
-                    if file_path.exists():
-                        file_path.unlink()
-                        logger.info(f"Deleted attachment file: {att.file_path}")
-                except Exception as e:
+                    file_path.unlink(missing_ok=True)
+                    logger.info(f"Deleted attachment file: {att.file_path}")
+                except OSError as e:
                     logger.warning(f"Could not delete attachment file {att.file_path}: {e}")
 
             # Delete DB records: attachments, comments, history, time entries, signatures, then ticket

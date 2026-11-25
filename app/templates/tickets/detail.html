@@ -198,10 +198,10 @@
                             <i class="fas fa-camera mr-2"></i>Take Photo
                         </label>
                     </div>
-                    {{ dropzone('photos', 'photoGalleryInput', accept='image/*',
+                    {{ dropzone('photos', 'photoGalleryInput',
                                 input_class='cem-dropzone-input js-photo-input',
-                                label='Drop photos here, or click to browse',
-                                hint='Images up to 15 MB each') }}
+                                label='Drop photos or files here, or click to browse',
+                                hint='Any file type up to 15 MB each') }}
                 </div>
                 <p id="photoStatus" class="hidden mb-4 px-3 py-2 rounded-md text-sm border" role="status"></p>
                 {% if not attachments %}
@@ -258,6 +258,10 @@
                             {% elif attachment.mime_type and ('excel' in attachment.mime_type or 'spreadsheet' in attachment.mime_type) %}
                                 <div class="flex-shrink-0 w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center">
                                     <i class="fas fa-file-excel text-green-600 text-xl"></i>
+                                </div>
+                            {% elif attachment.mime_type == 'text/csv' %}
+                                <div class="flex-shrink-0 w-12 h-12 bg-emerald-100 rounded-lg flex items-center justify-center">
+                                    <i class="fas fa-file-csv text-emerald-600 text-xl"></i>
                                 </div>
                             {% elif attachment.mime_type and 'zip' in attachment.mime_type %}
                                 <div class="flex-shrink-0 w-12 h-12 bg-yellow-100 rounded-lg flex items-center justify-center">
@@ -347,7 +351,7 @@
                         </label>
                         {{ dropzone('files', 'ticket-attachments-' ~ ticket.id,
                                     label='Drop attachments here, or click to browse',
-                                    hint='Images, PDFs, documents, spreadsheets up to 10MB each') }}
+                                    hint='Any file type up to 10 MB each') }}
                     </div>
                     
                     <div class="flex flex-wrap justify-between items-center gap-3 mt-3">
@@ -1549,7 +1553,7 @@ if (location.hash === '#signed') {
             var files = Array.prototype.slice.call(input.files || []);
             input.value = '';  // the same photo can be chosen again later
             if (!files.length) return;
-            say('Uploading ' + files.length + ' photo' + (files.length === 1 ? '' : 's') + '…', false);
+            say('Uploading ' + files.length + ' file(s)…', false);
             document.getElementById('photos').scrollIntoView({ block: 'start', behavior: 'smooth' });
             Promise.all(files.map(shrink)).then(function (ready) {
                 var form = new FormData();
@@ -1560,11 +1564,11 @@ if (location.hash === '#signed') {
             }).then(function (res) {
                 return res.json().then(function (data) { return { ok: res.ok, data: data }; });
             }).then(function (result) {
-                if (!result.ok) { say(result.data.error || 'The photo could not be added.', true); return; }
+                if (!result.ok) { say(result.data.error || 'The file(s) could not be added.', true); return; }
                 location.hash = 'photos';
                 location.reload();
             }).catch(function () {
-                say('The photo could not be uploaded. Check the connection and try again.', true);
+                say('The file(s) could not be uploaded. Check the connection and try again.', true);
             });
         });
     });

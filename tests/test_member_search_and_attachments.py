@@ -3,9 +3,10 @@
 The two guarantees here are: a project admin can find any of the company's
 users by typing part of their name, username or email (and never sees members
 already on the project or users of another company), and dropped photos/files
-are saved through the existing web upload paths with safe names, allowed types
-and workspace checks. The reusable dropzone is a Jinja partial so Slice 5 can
-use the same helper for Project Quotation uploads.
+are saved through the existing web upload paths with safe names, passive on-disk
+extensions and workspace checks. Any non-empty file type is accepted; unknown or
+active types are stored as .bin. The reusable dropzone is a Jinja partial so
+Slice 5 can use the same helper for Project Quotation uploads.
 """
 from __future__ import annotations
 
@@ -234,14 +235,18 @@ async def test_task_attachment_endpoint_saves_a_photo_with_a_safe_name(env):
 
 
 @pytest.mark.asyncio
-async def test_task_attachment_endpoint_rejects_disallowed_files(env):
+async def test_task_attachment_endpoint_accepts_executables_as_safe_bin(env):
     response = await web.web_task_add_attachment(
         _request(env.people['ada'], headers={'X-Requested-With': 'XMLHttpRequest'}),
-        env.task.id, files=[_upload('unsafe.exe', EXE, 'application/octet-stream')], db=env.db
+        env.task.id, files=[_upload('../../unsafe.exe', EXE, 'application/octet-stream')], db=env.db
     )
-    assert response.status_code == 400
-    assert json.loads(response.body)['saved'] == 0
-    assert (await env.db.execute(select(TaskAttachment))).scalars().all() == []
+    assert response.status_code == 200
+    assert json.loads(response.body)['saved'] == 1
+    saved = (await env.db.execute(select(TaskAttachment))).scalar_one()
+    assert saved.filename == 'unsafe.exe'
+    assert saved.file_path.endswith('.bin'), 'never write an executable extension under /uploads'
+    stored = env.tmp_path / saved.file_path.replace('app/', '', 1)
+    assert stored.read_bytes() == EXE
 
 
 @pytest.mark.asyncio
@@ -281,9 +286,10 @@ async def test_task_comment_attachment_upload_validates_type_and_filename(env):
     )
     assert response.status_code == 303
     saved = (await env.db.execute(select(CommentAttachment))).scalars().all()
-    assert len(saved) == 1
-    assert saved[0].filename == 'shot.PNG'
+    assert len(saved) == 2
+    assert [row.filename for row in saved] == ['shot.PNG', 'payload.exe']
     assert '..' not in saved[0].file_path and saved[0].file_path.endswith('.png')
+    assert '..' not in saved[1].file_path and saved[1].file_path.endswith('.bin')
 
 
 @pytest.mark.asyncio

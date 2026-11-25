@@ -7,12 +7,12 @@
   normal file input, so clicking the label/button and submitting a form still
   works without JavaScript.
 #}
-{% macro dropzone(input_name, input_id, accept='image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip,.rar', upload_url='', label='Drop photos or files here, or click to browse', hint='', multiple=true, input_class='cem-dropzone-input', required=false, required_message='', max_bytes=0, show_size=false) -%}
+{% macro dropzone(input_name, input_id, accept='', upload_url='', label='Drop photos or files here, or click to browse', hint='', multiple=true, input_class='cem-dropzone-input', required=false, required_message='', max_bytes=0, show_size=false) -%}
 <div class="cem-dropzone" data-dropzone{% if required %} data-dropzone-required{% endif %}{% if show_size %} data-dropzone-show-size{% endif %}{% if required_message %} data-required-message="{{ required_message }}"{% endif %}{% if max_bytes %} data-max-bytes="{{ max_bytes }}"{% endif %}{% if upload_url %} data-upload-url="{{ upload_url }}"{% endif %}>
   <label class="cem-dropzone-target" for="{{ input_id }}">
     <input type="file" id="{{ input_id }}" name="{{ input_name }}"
            class="{{ input_class }}" data-dropzone-input
-           accept="{{ accept }}"{% if multiple %} multiple{% endif %}{% if required %} required{% endif %}>
+           {% if accept %}accept="{{ accept }}"{% endif %}{% if multiple %} multiple{% endif %}{% if required %} required{% endif %}>
     <span class="cem-dropzone-icon" aria-hidden="true">&#128206;</span>
     <span class="cem-dropzone-label">{{ label }}</span>
   </label>

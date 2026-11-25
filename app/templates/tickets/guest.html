@@ -152,6 +152,11 @@
         <p class="text-green-600 text-sm mb-4">
           {% if email_sent %}A confirmation email has been sent to <strong>{{ guest_email }}</strong>.{% else %}Our team will review your request shortly.{% endif %}
         </p>
+        {% if file_upload_warning %}
+        <p class="mb-4 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-sm text-amber-800" role="status">
+          <i class="fas fa-triangle-exclamation mr-1"></i>Some files were not attached: {{ file_upload_warning }}
+        </p>
+        {% endif %}
         <div class="flex flex-wrap gap-3">
           <a href="/web/tickets/track"
              class="brand-btn px-5 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2">
@@ -305,8 +310,8 @@
               <label class="border-2 border-dashed border-gray-200 rounded-xl p-4 cursor-pointer hover:border-gray-400 transition-colors flex flex-col items-center gap-2 text-center">
                 <i class="fas fa-file-upload text-2xl text-gray-400"></i>
                 <span class="text-sm font-medium text-gray-700">Upload Files</span>
-                <span class="text-xs text-gray-400">Images, PDF, Office docs</span>
-                <input type="file" name="files" multiple id="file-upload" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip" class="hidden" onchange="updateFiles()">
+                <span class="text-xs text-gray-400">Any file type up to 10 MB</span>
+                <input type="file" name="files" multiple id="file-upload" class="hidden" onchange="updateFiles()">
               </label>
               <label id="camera-option" class="hidden border-2 border-dashed border-green-200 rounded-xl p-4 cursor-pointer hover:border-green-400 transition-colors flex flex-col items-center gap-2 text-center bg-green-50">
                 <i class="fas fa-camera text-2xl text-green-500"></i>
@@ -319,7 +324,7 @@
               <p class="font-medium text-gray-700 mb-1.5"><i class="fas fa-check-circle text-green-500 mr-1"></i>Selected files:</p>
               <ul id="file-list" class="space-y-1"></ul>
             </div>
-            <p class="text-xs text-gray-400"><i class="fas fa-info-circle mr-1"></i>Max 10 MB each. Images, PDF, Word, Excel supported.</p>
+            <p class="text-xs text-gray-400"><i class="fas fa-info-circle mr-1"></i>Any file type up to 10 MB each. Active or unknown types are stored as safe downloads.</p>
           </div>
 
           <!-- Submit -->
