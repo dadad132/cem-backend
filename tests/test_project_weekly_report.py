@@ -189,6 +189,19 @@ async def test_attachments_are_identical_to_download_endpoints(db, acme, monkeyp
     fixed = datetime(2026, 11, 16, 8, 5)
     monkeypatch.setattr(report_excel, 'local_now', lambda zone=None: fixed)
     monkeypatch.setattr(web, 'local_now', lambda zone=None: fixed)
+    # openpyxl otherwise stamps Workbook.properties.created with the wall clock,
+    # so two builds straddling a second boundary differ byte-for-byte.
+    import openpyxl
+
+    original_workbook = openpyxl.Workbook
+
+    def fixed_workbook(*args, **kwargs):
+        wb = original_workbook(*args, **kwargs)
+        wb.properties.created = fixed
+        wb.properties.modified = fixed
+        return wb
+
+    monkeypatch.setattr(openpyxl, 'Workbook', fixed_workbook)
 
     label = "Exported by Bob Builder on 2026-11-16 08:05"
     name, content = await report_excel.build_project_report_excel(db, linked, None, None, label, fixed)

@@ -25,9 +25,18 @@ def _syslog(level, source, message, details=None, workspace_id=None):
         log_fire_and_forget(level, 'email', source, message, details, workspace_id)
     except Exception:
         pass
+from sqlalchemy import or_
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.email_intake_analyzer import (
+    analyze_email_deterministically,
+    analyze_incoming_email,
+    is_generic_subject,
+    is_portal_sender,
+    names_conflict,
+    split_person_name,
+)
 from app.models.ticket import Ticket, TicketHistory, TicketComment, TicketAttachment
 from app.models.notification import Notification, wants_ticket_notification
 from app.models.email_settings import EmailSettings
@@ -293,12 +302,246 @@ async def generate_unique_ticket_number(db: AsyncSession, workspace_id: int) -> 
     return f"{prefix}{next_num:05d}"
 
 
+# ── Portal intake / thread-resolution helpers (shared by both pollers) ──────
+
+ACTIVE_TICKET_STATUSES = ('open', 'in_progress', 'waiting')
+
+
+def _clean_subject(subject: str) -> str:
+    return re.sub(r'^(Re:|RE:|Fwd:|FWD:|AW:|Aw:|\[.*?\])\s*', '', subject or '',
+                  flags=re.IGNORECASE).strip()
+
+
+def extract_ticket_number_from_subject(subject: str) -> Optional[str]:
+    """Find an explicit ticket reference, including TKT-YYYY-NNNNN numbers."""
+    patterns = [
+        r'(?:ticket\s*#?\s*|#\s*|\[#)(TKT-\d{4}-\d{3,})',
+        r'\b(TKT-\d{4}-\d{3,})\b',
+        r'ticket\s*#?\s*(\d+)',
+        r'#(\d+)',
+        r'(?:^|\s)(\d{5,})',
+    ]
+    for value in (subject or '', _clean_subject(subject)):
+        for pattern in patterns:
+            match = re.search(pattern, value, re.IGNORECASE)
+            if match:
+                return match.group(1)
+    return None
+
+
+async def load_candidate_tickets(
+    db: AsyncSession, workspace_id: int, subject: str, emails
+) -> List[Ticket]:
+    """Active tickets that could plausibly own this email.
+
+    A failure here must not stop ingestion: with no candidates the analyzer
+    simply creates a fresh ticket, which is always safer than merging.
+    """
+    clean = _clean_subject(subject)
+    addresses = sorted({(e or '').strip().lower() for e in emails if e and '@' in e})
+    conditions = [Ticket.guest_email == address for address in addresses]
+    if clean:
+        conditions.extend([Ticket.subject == clean, Ticket.subject.like(f'{clean} - %')])
+    if not conditions:
+        return []
+    try:
+        result = await db.execute(
+            select(Ticket).where(
+                Ticket.workspace_id == workspace_id,
+                Ticket.status.in_(ACTIVE_TICKET_STATUSES),
+            ).where(or_(*conditions)).order_by(Ticket.created_at.desc())
+        )
+        return list(result.scalars().all())
+    except Exception as exc:
+        _syslog('WARNING', 'Email Intake', 'Could not load candidate tickets',
+                str(exc)[:200], workspace_id)
+        return []
+
+
+async def analyze_email_for_intake(
+    db: AsyncSession,
+    workspace_id: int,
+    *,
+    from_name: str,
+    from_email: str,
+    reply_to: str,
+    subject: str,
+    body: str,
+    in_reply_to: str = '',
+    references: str = '',
+    llm_caller=None,
+):
+    """Analyze an email and return (analysis, candidate tickets)."""
+    deterministic = analyze_email_deterministically(
+        from_email, subject, body, from_name=from_name, reply_to=reply_to,
+        in_reply_to=in_reply_to, references=references,
+    )
+    candidates = await load_candidate_tickets(
+        db, workspace_id, subject, [from_email, deterministic.requester_email]
+    )
+    analysis = await analyze_incoming_email(
+        db, workspace_id, from_name=from_name, from_email=from_email,
+        reply_to=reply_to, subject=subject, body=body, in_reply_to=in_reply_to,
+        references=references, candidate_tickets=candidates, llm_caller=llm_caller,
+        deterministic=deterministic,
+    )
+    return analysis, candidates
+
+
+def _candidate_number(ticket) -> str:
+    return str(getattr(ticket, 'ticket_number', '') or '').strip()
+
+
+def _stored_requester_name(ticket) -> str:
+    return ' '.join(part for part in (getattr(ticket, 'guest_name', ''),
+                                      getattr(ticket, 'guest_surname', '')) if part)
+
+
+def _identity_conflicts(ticket, analysis, sender_email: str = '') -> bool:
+    """Refuse a merge when the new requester is clearly someone else."""
+    if analysis is None:
+        return False
+    if names_conflict(analysis.requester_full_name or analysis.requester_name,
+                      _stored_requester_name(ticket)):
+        return True
+    incoming = (analysis.requester_email or '').strip().lower()
+    stored = (getattr(ticket, 'guest_email', '') or '').strip().lower()
+    if (incoming and incoming != (sender_email or '').strip().lower()
+            and not is_portal_sender(incoming) and stored and '@' in stored
+            and not is_portal_sender(stored) and stored != incoming):
+        return True
+    return False
+
+
+def _effective_identity(analysis, sender_name: str, sender_email: str) -> tuple[str, str]:
+    """Attribute comments to the person in the form, not the portal mailbox."""
+    name = ((analysis.requester_full_name or analysis.requester_name) if analysis else '') \
+        or sender_name or 'Unknown'
+    email = ((analysis.requester_email if analysis else '') or sender_email)
+    return name, email
+
+
+def _ticket_intake_fields(
+    analysis, sender_name: str, sender_email: str, subject: str, body: str,
+    *, account_name: str = '',
+) -> dict:
+    """Ticket metadata derived from the intake analysis (with safe fallbacks)."""
+    sender_first, sender_surname = split_person_name(sender_name or '')
+    fields = {
+        'guest_name': sender_first or 'Unknown',
+        'guest_surname': sender_surname,
+        'guest_email': sender_email,
+        'guest_phone': '',
+        'guest_company': account_name or '',
+        'guest_branch': '',
+        'subject': (subject or '')[:200],
+        'description': (body or '')[:5000],
+    }
+    if analysis is None:
+        return fields
+
+    name = analysis.requester_name or sender_first or 'Unknown'
+    surname = analysis.requester_surname or (sender_surname if not analysis.requester_name else '')
+    fields.update({
+        'guest_name': name,
+        'guest_surname': surname,
+        'guest_email': analysis.requester_email or sender_email,
+        'guest_phone': analysis.requester_phone or '',
+        'guest_company': analysis.requester_company or account_name or '',
+        'guest_branch': analysis.requester_branch or '',
+    })
+
+    base = analysis.extracted_subject or subject or ''
+    full_name = analysis.requester_full_name or name
+    if (analysis.is_portal_submission and is_generic_subject(subject)
+            and full_name and full_name.lower() not in base.lower()):
+        base = f'{base} - {full_name}'
+    fields['subject'] = base[:200]
+    return fields
+
+
+async def resolve_ticket_for_email(
+    db: AsyncSession,
+    workspace_id: int,
+    subject: str,
+    sender_email: str,
+    analysis,
+    candidate_tickets=None,
+    header_ticket=None,
+) -> Optional[Ticket]:
+    """Decide whether an email threads onto a ticket or starts a new one."""
+    candidates = list(candidate_tickets or [])
+    by_number = {_candidate_number(t): t for t in candidates if _candidate_number(t)}
+
+    # 1. An explicit ticket reference in the subject wins over everything else.
+    number = extract_ticket_number_from_subject(subject)
+    if number:
+        ticket = by_number.get(number)
+        if ticket is None:
+            try:
+                result = await db.execute(
+                    select(Ticket).where(
+                        Ticket.ticket_number == number,
+                        Ticket.workspace_id == workspace_id,
+                    )
+                )
+                ticket = result.scalar_one_or_none()
+            except Exception:
+                ticket = None
+        if (ticket and ticket.status in ACTIVE_TICKET_STATUSES
+                and not _identity_conflicts(ticket, analysis, sender_email)):
+            return ticket
+        return None
+
+    # 2. An explicit "new request" verdict beats probabilistic header matching.
+    #    (The explicit ticket number above still wins: a human wrote it.)
+    if analysis is not None and analysis.is_reply_to_existing is False:
+        return None
+
+    # 3. Reply headers only thread when the requester identity still agrees.
+    if (header_ticket is not None and header_ticket != 'CLOSED'
+            and not _identity_conflicts(header_ticket, analysis, sender_email)):
+        return header_ticket
+
+    if analysis is not None:
+        # 4. Respect an explicit LLM "this is a follow-up" with a validated number.
+        if analysis.is_reply_to_existing:
+            ticket = by_number.get(analysis.matched_ticket_number or '')
+            if ticket and not _identity_conflicts(ticket, analysis, sender_email):
+                return ticket
+            return None
+        # 5. A portal form submission is never merged on sender+subject alone.
+        if analysis.is_portal_submission:
+            return None
+
+    # 6. Ordinary mail: subject AND effective requester address must both match.
+    #    A generic subject on an unknown sender is never enough to merge.
+    if is_generic_subject(subject):
+        return None
+    variants = {_clean_subject(subject).lower()}
+    if analysis and analysis.extracted_subject:
+        variants.add(_clean_subject(analysis.extracted_subject).lower())
+    effective_email = ((analysis.requester_email if analysis else '') or sender_email or '').lower()
+    emails = {addr for addr in (sender_email.lower() if sender_email else '', effective_email) if addr}
+    for ticket in candidates:
+        if _clean_subject(ticket.subject or '').lower() not in variants:
+            continue
+        stored_email = (ticket.guest_email or '').strip().lower()
+        if stored_email not in emails:
+            continue
+        if _identity_conflicts(ticket, analysis, sender_email):
+            continue
+        return ticket
+    return None
+
+
 class EmailToTicketService:
     """Service to process emails from IMAP and create tickets"""
     
-    def __init__(self, email_settings: EmailSettings, workspace_id: int):
+    def __init__(self, email_settings: EmailSettings, workspace_id: int, llm_caller=None):
         self.settings = email_settings
         self.workspace_id = workspace_id
+        self.llm_caller = llm_caller
         
     def connect_imap(self):
         """Connect to IMAP server with timeout.
@@ -670,84 +913,57 @@ class EmailToTicketService:
         return None
     
     async def find_ticket_by_subject(self, db: AsyncSession, subject: str) -> Optional[Ticket]:
-        """
-        Fallback: Find ticket by subject line pattern
-        Gmail/Outlook include "Re: Ticket #12345" or "Ticket #12345" in subject
-        """
-        import re
-        
+        """Find a ticket explicitly referenced in the subject line."""
         print(f"[DEBUG] Trying to find ticket by subject: '{subject}'")
-        
-        # Clean up the subject - remove Re:, Fwd:, etc.
-        clean_subject = re.sub(r'^(Re:|RE:|Fwd:|FWD:|\[.*?\])\s*', '', subject, flags=re.IGNORECASE).strip()
-        print(f"[DEBUG] Cleaned subject: '{clean_subject}'")
-        
-        # Look for patterns like "Ticket #12345" or "#12345"
-        patterns = [
-            r'Ticket\s*#?\s*(\d+)',      # "Ticket #12345" or "Ticket 12345"
-            r'Re:\s*Ticket\s*#?\s*(\d+)', # "Re: Ticket #12345"
-            r'#(\d+)',                     # "#12345" anywhere
-            r'\bticket\s*#?\s*(\d+)',      # "ticket 12345" (case insensitive)
-            r'\[#(\d+)\]',                 # "[#12345]"
-            r'(?:^|\s)(\d{5,})',           # 5+ digit number (likely ticket number)
-        ]
-        
-        # Try on both original and cleaned subject
-        for test_subject in [subject, clean_subject]:
-            for pattern in patterns:
-                match = re.search(pattern, test_subject, re.IGNORECASE)
-                if match:
-                    ticket_number = match.group(1)
-                    print(f"[DEBUG] Found potential ticket number in subject: {ticket_number} (pattern: {pattern})")
-                    
-                    # Search for ticket by number
-                    result = await db.execute(
-                        select(Ticket).where(
-                            Ticket.ticket_number == ticket_number,
-                            Ticket.workspace_id == self.workspace_id
-                        )
-                    )
-                    ticket = result.scalar_one_or_none()
-                    if ticket:
-                        # Don't add comments to closed tickets - create new ticket instead
-                        if ticket.status in ['closed', 'resolved']:
-                            print(f"[DEBUG] Found ticket #{ticket.ticket_number} but it's CLOSED - will create new ticket")
-                            return None
-                        print(f"[DEBUG] ✅ Found ticket #{ticket.ticket_number} via subject line")
-                        return ticket
-                    else:
-                        print(f"[DEBUG] Pattern matched '{ticket_number}' but no ticket found in database")
-        
-        print(f"[DEBUG] ❌ No ticket number found in subject")
-        return None
-    
-    async def find_ticket_by_subject_and_sender(self, db: AsyncSession, subject: str, sender_email: str) -> Optional[Ticket]:
-        """Match an email to an existing open ticket only when BOTH rules are satisfied:
-        Rule 1 — cleaned subject matches an existing open ticket's subject.
-        Rule 2 — sender email matches that ticket's guest_email.
-        If only one rule matches it is treated as a new ticket.
-        """
-        import re
-        clean_subject = re.sub(r'^(Re:|RE:|Fwd:|FWD:|AW:|Aw:|\[.*?\])\s*', '', subject, flags=re.IGNORECASE).strip()
-        print(f"[DEBUG] find_ticket_by_subject_and_sender: subject='{clean_subject}', email='{sender_email}'")
+        number = extract_ticket_number_from_subject(subject)
+        if not number:
+            print(f"[DEBUG] ❌ No ticket number found in subject")
+            return None
 
         result = await db.execute(
             select(Ticket).where(
-                Ticket.guest_email == sender_email,
+                Ticket.ticket_number == number,
                 Ticket.workspace_id == self.workspace_id,
-                Ticket.status.in_(['open', 'in_progress', 'waiting'])
-            ).order_by(Ticket.created_at.desc())
+            )
         )
-        candidates = result.scalars().all()
+        ticket = result.scalar_one_or_none()
+        # Don't add comments to closed tickets - create a new ticket instead.
+        if ticket and ticket.status in ['closed', 'resolved']:
+            print(f"[DEBUG] Found ticket #{ticket.ticket_number} but it's CLOSED - will create new ticket")
+            return None
+        if ticket:
+            print(f"[DEBUG] ✅ Found ticket #{ticket.ticket_number} via subject line")
+        return ticket
 
-        for ticket in candidates:
-            ticket_subject_clean = re.sub(r'^(Re:|RE:|Fwd:|FWD:|AW:|Aw:|\[.*?\])\s*', '', ticket.subject or '', flags=re.IGNORECASE).strip()
-            if ticket_subject_clean.lower() == clean_subject.lower():
-                print(f"[DEBUG] ✅ Both rules matched — ticket #{ticket.ticket_number}")
-                return ticket
+    async def find_ticket_by_subject_and_sender(
+        self, db: AsyncSession, subject: str, sender_email: str, *,
+        analysis=None, sender_name: str = '', reply_to: str = '', body: str = '',
+        in_reply_to: str = '', references: str = '', header_ticket=None,
+        candidate_tickets=None,
+    ) -> Optional[Ticket]:
+        """Thread an email only when subject, identity and intake analysis agree.
 
-        print(f"[DEBUG] ❌ No ticket matched both subject and sender email — new ticket will be created")
-        return None
+        Portal submissions are never merged on the shared From:/Subject: alone;
+        pass ``analysis`` from analyze_email_for_intake() on the ingestion path.
+        """
+        if analysis is None:
+            analysis = analyze_email_deterministically(
+                sender_email, subject, body, from_name=sender_name,
+                reply_to=reply_to, in_reply_to=in_reply_to, references=references,
+            )
+        if candidate_tickets is None:
+            candidate_tickets = await load_candidate_tickets(
+                db, self.workspace_id, subject, [sender_email, analysis.requester_email]
+            )
+        ticket = await resolve_ticket_for_email(
+            db, self.workspace_id, subject, sender_email, analysis,
+            candidate_tickets=candidate_tickets, header_ticket=header_ticket,
+        )
+        if ticket:
+            print(f"[DEBUG] ✅ Intake matched ticket #{ticket.ticket_number}")
+        else:
+            print("[DEBUG] ❌ No safe intake match - new ticket will be created")
+        return ticket
     
     async def mark_email_processed(
         self, 
@@ -813,33 +1029,37 @@ class EmailToTicketService:
         body: str,
         to_email: Optional[str] = None,
         project: Optional[Project] = None,
-        attachments: Optional[List[dict]] = None
+        attachments: Optional[List[dict]] = None,
+        analysis=None,
+        account_name: str = '',
     ) -> Ticket:
-        """Create a guest ticket from email"""
-        
+        """Create a guest ticket from email using the analyzed requester details."""
+
         # Generate unique ticket number
         ticket_number = await generate_unique_ticket_number(db, self.workspace_id)
-        
+
         # Determine priority
         priority = self.determine_priority(subject, body)
-        
+        fields = _ticket_intake_fields(analysis, sender_name, sender_email, subject, body,
+                                       account_name=account_name)
+
         # Create ticket
         ticket = Ticket(
             ticket_number=ticket_number,
-            subject=subject[:200],  # Limit subject length
-            description=body[:5000],  # Limit body length
+            subject=fields['subject'],
+            description=fields['description'],
             priority=priority,
             status='open',
             category='support',
             workspace_id=self.workspace_id,
             created_by_id=None,  # Guest ticket
             is_guest=True,
-            guest_name=sender_name.split()[0] if sender_name and sender_name.strip() else "Unknown",
-            guest_surname=sender_name.split()[-1] if sender_name and len(sender_name.split()) > 1 else "",
-            guest_email=sender_email,
-            guest_phone="",
-            guest_company="",
-            guest_branch="",
+            guest_name=fields['guest_name'],
+            guest_surname=fields['guest_surname'],
+            guest_email=fields['guest_email'],
+            guest_phone=fields['guest_phone'],
+            guest_company=fields['guest_company'],
+            guest_branch=fields['guest_branch'],
             related_project_id=project.id if project else None,  # Link to project if found
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow()
@@ -849,7 +1069,7 @@ class EmailToTicketService:
         await db.flush()
 
         # Add history entry
-        history_comment = f'Ticket created automatically from email: {sender_email}'
+        history_comment = f'Ticket created automatically from email: {fields["guest_email"]}'
         if project:
             history_comment += f' → Project: {project.name}'
         if to_email:
@@ -873,9 +1093,9 @@ class EmailToTicketService:
             sql_select(User).where(User.workspace_id == self.workspace_id).where(User.is_admin == True)
         )).scalars().all()
         
-        notification_message = f'New ticket from email #{ticket_number}: {subject[:100]}'
+        notification_message = f'New ticket from email #{ticket_number}: {fields["subject"][:100]}'
         if project:
-            notification_message = f'New ticket for {project.name} from email #{ticket_number}: {subject[:100]}'
+            notification_message = f'New ticket for {project.name} from email #{ticket_number}: {fields["subject"][:100]}'
         
         for admin in admin_users:
             # Muted admins hear only about tickets assigned to them
@@ -910,15 +1130,19 @@ class EmailToTicketService:
         sender_name: str,
         sender_email: str,
         body: str,
-        attachments: Optional[List[dict]] = None
+        attachments: Optional[List[dict]] = None,
+        effective_name: Optional[str] = None,
+        effective_email: Optional[str] = None,
     ) -> TicketComment:
         """Add a comment to an existing ticket from email reply"""
-        
+        display_name = effective_name or sender_name or 'Unknown'
+        display_email = effective_email or sender_email
+
         # Create comment
         comment = TicketComment(
             ticket_id=ticket.id,
             user_id=None,  # Guest comment from email
-            content=f"**Email reply from {sender_name} ({sender_email}):**\n\n{body}",
+            content=f"**Email reply from {display_name} ({display_email}):**\n\n{body}",
             is_internal=False,
             created_at=datetime.utcnow()
         )
@@ -932,7 +1156,7 @@ class EmailToTicketService:
             ticket_id=ticket.id,
             user_id=None,
             action='comment_added',
-            new_value=f'Email reply received from {sender_email}',
+            new_value=f'Email reply received from {display_email}',
             created_at=datetime.utcnow()
         )
         db.add(history)
@@ -957,7 +1181,7 @@ class EmailToTicketService:
             notification = Notification(
                 user_id=user.id,
                 type='email_reply',
-                message=f'📧 Email reply received on ticket #{ticket.ticket_number} from {sender_email}',
+                message=f'📧 Email reply received on ticket #{ticket.ticket_number} from {display_email}',
                 url=f'/web/tickets/{ticket.id}',
                 related_id=ticket.id
             )
@@ -978,7 +1202,7 @@ class EmailToTicketService:
         
         await db.commit()
         await db.refresh(comment)
-        _syslog('INFO', 'IMAP', f'Comment added to ticket #{ticket_num}', f'From={sender_email} | CommentID={comment.id}', ws_id)
+        _syslog('INFO', 'IMAP', f'Comment added to ticket #{ticket_num}', f'From={display_email} | CommentID={comment.id}', ws_id)
         
         return comment
     
@@ -1092,7 +1316,7 @@ class EmailToTicketService:
                         await asyncio.to_thread(_mark)
                     
                     # Use fresh session for each email to avoid greenlet context issues
-                    async with NewAsyncSession(engine) as fresh_db:
+                    async with NewAsyncSession(engine, expire_on_commit=False, autoflush=False) as fresh_db:
                         # Check if already processed
                         if await self.is_email_processed(fresh_db, message_id):
                             # Mark as read but don't process again (run in thread)
@@ -1153,14 +1377,14 @@ class EmailToTicketService:
                         print(f"[IMAP] Message-ID: {message_id}")
                         _syslog('INFO', 'IMAP', f'Processing: {subject[:80]}', f'From={sender_email} | MsgID={message_id[:80]} | Folder={folder}')
                         
-                        # Check if this is a reply to an existing ticket
                         # Keep Message-ID with angle brackets for matching
                         in_reply_to = msg.get('In-Reply-To', '').strip()
                         references = msg.get('References', '').strip()
-                        
+                        reply_to = msg.get('Reply-To', '').strip()
+
                         print(f"[IMAP] In-Reply-To: '{in_reply_to}'")
                         print(f"[IMAP] References: '{references}'")
-                        
+
                         header_ticket = await self.find_ticket_by_reply(fresh_db, in_reply_to, references)
 
                         # If reply belongs to a closed/resolved ticket, skip this email entirely
@@ -1175,17 +1399,28 @@ class EmailToTicketService:
                                 _syslog('WARNING', 'IMAP', f'Failed to mark email as read in {folder}', str(e)[:200])
                             continue
 
-                        # Always enforce both rules (subject + sender email) regardless of
-                        # whether reply headers found a candidate. This handles the case where
-                        # a client has multiple open tickets — headers alone cannot disambiguate.
+                        # Analyze BEFORE deciding: portal forms carry the real requester
+                        # in the body, not in the shared From: address.
+                        analysis, candidates = await analyze_email_for_intake(
+                            fresh_db, self.workspace_id, from_name=sender_name,
+                            from_email=sender_email, reply_to=reply_to, subject=subject,
+                            body=body, in_reply_to=in_reply_to, references=references,
+                            llm_caller=self.llm_caller,
+                        )
+                        effective_name, effective_email = _effective_identity(
+                            analysis, sender_name, sender_email)
+
                         if not is_from_self:
-                            existing_ticket = await self.find_ticket_by_subject_and_sender(fresh_db, subject, sender_email)
-                            if existing_ticket is None and header_ticket:
-                                print(f"[IMAP] Reply headers pointed to ticket #{header_ticket.ticket_number} but subject/sender rules did not confirm — creating new ticket")
+                            existing_ticket = await self.find_ticket_by_subject_and_sender(
+                                fresh_db, subject, sender_email, analysis=analysis,
+                                candidate_tickets=candidates, header_ticket=header_ticket,
+                                sender_name=sender_name, reply_to=reply_to, body=body,
+                                in_reply_to=in_reply_to, references=references,
+                            )
                         else:
                             existing_ticket = None
                             print(f"[IMAP] Skipping match (email is from our own address)")
-                        
+
                         if existing_ticket:
                             print(f"[IMAP] ✅ MATCH FOUND - Adding to ticket #{existing_ticket.ticket_number}")
                             _syslog('INFO', 'IMAP', f'Matched to ticket #{existing_ticket.ticket_number}', f'From={sender_email} | Subject={subject[:80]}')
@@ -1205,8 +1440,9 @@ class EmailToTicketService:
                             
                             # Add as comment to existing ticket
                             await self.add_comment_from_email(
-                                fresh_db, existing_ticket, sender_name, sender_email, body,
-                                attachments=email_attachments
+                                fresh_db, existing_ticket, sender_name, effective_email, body,
+                                attachments=email_attachments,
+                                effective_name=effective_name, effective_email=effective_email,
                             )
                             
                             # Mark as processed
@@ -1269,7 +1505,7 @@ class EmailToTicketService:
                             # Always create tickets (linked to project if matched)
                             ticket = await self.create_ticket_from_email(
                                 fresh_db, sender_name, sender_email, subject, body, to_email, project,
-                                attachments=email_attachments
+                                attachments=email_attachments, analysis=analysis,
                             )
                             
                             # Refresh and store ID immediately
@@ -1435,34 +1671,30 @@ async def find_ticket_by_reply_for_account(
 
 
 async def find_ticket_by_subject_and_sender_for_account(
-    db: AsyncSession, workspace_id: int, subject: str, sender_email: str
+    db: AsyncSession, workspace_id: int, subject: str, sender_email: str, *,
+    analysis=None, sender_name: str = '', reply_to: str = '', body: str = '',
+    in_reply_to: str = '', references: str = '', header_ticket=None,
+    candidate_tickets=None,
 ) -> Optional[Ticket]:
-    """Match an email to an existing open ticket only when BOTH rules are satisfied:
-    Rule 1 — cleaned subject matches an existing open ticket's subject.
-    Rule 2 — sender email matches that ticket's guest_email.
-    If only one rule matches it is treated as a new ticket.
-    """
-    import re
-    clean_subject = re.sub(r'^(Re:|RE:|Fwd:|FWD:|AW:|Aw:|\[.*?\])\s*', '', subject, flags=re.IGNORECASE).strip()
-    print(f"[DEBUG] find_ticket_by_subject_and_sender_for_account: subject='{clean_subject}', email='{sender_email}'")
-
-    result = await db.execute(
-        select(Ticket).where(
-            Ticket.guest_email == sender_email,
-            Ticket.workspace_id == workspace_id,
-            Ticket.status.in_(['open', 'in_progress', 'waiting'])
-        ).order_by(Ticket.created_at.desc())
+    """Thread an account email only when subject, identity and analysis agree."""
+    if analysis is None:
+        analysis = analyze_email_deterministically(
+            sender_email, subject, body, from_name=sender_name,
+            reply_to=reply_to, in_reply_to=in_reply_to, references=references,
+        )
+    if candidate_tickets is None:
+        candidate_tickets = await load_candidate_tickets(
+            db, workspace_id, subject, [sender_email, analysis.requester_email]
+        )
+    ticket = await resolve_ticket_for_email(
+        db, workspace_id, subject, sender_email, analysis,
+        candidate_tickets=candidate_tickets, header_ticket=header_ticket,
     )
-    candidates = result.scalars().all()
-
-    for ticket in candidates:
-        ticket_subject_clean = re.sub(r'^(Re:|RE:|Fwd:|FWD:|AW:|Aw:|\[.*?\])\s*', '', ticket.subject or '', flags=re.IGNORECASE).strip()
-        if ticket_subject_clean.lower() == clean_subject.lower():
-            print(f"[DEBUG] ✅ Both rules matched — ticket #{ticket.ticket_number}")
-            return ticket
-
-    print(f"[DEBUG] ❌ No ticket matched both subject and sender email — new ticket will be created")
-    return None
+    if ticket:
+        print(f"[DEBUG] ✅ Intake matched ticket #{ticket.ticket_number}")
+    else:
+        print("[DEBUG] ❌ No safe intake match - new ticket will be created")
+    return ticket
 
 
 async def add_comment_from_email_for_account(
@@ -1471,15 +1703,19 @@ async def add_comment_from_email_for_account(
     sender_name: str,
     sender_email: str,
     body: str,
-    attachments: Optional[List[dict]] = None
+    attachments: Optional[List[dict]] = None,
+    effective_name: Optional[str] = None,
+    effective_email: Optional[str] = None,
 ) -> TicketComment:
     """Add a comment to an existing ticket from email reply (for alternate email accounts)"""
-    
+    display_name = effective_name or sender_name or 'Unknown'
+    display_email = effective_email or sender_email
+
     # Create comment
     comment = TicketComment(
         ticket_id=ticket.id,
         user_id=None,  # Guest comment from email
-        content=f"**Email reply from {sender_name} ({sender_email}):**\n\n{body}",
+        content=f"**Email reply from {display_name} ({display_email}):**\n\n{body}",
         is_internal=False,
         created_at=datetime.utcnow()
     )
@@ -1493,7 +1729,7 @@ async def add_comment_from_email_for_account(
         ticket_id=ticket.id,
         user_id=None,
         action='comment_added',
-        new_value=f'Email reply received from {sender_email}',
+        new_value=f'Email reply received from {display_email}',
         created_at=datetime.utcnow()
     )
     db.add(history)
@@ -1517,7 +1753,7 @@ async def add_comment_from_email_for_account(
         notification = Notification(
             user_id=user.id,
             type='email_reply',
-            message=f'📧 Email reply received on ticket #{ticket.ticket_number} from {sender_email}',
+            message=f'📧 Email reply received on ticket #{ticket.ticket_number} from {display_email}',
             url=f'/web/tickets/{ticket.id}',
             related_id=ticket.id
         )
@@ -1538,7 +1774,7 @@ async def add_comment_from_email_for_account(
     
     await db.commit()
     await db.refresh(comment)
-    _syslog('INFO', 'Email Account', f'Comment added to ticket #{ticket_num}', f'From={sender_email} | CommentID={comment.id}', ws_id)
+    _syslog('INFO', 'Email Account', f'Comment added to ticket #{ticket_num}', f'From={display_email} | CommentID={comment.id}', ws_id)
     
     return comment
 
@@ -1641,7 +1877,7 @@ def _read_uidvalidity(mail, folder):
     return None
 
 
-async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
+async def process_email_account(db: AsyncSession, account, *, llm_caller=None) -> List[Ticket]:
     """
     Process emails for an IncomingEmailAccount and create tickets or add comments to existing tickets.
     
@@ -1959,7 +2195,7 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                 print(f"[Email Account] Processing email {email_id}: Message-ID={message_id[:50]}...")
                 
                 # Use a fresh database session for each email to avoid greenlet issues
-                async with NewAsyncSession(engine) as fresh_db:
+                async with NewAsyncSession(engine, expire_on_commit=False, autoflush=False) as fresh_db:
                     # Check if already processed by THIS account only.
                     # Different accounts process independently — same email sent to
                     # multiple support addresses should create separate tickets.
@@ -2140,15 +2376,26 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                                 _syslog('WARNING', 'Email Account', 'Failed to mark email as read', str(e)[:200], workspace_id)
                         continue
 
-                    # Always enforce both rules (subject + sender email) regardless of
-                    # whether reply headers found a candidate. This handles the case where
-                    # a client has multiple open tickets — headers alone cannot disambiguate.
+                    # Analyze before deciding: form fields and Reply-To identify the
+                    # real requester even though every submission shares one sender.
+                    reply_to = msg.get('Reply-To', '').strip()
+                    analysis, candidates = await analyze_email_for_intake(
+                        fresh_db, workspace_id, from_name=sender_name,
+                        from_email=sender_email_addr, reply_to=reply_to, subject=subject,
+                        body=body, in_reply_to=in_reply_to, references=references,
+                        llm_caller=llm_caller,
+                    )
+                    effective_name, effective_email = _effective_identity(
+                        analysis, sender_name, sender_email_addr)
+
                     if not is_from_self:
                         existing_ticket = await find_ticket_by_subject_and_sender_for_account(
-                            fresh_db, workspace_id, subject, sender_email_addr
+                            fresh_db, workspace_id, subject, sender_email_addr,
+                            analysis=analysis, candidate_tickets=candidates,
+                            header_ticket=header_ticket, sender_name=sender_name,
+                            reply_to=reply_to, body=body,
+                            in_reply_to=in_reply_to, references=references,
                         )
-                        if existing_ticket is None and header_ticket:
-                            print(f"[Email Account] Reply headers pointed to ticket #{header_ticket.ticket_number} but subject/sender rules did not confirm — creating new ticket")
                     else:
                         existing_ticket = None
                         print(f"[Email Account] Skipping match (email is from our own address)")
@@ -2164,8 +2411,9 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                         
                         # Add as comment to existing ticket
                         await add_comment_from_email_for_account(
-                            fresh_db, existing_ticket, sender_name, sender_email_addr, body,
-                            attachments=email_attachments
+                            fresh_db, existing_ticket, sender_name, effective_email, body,
+                            attachments=email_attachments,
+                            effective_name=effective_name, effective_email=effective_email,
                         )
                         
                         # Mark email as processed (linked to existing ticket)
@@ -2251,12 +2499,16 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                     
                     # Generate unique ticket number
                     ticket_number = await generate_unique_ticket_number(fresh_db, workspace_id)
-                    
+                    fields = _ticket_intake_fields(
+                        analysis, sender_name, sender_email_addr, subject, body,
+                        account_name=account_name,
+                    )
+
                     # Create ticket
                     new_ticket = Ticket(
                         ticket_number=ticket_number,
-                        subject=subject[:200],
-                        description=body[:5000],
+                        subject=fields['subject'],
+                        description=fields['description'],
                         priority=priority,
                         status='open',
                         category=default_category,
@@ -2265,12 +2517,12 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                         created_by_id=None,  # Guest ticket
                         assigned_to_id=auto_assign_to_user_id,  # Auto-assign if configured
                         is_guest=True,
-                        guest_name=sender_name.split()[0] if sender_name and sender_name.strip() else "Unknown",
-                        guest_surname=sender_name.split()[-1] if sender_name and len(sender_name.split()) > 1 else "",
-                        guest_email=sender_email_addr,
-                        guest_phone="",
-                        guest_company=account_name,  # Use email account name as company
-                        guest_branch="",
+                        guest_name=fields['guest_name'],
+                        guest_surname=fields['guest_surname'],
+                        guest_email=fields['guest_email'],
+                        guest_phone=fields['guest_phone'],
+                        guest_company=fields['guest_company'],
+                        guest_branch=fields['guest_branch'],
                         created_at=datetime.utcnow(),
                         updated_at=datetime.utcnow()
                     )
@@ -2286,7 +2538,7 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                         ticket_id=ticket_id,
                         user_id=None,
                         action='created',
-                        new_value=f'Ticket created from email via {account_name}: {sender_email_addr}',
+                        new_value=f'Ticket created from email via {account_name}: {fields["guest_email"]}',
                         created_at=datetime.utcnow()
                     )
                     fresh_db.add(history)
@@ -2340,7 +2592,7 @@ async def process_email_account(db: AsyncSession, account) -> List[Ticket]:
                             continue
                         notification = Notification(
                             user_id=user.id,
-                            message=f"📧 New Ticket: #{ticket_number} - Email from {sender_name} ({sender_email_addr}): {subject[:100]}",
+                            message=f"📧 New Ticket: #{ticket_number} - Email from {effective_name} ({effective_email}): {fields['subject'][:100]}",
                             type='ticket',
                             url=f'/web/tickets/{ticket_id}',
                             related_id=ticket_id
