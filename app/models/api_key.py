@@ -15,3 +15,14 @@ class APIKey(SQLModel, table=True):
     is_active: bool = Field(default=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_used_at: Optional[datetime] = Field(default=None)
+
+    # Optional restrictions. A null/blank scopes value means a legacy key with
+    # full workspace access, exactly as before these columns existed.
+    scopes: Optional[str] = Field(default=None)               # comma-separated scopes
+    allowed_company: Optional[str] = Field(default=None)      # client company name(s)
+    allowed_email: Optional[str] = Field(default=None)        # client email address(es)
+    allowed_email_domain: Optional[str] = Field(default=None) # email domain(s), @ optional
+    allow_internal_comments: bool = Field(default=False)
+    webhook_url: Optional[str] = Field(default=None)
+    webhook_secret: Optional[str] = Field(default=None)
+    webhook_events: Optional[str] = Field(default=None)       # comma-separated event names

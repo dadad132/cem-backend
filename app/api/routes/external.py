@@ -34,6 +34,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.api_scopes import (
+    can_access_internal_comments,
+    configured_values,
+    has_ticket_filter,
+    parse_scopes,
+    require_scope,
+    ticket_matches_key_scope,
+    ticket_scope_sql_filter,
+)
 from app.core.business_hours import calculate_business_hours
 from app.core.clock import local_now, local_today, to_local, workspace_zone
 from app.core.database import get_session
@@ -254,7 +263,7 @@ def _comment_item(c: TicketComment, users: dict, customer: Optional[str]) -> dic
 # ---------------------------------------------------------------------------
 
 async def _ticket_context(db: AsyncSession, workspace, tickets: list, include: set,
-                          include_internal: bool) -> dict:
+                          include_internal: bool, allow_internal: bool = True) -> dict:
     """Everything the ticket fields need, fetched once for a whole page."""
     ids = [t.id for t in tickets]
     ctx = {"first_reply": {}, "last_comment": {}, "history": {}, "worked": {},
@@ -272,9 +281,14 @@ async def _ticket_context(db: AsyncSession, workspace, tickets: list, include: s
         .order_by(TicketComment.created_at.asc(), TicketComment.id.asc())
     )).all():
         ctx["first_reply"].setdefault(ticket_id, (created, user_id))
+    # Activity timestamps must not reveal the existence or time of a private
+    # note to a key that is not allowed to read internal comments.
+    last_comments = select(TicketComment.ticket_id, func.max(TicketComment.created_at)).where(
+        TicketComment.ticket_id.in_(ids))
+    if not allow_internal:
+        last_comments = last_comments.where(TicketComment.is_internal == False)  # noqa: E712
     for ticket_id, last in (await db.execute(
-        select(TicketComment.ticket_id, func.max(TicketComment.created_at))
-        .where(TicketComment.ticket_id.in_(ids)).group_by(TicketComment.ticket_id)
+        last_comments.group_by(TicketComment.ticket_id)
     )).all():
         ctx["last_comment"][ticket_id] = last
     for h in (await db.execute(
@@ -450,13 +464,17 @@ def _includes(value: Optional[str]) -> frozenset:
     return frozenset(wanted)
 
 
-def _changed_since(since: datetime):
+def _changed_since(since: datetime, allow_internal: bool = True):
     """A ticket with any activity since: an edit, a comment, a history entry
-    (status, reassignment, priority), or a timer started or stopped."""
+    (status, reassignment, priority), or a timer started or stopped. Internal
+    notes only count as activity for keys allowed to read them."""
+    comment_changed = TicketComment.ticket_id == Ticket.id, TicketComment.created_at >= since
+    if not allow_internal:
+        comment_changed += (TicketComment.is_internal == False,)  # noqa: E712
     return or_(
         Ticket.updated_at >= since, Ticket.created_at >= since,
         Ticket.closed_at >= since, Ticket.resolved_at >= since,
-        exists().where(TicketComment.ticket_id == Ticket.id, TicketComment.created_at >= since),
+        exists().where(*comment_changed),
         exists().where(TicketHistory.ticket_id == Ticket.id, TicketHistory.created_at >= since),
         exists().where(TicketTimeEntry.ticket_id == Ticket.id,
                        or_(TicketTimeEntry.started_at >= since, TicketTimeEntry.ended_at >= since)),
@@ -473,6 +491,8 @@ async def list_tickets(
     priority: Optional[str] = Query(None, description="Filter by priority"),
     assigned_to: Optional[str] = Query(None, description="A user id, or 'none' for unassigned"),
     project_id: Optional[int] = Query(None, description="Filter by project"),
+    guest_company: Optional[str] = Query(None, description="Only this client company"),
+    guest_email: Optional[str] = Query(None, description="Only this client email address"),
     updated_since: Optional[str] = Query(None, description="Only tickets with any activity since this time"),
     created_since: Optional[str] = Query(None, description="Only tickets created since this time"),
     include: Optional[str] = Query(None, description="comments,history,time_entries"),
@@ -484,9 +504,20 @@ async def list_tickets(
     db: AsyncSession = Depends(get_session),
 ):
     """List tickets for your workspace, with the same fields as a single ticket."""
-    _, workspace = auth
+    api_key, workspace = auth
+    require_scope(api_key, "tickets:read")
+    allow_internal = can_access_internal_comments(api_key)
+    if not allow_internal:
+        include_internal = False
     wanted = _includes(include)
     conditions = [Ticket.workspace_id == workspace.id]
+    key_scope = ticket_scope_sql_filter(api_key)
+    if key_scope is not None:
+        conditions.append(key_scope)     # a caller filter can only narrow this
+    if guest_company:
+        conditions.append(func.lower(func.trim(Ticket.guest_company)) == guest_company.strip().lower())
+    if guest_email:
+        conditions.append(func.lower(func.trim(Ticket.guest_email)) == guest_email.strip().lower())
     if status:
         conditions.append(Ticket.status.in_([s.strip() for s in status.split(",") if s.strip()]))
     if priority:
@@ -502,7 +533,7 @@ async def list_tickets(
         conditions.append(Ticket.related_project_id == project_id)
     changed = _since(updated_since, "updated_since")
     if changed:
-        conditions.append(_changed_since(changed))
+        conditions.append(_changed_since(changed, allow_internal))
     created = _since(created_since, "created_since")
     if created:
         conditions.append(Ticket.created_at >= created)
@@ -518,7 +549,8 @@ async def list_tickets(
         select(Ticket).where(where).order_by(*order).offset(offset).limit(limit)
     )).scalars().all()
     zone = workspace_zone(workspace)
-    ctx = await _ticket_context(db, workspace, tickets, wanted, include_internal)
+    ctx = await _ticket_context(db, workspace, tickets, wanted, include_internal,
+                                allow_internal=allow_internal)
     return JSONResponse({
         **_page(tickets, total, limit, offset),
         "timezone": workspace.timezone or None,
@@ -539,7 +571,11 @@ async def get_ticket(
 ):
     """Get a single ticket by ticket number (e.g. TKT-2024-00001), with its
     comments, history and timer entries."""
-    _, workspace = auth
+    api_key, workspace = auth
+    require_scope(api_key, "tickets:read")
+    allow_internal = can_access_internal_comments(api_key)
+    if not allow_internal:
+        include_internal = False
     ticket = (
         await db.execute(
             select(Ticket).where(
@@ -548,11 +584,15 @@ async def get_ticket(
             )
         )
     ).scalar_one_or_none()
-    if not ticket:
+    # An out-of-scope ticket is indistinguishable from one that does not exist.
+    if not ticket or not ticket_matches_key_scope(
+        api_key, guest_company=ticket.guest_company, guest_email=ticket.guest_email,
+    ):
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     wanted = frozenset(TICKET_INCLUDES)
-    ctx = await _ticket_context(db, workspace, [ticket], wanted, include_internal)
+    ctx = await _ticket_context(db, workspace, [ticket], wanted, include_internal,
+                                allow_internal=allow_internal)
     return JSONResponse(_ticket_to_dict(ticket, ctx, workspace_zone(workspace), workspace, wanted))
 
 
@@ -567,7 +607,20 @@ async def create_ticket(
     db: AsyncSession = Depends(get_session),
 ):
     """Create a new ticket in your workspace."""
-    _, workspace = auth
+    api_key, workspace = auth
+    require_scope(api_key, "tickets:create")
+
+    companies = configured_values(api_key.allowed_company)
+    emails = configured_values(api_key.allowed_email)
+    if not (payload.guest_company or "").strip() and len(companies) == 1:
+        payload.guest_company = companies[0]
+    if not (payload.guest_email or "").strip() and len(emails) == 1:
+        payload.guest_email = emails[0]
+    if has_ticket_filter(api_key) and not ticket_matches_key_scope(
+        api_key, guest_company=payload.guest_company, guest_email=payload.guest_email,
+    ):
+        raise HTTPException(status_code=403,
+                            detail="API key is restricted to specific client/email scope")
 
     for attempt in range(3):
         ticket = Ticket(
@@ -626,7 +679,8 @@ async def update_ticket(
 ):
     """Update ticket status, priority, or category. Each change is recorded
     in the ticket's history, as changes made in the helpdesk are."""
-    _, workspace = auth
+    api_key, workspace = auth
+    require_scope(api_key, "tickets:update")
     ticket = (
         await db.execute(
             select(Ticket).where(
@@ -635,7 +689,9 @@ async def update_ticket(
             )
         )
     ).scalar_one_or_none()
-    if not ticket:
+    if not ticket or not ticket_matches_key_scope(
+        api_key, guest_company=ticket.guest_company, guest_email=ticket.guest_email,
+    ):
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     now = datetime.utcnow()
@@ -685,8 +741,14 @@ async def list_comments(
     """Comments on your workspace's tickets, oldest first, a page at a time.
     Comments are never edited, so a sync can ask only for those since the
     newest it already has."""
-    _, workspace = auth
+    api_key, workspace = auth
+    require_scope(api_key, "tickets:read")
+    if not can_access_internal_comments(api_key):
+        include_internal = False
     conditions = [Ticket.workspace_id == workspace.id]
+    key_scope = ticket_scope_sql_filter(api_key)
+    if key_scope is not None:
+        conditions.append(key_scope)
     written = _since(since, "since")
     if written:
         conditions.append(TicketComment.created_at >= written)
@@ -719,7 +781,8 @@ async def list_users(
     db: AsyncSession = Depends(get_session),
 ):
     """Everyone in your workspace, including deactivated accounts."""
-    _, workspace = auth
+    api_key, workspace = auth
+    require_scope(api_key, "users:read")
     users = (await db.execute(
         select(User).where(User.workspace_id == workspace.id).order_by(User.id)
     )).scalars().all()
@@ -746,7 +809,8 @@ async def list_tasks(
     db: AsyncSession = Depends(get_session),
 ):
     """Tasks in your workspace's projects."""
-    _, workspace = auth
+    api_key, workspace = auth
+    require_scope(api_key, "tasks:read")
     conditions = [Project.workspace_id == workspace.id]
     if status:
         conditions.append(Task.status.in_([s.strip() for s in status.split(",") if s.strip()]))
@@ -830,7 +894,8 @@ async def archive_done_tasks(
     Filters may be sent as query parameters or as a JSON body. A bot that runs
     this every night only ever sees work belonging to its own API key.
     """
-    _, workspace = auth
+    api_key, workspace = auth
+    require_scope(api_key, "tasks:write")
     body = payload or ArchiveDoneRequest()
     project_id = body.project_id if body.project_id is not None else project_id
     older_than_days = body.older_than_days if body.older_than_days is not None else older_than_days
@@ -874,7 +939,8 @@ async def archive_task(
     db: AsyncSession = Depends(get_session),
 ):
     """Explicitly archive one task. Repeat calls are harmless."""
-    _, workspace = auth
+    api_key, workspace = auth
+    require_scope(api_key, "tasks:write")
     task = (await db.execute(
         select(Task).join(Project, Project.id == Task.project_id).where(
             Task.id == task_id, Project.workspace_id == workspace.id)
@@ -911,7 +977,8 @@ async def list_projects(
     db: AsyncSession = Depends(get_session),
 ):
     """Projects with their progress, counted the way the Team Overview counts."""
-    _, workspace = auth
+    api_key, workspace = auth
+    require_scope(api_key, "projects:read")
     query = select(Project).where(Project.workspace_id == workspace.id)
     if not include_archived:
         query = query.where(Project.is_archived == False)
@@ -963,7 +1030,8 @@ async def list_time_entries(
 ):
     """Timer entries on tickets and tasks, and hours typed in by hand, that
     overlap the period. Running timers count up to now."""
-    _, workspace = auth
+    api_key, workspace = auth
+    require_scope(api_key, "time:read")
     now = datetime.utcnow()
     start = _since(since, "since") or now - timedelta(days=30)
     end = _since(until, "until") or now
@@ -975,25 +1043,34 @@ async def list_time_entries(
             cond.append(model.user_id == user_id)
         return cond
 
-    for e, number in (await db.execute(
-        select(TicketTimeEntry, Ticket.ticket_number).join(Ticket, Ticket.id == TicketTimeEntry.ticket_id)
-        .where(Ticket.workspace_id == workspace.id, *overlaps(TicketTimeEntry))
-    )).all():
+    # A client key must not learn ticket numbers (or staff task titles) from
+    # time entries belonging to somebody else.
+    ticket_entries = select(TicketTimeEntry, Ticket.ticket_number).join(
+        Ticket, Ticket.id == TicketTimeEntry.ticket_id).where(
+        Ticket.workspace_id == workspace.id, *overlaps(TicketTimeEntry))
+    key_scope = ticket_scope_sql_filter(api_key)
+    if key_scope is not None:
+        ticket_entries = ticket_entries.where(key_scope)
+    for e, number in (await db.execute(ticket_entries)).all():
         rows.append(("ticket", e, {"id": e.ticket_id, "ticket_number": number}, None))
-    for e, title, project_id in (await db.execute(
-        select(TaskTimeEntry, Task.title, Task.project_id).join(Task, Task.id == TaskTimeEntry.task_id)
-        .join(Project, Project.id == Task.project_id)
-        .where(Project.workspace_id == workspace.id, *overlaps(TaskTimeEntry))
-    )).all():
-        rows.append(("task", e, None, {"id": e.task_id, "title": title, "project_id": project_id}))
-    manual_cond = [Project.workspace_id == workspace.id, TimeLog.logged_at >= start, TimeLog.logged_at < end]
-    if user_id is not None:
-        manual_cond.append(TimeLog.user_id == user_id)
-    for log, title, project_id in (await db.execute(
-        select(TimeLog, Task.title, Task.project_id).join(Task, Task.id == TimeLog.task_id)
-        .join(Project, Project.id == Task.project_id).where(*manual_cond)
-    )).all():
-        rows.append(("manual", log, None, {"id": log.task_id, "title": title, "project_id": project_id}))
+
+    if not has_ticket_filter(api_key):
+        for e, title, project_id in (await db.execute(
+            select(TaskTimeEntry, Task.title, Task.project_id).join(Task, Task.id == TaskTimeEntry.task_id)
+            .join(Project, Project.id == Task.project_id)
+            .where(Project.workspace_id == workspace.id, *overlaps(TaskTimeEntry))
+        )).all():
+            rows.append(("task", e, None, {"id": e.task_id, "title": title, "project_id": project_id}))
+        manual_cond = [Project.workspace_id == workspace.id,
+                       TimeLog.logged_at >= start, TimeLog.logged_at < end]
+        if user_id is not None:
+            manual_cond.append(TimeLog.user_id == user_id)
+        for log, title, project_id in (await db.execute(
+            select(TimeLog, Task.title, Task.project_id).join(Task, Task.id == TimeLog.task_id)
+            .join(Project, Project.id == Task.project_id).where(*manual_cond)
+        )).all():
+            rows.append(("manual", log, None,
+                         {"id": log.task_id, "title": title, "project_id": project_id}))
 
     users = await _users(db, workspace.id, {r[1].user_id for r in rows})
     out = []
@@ -1026,7 +1103,8 @@ async def overview(
 ):
     """The numbers behind the helpdesk's Team Overview page, worked out by the
     same code, so a dashboard and the page always agree."""
-    _, workspace = auth
+    api_key, workspace = auth
+    require_scope(api_key, "overview:read")
     data = await build_overview(db, workspace)
     return JSONResponse(_jsonable({
         "generated_at": datetime.utcnow(),
@@ -1047,6 +1125,32 @@ async def overview(
         "team": data["team"],
         "projects": data["projects"],
     }))
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/me — safe metadata about the calling key (no scope needed)
+# ---------------------------------------------------------------------------
+
+@router.get("/me")
+async def api_key_identity(auth=Depends(require_api_key)):
+    """Tell an integration which key and client it is acting as.
+
+    Never returns the key hash or webhook secret.
+    """
+    api_key, workspace = auth
+    scopes = parse_scopes(api_key.scopes)
+    return JSONResponse({
+        "key_name": api_key.name,
+        "key_prefix": api_key.key_prefix,
+        "workspace": {"id": workspace.id, "name": workspace.name},
+        "scopes": sorted(scopes) if scopes is not None else ["*"],
+        "allowed_company": api_key.allowed_company,
+        "allowed_email": api_key.allowed_email,
+        "allowed_email_domain": api_key.allowed_email_domain,
+        "allow_internal_comments": bool(api_key.allow_internal_comments),
+        "webhook_configured": bool(api_key.webhook_url),
+        "webhook_events": api_key.webhook_events,
+    })
 
 
 # ---------------------------------------------------------------------------

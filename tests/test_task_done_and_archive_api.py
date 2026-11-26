@@ -291,7 +291,10 @@ async def test_weekly_report_and_overview_count_unarchived_done_tasks(env):
 
 
 @pytest.mark.asyncio
-async def test_dashboard_done_counts_include_unarchived_done_tasks(env):
+async def test_dashboard_done_counts_include_unarchived_done_tasks(env, monkeypatch):
+    # The fixture's finished tasks are dated NOW; keep the dashboard's
+    # "last 7 days" window on that same fixed date instead of the wall clock.
+    monkeypatch.setattr(web, 'local_today', lambda zone=None: NOW.date())
     page = await web.web_dashboard(_request(env.people['ada']), view=None, user_id=None, db=env.db)
     assert page.context['stats']['my_tasks_done'] >= 1
     assert page.context['stats']['team_tasks_completed'] >= 1

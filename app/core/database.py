@@ -49,6 +49,19 @@ MESHCENTRAL_SETTINGS_EXTRA_COLUMNS = (
     ("meshcentralsettings", "local_port", "INTEGER"),
 )
 
+# Scoped API keys added after the apikey table first existed. Nullable columns
+# leave legacy keys with full workspace access; the boolean defaults to false.
+API_KEY_SCOPE_COLUMNS = (
+    ("apikey", "scopes", "VARCHAR"),
+    ("apikey", "allowed_company", "VARCHAR"),
+    ("apikey", "allowed_email", "VARCHAR"),
+    ("apikey", "allowed_email_domain", "VARCHAR"),
+    ("apikey", "allow_internal_comments", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("apikey", "webhook_url", "VARCHAR"),
+    ("apikey", "webhook_secret", "VARCHAR"),
+    ("apikey", "webhook_events", "VARCHAR"),
+)
+
 # SQLite uses StaticPool by default with aiosqlite, so we don't set pool parameters
 # For production with PostgreSQL, you would add: pool_size=10, max_overflow=20
 engine: AsyncEngine = create_async_engine(
@@ -141,6 +154,7 @@ async def init_models() -> None:
                 *QUOTATION_COLUMNS,
                 *EMAIL_SETTINGS_WEEKLY_COLUMNS,
                 *MESHCENTRAL_SETTINGS_EXTRA_COLUMNS,
+                *API_KEY_SCOPE_COLUMNS,
             ):
                 try:
                     res = await conn.exec_driver_sql(f'PRAGMA table_info("{table}")')
@@ -329,6 +343,40 @@ def _ensure_email_settings_weekly_columns(db_path: Path) -> None:
         logging.getLogger(__name__).error("Could not migrate weekly report columns on %s: %s", path, exc)
 
 
+def _ensure_api_key_scope_columns(db_path: Path) -> None:
+    """PRAGMA-guarded ALTERs for scoped API key columns on a long-lived DB.
+
+    init_models() covers every SQLite engine, but deployed databases may predate
+    these columns. The explicit path keeps this helper testable without touching
+    the live data.db; repeated runs are no-ops.
+    """
+    import logging
+    import sqlite3
+
+    path = Path(db_path)
+    if not path.exists():
+        return
+    try:
+        conn = sqlite3.connect(str(path), timeout=30)
+        try:
+            cols = {row[1] for row in conn.execute('PRAGMA table_info("apikey")')}
+            if not cols:                 # an old database with no such table yet
+                return
+            for _, column, ddl in API_KEY_SCOPE_COLUMNS:
+                if column not in cols:
+                    conn.execute(f'ALTER TABLE apikey ADD COLUMN {column} {ddl}')
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logging.getLogger(__name__).error("Could not migrate API key columns on %s: %s", path, exc)
+
+
+def ensure_api_key_scope_columns() -> None:
+    """Startup migration for the configured SQLite database."""
+    _ensure_api_key_scope_columns(_weekly_report_db_path())
+
+
 @asynccontextmanager
 async def lifespan(app):  # FastAPI lifespan
     # Initialize database
@@ -336,7 +384,8 @@ async def lifespan(app):  # FastAPI lifespan
     ensure_user_preference_columns()
     ensure_project_quotation_columns()
     _ensure_email_settings_weekly_columns(_weekly_report_db_path())
-    
+    ensure_api_key_scope_columns()
+
     # Setup graceful shutdown handlers
     from app.core.shutdown import shutdown_handler
     shutdown_handler.setup_handlers()
