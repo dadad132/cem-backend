@@ -22,6 +22,7 @@ POST /tasks/archive-done lets a bot move finished work out of the board.
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Literal, Optional
@@ -43,6 +44,7 @@ from app.core.api_scopes import (
     ticket_matches_key_scope,
     ticket_scope_sql_filter,
 )
+from app.core.api_webhooks import dispatch_ticket_webhook
 from app.core.business_hours import calculate_business_hours
 from app.core.clock import local_now, local_today, to_local, workspace_zone
 from app.core.database import get_session
@@ -60,6 +62,7 @@ from app.models.user import User
 from app.models.workspace import Workspace
 
 router = APIRouter(prefix="/v1", tags=["External API"])
+logger = logging.getLogger(__name__)
 
 TICKET_INCLUDES = ("comments", "history", "time_entries")
 BILLING_FIELDS = (("travel", "traveling"), ("labour_onsite", "labour_onsite"),
@@ -122,12 +125,32 @@ class TicketCreateRequest(BaseModel):
     guest_email: Optional[str] = Field(None, max_length=254)
     guest_phone: Optional[str] = Field(None, max_length=50)
     guest_company: Optional[str] = Field(None, max_length=200)
+    guest_branch: Optional[str] = Field(None, max_length=200)
+    guest_office_number: Optional[str] = Field(None, max_length=100)
+    # The partner's own work order / PABX reference, kept for two-way sync.
+    external_ref: Optional[str] = Field(None, max_length=200)
 
 
 class TicketUpdateRequest(BaseModel):
     status: Optional[TicketStatusValue] = None
     priority: Optional[TicketPriorityValue] = None
     category: Optional[str] = Field(None, max_length=50)
+    subject: Optional[str] = Field(None, min_length=1, max_length=500)
+    description: Optional[str] = Field(None, max_length=50000)
+    external_ref: Optional[str] = Field(None, max_length=200)
+    closing_notes: Optional[str] = Field(None, max_length=10000)
+    close_reason: Optional[str] = Field(None, max_length=10000)
+    close_type: Optional[Literal["sla", "billable"]] = None
+    billable_traveling: Optional[str] = Field(None, max_length=500)
+    billable_labour_onsite: Optional[str] = Field(None, max_length=500)
+    billable_remote_labour: Optional[str] = Field(None, max_length=500)
+    billable_equipment_used: Optional[str] = Field(None, max_length=500)
+
+
+class TicketCommentCreateRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=50000)
+    author_name: Optional[str] = Field(None, max_length=200)
+    is_internal: bool = False
 
 
 class ArchiveDoneRequest(BaseModel):
@@ -383,6 +406,7 @@ def _ticket_to_dict(t: Ticket, ctx: Optional[dict] = None, zone=None, workspace=
         "guest_email": t.guest_email,
         "guest_phone": t.guest_phone,
         "guest_company": t.guest_company,
+        "external_ref": t.external_ref,
         "created_at": _utc(t.created_at),
         "closed_at": _utc(t.closed_at),
     }
@@ -493,6 +517,7 @@ async def list_tickets(
     project_id: Optional[int] = Query(None, description="Filter by project"),
     guest_company: Optional[str] = Query(None, description="Only this client company"),
     guest_email: Optional[str] = Query(None, description="Only this client email address"),
+    external_ref: Optional[str] = Query(None, description="Only this partner ticket reference"),
     updated_since: Optional[str] = Query(None, description="Only tickets with any activity since this time"),
     created_since: Optional[str] = Query(None, description="Only tickets created since this time"),
     include: Optional[str] = Query(None, description="comments,history,time_entries"),
@@ -518,6 +543,8 @@ async def list_tickets(
         conditions.append(func.lower(func.trim(Ticket.guest_company)) == guest_company.strip().lower())
     if guest_email:
         conditions.append(func.lower(func.trim(Ticket.guest_email)) == guest_email.strip().lower())
+    if external_ref:
+        conditions.append(Ticket.external_ref == external_ref.strip())
     if status:
         conditions.append(Ticket.status.in_([s.strip() for s in status.split(",") if s.strip()]))
     if priority:
@@ -637,6 +664,9 @@ async def create_ticket(
             guest_email=payload.guest_email,
             guest_phone=payload.guest_phone,
             guest_company=payload.guest_company,
+            guest_branch=payload.guest_branch,
+            guest_office_number=payload.guest_office_number,
+            external_ref=payload.external_ref,
             created_at=datetime.utcnow(),
         )
         db.add(ticket)
@@ -651,6 +681,11 @@ async def create_ticket(
     db.add(TicketHistory(ticket_id=ticket.id, action="created", new_value="api"))
     await db.commit()
     await db.refresh(ticket)
+    try:
+        await dispatch_ticket_webhook(db, workspace.id, "ticket.created", ticket,
+                                      source_api_key_id=api_key.id)
+    except Exception:
+        logger.warning("Partner webhook dispatch failed", exc_info=True)
     return JSONResponse(_ticket_to_dict(ticket), status_code=201)
 
 
@@ -677,8 +712,11 @@ async def update_ticket(
     auth=Depends(require_api_key),
     db: AsyncSession = Depends(get_session),
 ):
-    """Update ticket status, priority, or category. Each change is recorded
-    in the ticket's history, as changes made in the helpdesk are."""
+    """Update status, job card / closing fields and ticket details.
+
+    Every changed field gets a history entry; reopening a done ticket clears
+    its resolved/closed timestamps so polling integrations see an open ticket.
+    """
     api_key, workspace = auth
     require_scope(api_key, "tickets:update")
     ticket = (
@@ -695,33 +733,145 @@ async def update_ticket(
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     now = datetime.utcnow()
+    old_status = ticket.status
 
     def record(action, old, new):
         if old != new:
             db.add(TicketHistory(ticket_id=ticket.id, action=action, old_value=old,
                                  new_value=new, created_at=now))
 
-    if payload.status:
-        record("status_changed", ticket.status, payload.status)
+    changed = False
+    # A no-op status PATCH must not bump updated_at or notify partners.
+    if payload.status is not None and payload.status != old_status:
+        record("status_changed", old_status, payload.status)
         ticket.status = payload.status
+        changed = True
         if payload.status == "resolved" and not ticket.resolved_at:
             ticket.resolved_at = now
-        if payload.status == "closed" and not ticket.closed_at:
-            ticket.closed_at = now
+        if payload.status == "closed":
+            if not ticket.resolved_at:
+                ticket.resolved_at = now
+            if not ticket.closed_at:
+                ticket.closed_at = now
+        if (old_status in TICKET_DONE_STATUSES
+                and payload.status not in TICKET_DONE_STATUSES):
+            ticket.closed_at = None
+            ticket.resolved_at = None
         if payload.status in TICKET_DONE_STATUSES:
             await stop_timer(db, TicketTimeEntry.ticket_id, ticket.id)
-    if payload.priority:
-        record("priority_changed", ticket.priority, payload.priority)
-        ticket.priority = payload.priority
-    if payload.category:
-        record("category_changed", ticket.category, payload.category)
-        ticket.category = payload.category
-    if payload.status or payload.priority or payload.category:
-        ticket.updated_at = now
 
+    for field, action in (
+        ("priority", "priority_changed"), ("category", "category_changed"),
+        ("subject", "subject_changed"), ("external_ref", "external_ref_changed"),
+        ("close_type", "close_type_changed"),
+        ("billable_traveling", "billable_traveling_changed"),
+        ("billable_labour_onsite", "billable_labour_onsite_changed"),
+        ("billable_remote_labour", "billable_remote_labour_changed"),
+        ("billable_equipment_used", "billable_equipment_used_changed"),
+    ):
+        value = getattr(payload, field)
+        if value is not None and getattr(ticket, field) != value:
+            record(action, getattr(ticket, field), value)
+            setattr(ticket, field, value)
+            changed = True
+    if payload.description is not None and ticket.description != payload.description:
+        record("description_changed", None, "updated")   # don't copy 50k into history
+        ticket.description = payload.description
+        changed = True
+    closing_notes = (payload.closing_notes if payload.closing_notes is not None
+                     else payload.close_reason)
+    if closing_notes is not None and ticket.closing_notes != closing_notes:
+        record("closing_notes_changed", ticket.closing_notes, closing_notes)
+        ticket.closing_notes = closing_notes
+        changed = True
+
+    if changed:
+        ticket.updated_at = now
     await db.commit()
     await db.refresh(ticket)
-    return JSONResponse(_ticket_to_dict(ticket))
+
+    allow_internal = can_access_internal_comments(api_key)
+    ctx = await _ticket_context(db, workspace, [ticket], frozenset(), False,
+                                allow_internal=allow_internal)
+    if changed:
+        event = ("ticket.closed" if old_status != "closed" and ticket.status == "closed"
+                 else "ticket.updated")
+        try:
+            await dispatch_ticket_webhook(db, workspace.id, event, ticket,
+                                          source_api_key_id=api_key.id)
+        except Exception:
+            logger.warning("Partner webhook dispatch failed", exc_info=True)
+    return JSONResponse(_ticket_to_dict(ticket, ctx, workspace_zone(workspace), workspace,
+                                        frozenset()))
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/tickets/{ticket_number}/comments
+# ---------------------------------------------------------------------------
+
+@router.post("/tickets/{ticket_number}/comments", status_code=201)
+async def create_ticket_comment(
+    ticket_number: str,
+    payload: TicketCommentCreateRequest,
+    auth=Depends(require_api_key),
+    db: AsyncSession = Depends(get_session),
+):
+    """Post a partner reply onto one of this key's tickets.
+
+    The comment is public unless the key was explicitly allowed to write
+    internal notes. It never gets a staff user id: an optional author name is
+    attributed in the comment text and in the response instead.
+    """
+    api_key, workspace = auth
+    require_scope(api_key, "tickets:comment")
+    ticket = (
+        await db.execute(
+            select(Ticket).where(
+                Ticket.workspace_id == workspace.id,
+                Ticket.ticket_number == ticket_number,
+            )
+        )
+    ).scalar_one_or_none()
+    if not ticket or not ticket_matches_key_scope(
+        api_key, guest_company=ticket.guest_company, guest_email=ticket.guest_email,
+    ):
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    if payload.is_internal and not can_access_internal_comments(api_key):
+        raise HTTPException(status_code=403,
+                            detail="API key cannot write internal comments")
+
+    now = datetime.utcnow()
+    author = (payload.author_name or "").strip()[:200] or None
+    content = f"[{author}] {payload.body}" if author else payload.body
+    comment = TicketComment(
+        ticket_id=ticket.id, user_id=None, content=content,
+        is_internal=payload.is_internal, created_at=now,
+    )
+    db.add(comment)
+    await db.flush()
+    db.add(TicketHistory(ticket_id=ticket.id, action="commented",
+                         new_value=f"api:{api_key.name}", created_at=now))
+    ticket.updated_at = now
+    await db.commit()
+    await db.refresh(comment)
+
+    item = {
+        "id": comment.id,
+        "ticket_id": ticket.id,
+        "ticket_number": ticket.ticket_number,
+        "body": comment.content,
+        "is_internal": comment.is_internal,
+        "created_at": _utc(comment.created_at),
+        "author_name": author,
+        "author": ({"type": "partner", "id": None, "name": author} if author
+                   else {"type": "customer", "id": None, "name": _customer_name(ticket)}),
+    }
+    try:
+        await dispatch_ticket_webhook(db, workspace.id, "ticket.commented", ticket,
+                                      comment=comment, source_api_key_id=api_key.id)
+    except Exception:
+        logger.warning("Partner webhook dispatch failed", exc_info=True)
+    return JSONResponse(item, status_code=201)
 
 
 # ---------------------------------------------------------------------------

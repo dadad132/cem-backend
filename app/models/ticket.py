@@ -29,6 +29,8 @@ class TicketBase(SQLModel):
     guest_company: Optional[str] = None
     guest_office_number: Optional[str] = None
     guest_branch: Optional[str] = None
+    # Link to the partner's own ticket/work order/PABX reference (e.g. Mobilis)
+    external_ref: Optional[str] = Field(default=None, index=True)
     
     # Related to project/task (optional)
     related_project_id: Optional[int] = Field(default=None, foreign_key="project.id", index=True)

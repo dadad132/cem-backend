@@ -62,6 +62,12 @@ API_KEY_SCOPE_COLUMNS = (
     ("apikey", "webhook_events", "VARCHAR"),
 )
 
+# Two-way sync: the partner's own ticket/work-order reference. Nullable so
+# older tickets simply have no link until one is supplied.
+TICKET_EXTERNAL_REF_COLUMNS = (
+    ("ticket", "external_ref", "VARCHAR"),
+)
+
 # SQLite uses StaticPool by default with aiosqlite, so we don't set pool parameters
 # For production with PostgreSQL, you would add: pool_size=10, max_overflow=20
 engine: AsyncEngine = create_async_engine(
@@ -155,6 +161,7 @@ async def init_models() -> None:
                 *EMAIL_SETTINGS_WEEKLY_COLUMNS,
                 *MESHCENTRAL_SETTINGS_EXTRA_COLUMNS,
                 *API_KEY_SCOPE_COLUMNS,
+                *TICKET_EXTERNAL_REF_COLUMNS,
             ):
                 try:
                     res = await conn.exec_driver_sql(f'PRAGMA table_info("{table}")')
@@ -166,6 +173,14 @@ async def init_models() -> None:
                 except Exception:
                     # Best effort; lifespan reports properly on a real startup
                     pass
+            try:
+                # SQLModel metadata creates this index on fresh DBs; upgraded
+                # ones need it too so ?external_ref= stays indexed.
+                await conn.exec_driver_sql(
+                    'CREATE INDEX IF NOT EXISTS ix_ticket_external_ref ON ticket(external_ref)'
+                )
+            except Exception:
+                pass
             try:
                 await apply_data_changes(conn)
             except Exception:
@@ -377,6 +392,40 @@ def ensure_api_key_scope_columns() -> None:
     _ensure_api_key_scope_columns(_weekly_report_db_path())
 
 
+def _ensure_ticket_external_ref_column(db_path: Path) -> None:
+    """PRAGMA-guarded ALTER for the two-way sync reference on a long-lived DB.
+
+    Kept separate from init_models() so the explicit startup path is testable
+    without touching the live data.db. Repeating it is a no-op.
+    """
+    import logging
+    import sqlite3
+
+    path = Path(db_path)
+    if not path.exists():
+        return
+    try:
+        conn = sqlite3.connect(str(path), timeout=30)
+        try:
+            cols = {row[1] for row in conn.execute('PRAGMA table_info("ticket")')}
+            if not cols:                 # an old database with no ticket table yet
+                return
+            for _, column, ddl in TICKET_EXTERNAL_REF_COLUMNS:
+                if column not in cols:
+                    conn.execute(f'ALTER TABLE ticket ADD COLUMN {column} {ddl}')
+            conn.execute('CREATE INDEX IF NOT EXISTS ix_ticket_external_ref ON ticket(external_ref)')
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logging.getLogger(__name__).error("Could not migrate ticket external ref on %s: %s", path, exc)
+
+
+def ensure_ticket_external_ref_column() -> None:
+    """Startup migration for the configured SQLite database."""
+    _ensure_ticket_external_ref_column(_weekly_report_db_path())
+
+
 @asynccontextmanager
 async def lifespan(app):  # FastAPI lifespan
     # Initialize database
@@ -385,6 +434,7 @@ async def lifespan(app):  # FastAPI lifespan
     ensure_project_quotation_columns()
     _ensure_email_settings_weekly_columns(_weekly_report_db_path())
     ensure_api_key_scope_columns()
+    ensure_ticket_external_ref_column()
 
     # Setup graceful shutdown handlers
     from app.core.shutdown import shutdown_handler

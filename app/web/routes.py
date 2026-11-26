@@ -33,6 +33,7 @@ from sqlalchemy import select, or_, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
+from app.core.api_webhooks import dispatch_ticket_webhook
 from app.core.attachment_upload import (
     MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_UPLOAD,
     SAFE_IMAGE_PREVIEW_MIMES, SAFE_INLINE_PREVIEW_MIMES,
@@ -16475,7 +16476,15 @@ Thank you.
     
     await db.commit()
     await db.refresh(comment)
-    
+
+    # Signed partner webhooks: private notes are filtered in the dispatcher.
+    try:
+        await dispatch_ticket_webhook(
+            db, ticket.workspace_id, "ticket.commented", ticket, comment=comment,
+        )
+    except Exception:
+        logger.warning("Partner webhook dispatch failed for ticket %s", ticket.ticket_number, exc_info=True)
+
     write_log(f"✓ Comment added successfully, ID={comment.id}, attachments={attachment_count}")
     
     # Send email notification to client in background (if not internal comment)
@@ -16826,7 +16835,14 @@ async def web_tickets_update_status(
             db.add(notification)
     
     await db.commit()
-    
+
+    # Signed partner webhooks for staff status changes and closes.
+    try:
+        event = "ticket.closed" if status == "closed" else "ticket.updated"
+        await dispatch_ticket_webhook(db, ticket.workspace_id, event, ticket)
+    except Exception:
+        logger.warning("Partner webhook dispatch failed for ticket %s", ticket.ticket_number, exc_info=True)
+
     # Send completion notification email if ticket was just closed
     if ticket_just_closed:
         try:
@@ -17006,6 +17022,12 @@ async def web_tickets_close_with_details(
             db.add(notification)
     
     await db.commit()
+
+    # Signed partner webhooks carry the close type and job card fields.
+    try:
+        await dispatch_ticket_webhook(db, ticket.workspace_id, "ticket.closed", ticket)
+    except Exception:
+        logger.warning("Partner webhook dispatch failed for ticket %s", ticket.ticket_number, exc_info=True)
 
     worked = worked_seconds(await get_time_entries(db, TicketTimeEntry.ticket_id, ticket_id), now)
     time_worked = format_duration(worked) if worked else None
@@ -17510,6 +17532,10 @@ async def web_tickets_edit(request: Request, ticket_id: int, db: AsyncSession = 
                                  new_value=None if new is None else str(new)[:200]))
         ticket.updated_at = datetime.utcnow()
         await db.commit()
+        try:
+            await dispatch_ticket_webhook(db, ticket.workspace_id, "ticket.updated", ticket)
+        except Exception:
+            logger.warning("Partner webhook dispatch failed for ticket %s", ticket.ticket_number, exc_info=True)
         request.session['success_message'] = f'Ticket #{ticket.ticket_number} updated.'
     return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
 
