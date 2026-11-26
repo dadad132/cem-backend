@@ -12,13 +12,15 @@
 # SQLAlchemy uses metaprogramming that type checkers don't understand
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, NamedTuple, Optional
 from pathlib import Path
 from datetime import date, datetime, timedelta, time, timezone
 import calendar as pycalendar
+import hashlib
 import io
 import inspect
 import os
+import secrets
 import uuid
 import asyncio
 import logging
@@ -33,7 +35,10 @@ from sqlalchemy import select, or_, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
-from app.core.api_webhooks import dispatch_ticket_webhook
+from app.core.api_scopes import VALID_API_SCOPES
+from app.core.api_webhooks import (
+    VALID_WEBHOOK_EVENTS, dispatch_ticket_webhook, validate_webhook_url,
+)
 from app.core.attachment_upload import (
     MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_UPLOAD,
     SAFE_IMAGE_PREVIEW_MIMES, SAFE_INLINE_PREVIEW_MIMES,
@@ -20027,15 +20032,156 @@ async def web_admin_storage_delete_archived(request: Request, db: AsyncSession =
 # API KEYS — Admin management
 # =============================================================================
 
+class _WebhookConfig(NamedTuple):
+    url: Optional[str]
+    secret: Optional[str]
+    events: Optional[str]
+    shown_secret: Optional[str]
+    error: Optional[str]
+
+
+class _APIKeyFormValues(NamedTuple):
+    name: str
+    scopes: Optional[str]
+    allowed_company: Optional[str]
+    allowed_email: Optional[str]
+    allowed_email_domain: Optional[str]
+    allow_internal_comments: bool
+    webhook: _WebhookConfig
+    error: Optional[str]
+
+
+async def _api_key_admin(request: Request, db: AsyncSession) -> tuple[Optional[User], Optional[RedirectResponse]]:
+    """Resolve an active workspace admin using the same guard as other admin tools."""
+    return await _require_workspace_admin(request, db)
+
+
+def _optional_text(value, *, lower: bool = False, strip_at: bool = False) -> Optional[str]:
+    text = (value or '').strip()
+    if lower:
+        text = text.lower()
+    if strip_at and text.startswith('@'):
+        text = text[1:].strip()
+    return text or None
+
+
+def _validated_scopes(access_mode: str, scopes: list[str]) -> tuple[Optional[str], Optional[str]]:
+    """Return (stored scopes, error). Blank scopes would mean full access."""
+    if access_mode == 'full':
+        return None, None
+    if access_mode != 'scoped':
+        return None, 'Access mode must be full or scoped'
+    selected = list(dict.fromkeys(
+        scope.strip().lower() for scope in (scopes or []) if scope and scope.strip()
+    ))
+    if not selected:
+        return None, 'Select at least one permission for a scoped key'
+    unknown = [scope for scope in selected if scope not in VALID_API_SCOPES]
+    if unknown:
+        preview = ', '.join(scope[:64] for scope in unknown[:5])
+        return None, f'Unknown permission: {preview}'
+    return ','.join(selected), None
+
+
+async def _validated_webhook(
+    url, secret, events, *, current_secret=None, rotate=False, clear=False,
+    generate_if_missing=False,
+) -> _WebhookConfig:
+    """Validate one webhook configuration, including its secret lifecycle."""
+    raw_url = (url or '').strip()
+    if not raw_url:
+        return _WebhookConfig(None, None, None, None, None)
+    try:
+        # DNS resolution is blocking; keep it off the event loop.
+        checked_url = await asyncio.to_thread(validate_webhook_url, raw_url)
+    except ValueError as exc:
+        return _WebhookConfig(None, None, None, None, f'Webhook URL is invalid: {exc}')
+
+    selected = list(dict.fromkeys(
+        event.strip() for event in (events or []) if event and event.strip()
+    ))
+    unknown = [event for event in selected if event not in VALID_WEBHOOK_EVENTS]
+    if unknown:
+        preview = ', '.join(event[:64] for event in unknown[:5])
+        return _WebhookConfig(None, None, None, None, f'Unknown webhook event: {preview}')
+
+    explicit = (secret or '').strip()
+    if clear:
+        stored_secret, shown_secret = None, None
+    elif explicit:
+        stored_secret, shown_secret = explicit, explicit
+    elif rotate or (generate_if_missing and not current_secret):
+        stored_secret = secrets.token_urlsafe(32)
+        shown_secret = stored_secret
+    else:
+        stored_secret, shown_secret = current_secret, None
+    return _WebhookConfig(checked_url, stored_secret, ','.join(selected) or None,
+                          shown_secret, None)
+
+
+async def _parse_api_key_form(
+    name, access_mode, scopes, allowed_company, allowed_email, allowed_email_domain,
+    allow_internal_comments, webhook_url, webhook_secret, webhook_events, *,
+    current_secret=None, rotate_webhook_secret=False, clear_webhook_secret=False,
+    generate_webhook_secret=False,
+) -> _APIKeyFormValues:
+    """Normalize and validate the create/edit form in one place."""
+    clean_name = (name or '').strip()
+    stored_scopes, scope_error = _validated_scopes(access_mode, scopes)
+    webhook = await _validated_webhook(
+        webhook_url, webhook_secret, webhook_events, current_secret=current_secret,
+        rotate=rotate_webhook_secret, clear=clear_webhook_secret,
+        generate_if_missing=generate_webhook_secret,
+    )
+    name_error = None if clean_name else 'Key name is required'
+    errors = ': '.join(
+        message for message in (name_error, scope_error, webhook.error) if message
+    ) or None
+    return _APIKeyFormValues(
+        name=clean_name, scopes=stored_scopes,
+        allowed_company=_optional_text(allowed_company),
+        allowed_email=_optional_text(allowed_email, lower=True),
+        allowed_email_domain=_optional_text(allowed_email_domain, lower=True, strip_at=True),
+        allow_internal_comments=bool(allow_internal_comments),
+        webhook=webhook, error=errors,
+    )
+
+
+def _apply_api_key_form(api_key, values: _APIKeyFormValues) -> None:
+    """Write validated form values onto a new or existing key row."""
+    api_key.name = values.name
+    api_key.scopes = values.scopes
+    api_key.allowed_company = values.allowed_company
+    api_key.allowed_email = values.allowed_email
+    api_key.allowed_email_domain = values.allowed_email_domain
+    api_key.allow_internal_comments = values.allow_internal_comments
+    api_key.webhook_url = values.webhook.url
+    api_key.webhook_secret = values.webhook.secret
+    api_key.webhook_events = values.webhook.events
+
+
+async def _workspace_company_names(db: AsyncSession, workspace_id: int) -> list[str]:
+    """CRM companies plus free-text guest companies already used in this workspace."""
+    from app.models.ticket import Ticket
+
+    companies = (await db.execute(
+        select(Company.name).where(Company.workspace_id == workspace_id).limit(500)
+    )).scalars().all()
+    guests = (await db.execute(
+        select(Ticket.guest_company).where(
+            Ticket.workspace_id == workspace_id, Ticket.guest_company.is_not(None)
+        ).distinct().limit(500)
+    )).scalars().all()
+    names = {name.strip() for name in tuple(companies) + tuple(guests) if name and name.strip()}
+    return sorted(names, key=str.lower)
+
+
 @router.get('/admin/api-keys', response_class=HTMLResponse)
 async def web_admin_api_keys(request: Request, db: AsyncSession = Depends(get_session)):
-    """List and manage API keys for external program access."""
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user or not user.is_admin:
-        return RedirectResponse('/web/dashboard', status_code=303)
+    """List and manage scoped API keys for external program access."""
+    user, redirect = await _api_key_admin(request, db)
+    if redirect:
+        return redirect
     workspace = (await db.execute(select(Workspace).where(Workspace.id == user.workspace_id))).scalar_one_or_none()
 
     from app.models.api_key import APIKey
@@ -20044,81 +20190,159 @@ async def web_admin_api_keys(request: Request, db: AsyncSession = Depends(get_se
     )).scalars().all()
 
     new_key = request.session.pop('new_api_key', None)
+    new_webhook_secret = request.session.pop('new_webhook_secret', None)
     success_message = request.session.pop('success_message', None)
     error_message = request.session.pop('error_message', None)
 
-    return templates.TemplateResponse('admin/api_keys.html', {
+    response = templates.TemplateResponse('admin/api_keys.html', {
         'request': request, 'user': user, 'workspace': workspace,
-        'keys': keys, 'new_key': new_key,
+        'keys': keys, 'companies': await _workspace_company_names(db, user.workspace_id),
+        'new_key': new_key, 'new_webhook_secret': new_webhook_secret,
         'success_message': success_message, 'error_message': error_message,
     })
+    # The page can render one-time secrets: never let a cache retain them.
+    response.headers['Cache-Control'] = 'no-store, private'
+    response.headers['Vary'] = 'Cookie'
+    return response
 
 
 @router.post('/admin/api-keys/create')
 async def web_admin_api_keys_create(
     request: Request,
     name: str = Form(...),
-    db: AsyncSession = Depends(get_session)
+    access_mode: str = Form('scoped'),
+    scopes: list[str] = Form(default_factory=list),
+    allowed_company: str = Form(''),
+    allowed_email: str = Form(''),
+    allowed_email_domain: str = Form(''),
+    allow_internal_comments: bool = Form(False),
+    webhook_url: str = Form(''),
+    webhook_secret: str = Form(''),
+    webhook_events: list[str] = Form(default_factory=list),
+    db: AsyncSession = Depends(get_session),
 ):
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user or not user.is_admin:
-        return RedirectResponse('/web/dashboard', status_code=303)
+    user, redirect = await _api_key_admin(request, db)
+    if redirect:
+        return redirect
 
-    import secrets, hashlib
+    values = await _parse_api_key_form(
+        name, access_mode, scopes, allowed_company, allowed_email, allowed_email_domain,
+        allow_internal_comments, webhook_url, webhook_secret, webhook_events,
+        generate_webhook_secret=True,
+    )
+    if values.error:
+        request.session['error_message'] = values.error
+        request.session.pop('new_webhook_secret', None)
+        return RedirectResponse('/web/admin/api-keys', status_code=303)
+
     from app.models.api_key import APIKey
-    raw = "cem_" + secrets.token_hex(32)
-    key_hash = hashlib.sha256(raw.encode()).hexdigest()
-    key_prefix = raw[:12]
-
+    raw = 'cem_' + secrets.token_hex(32)
     api_key = APIKey(
         workspace_id=user.workspace_id,
-        name=name.strip(),
-        key_prefix=key_prefix,
-        key_hash=key_hash,
+        key_prefix=raw[:12],
+        key_hash=hashlib.sha256(raw.encode()).hexdigest(),
         created_at=datetime.utcnow(),
     )
+    _apply_api_key_form(api_key, values)
     db.add(api_key)
     await db.commit()
 
     request.session['new_api_key'] = raw
-    request.session['success_message'] = f'API key "{name}" created. Copy it now — it will not be shown again.'
+    if values.webhook.shown_secret:
+        request.session['new_webhook_secret'] = values.webhook.shown_secret
+    else:
+        request.session.pop('new_webhook_secret', None)
+    request.session['success_message'] = (
+        f'API key "{values.name}" created. Copy it now — it will not be shown again.'
+    )
+    return RedirectResponse('/web/admin/api-keys', status_code=303)
+
+
+@router.post('/admin/api-keys/{key_id}/update')
+async def web_admin_api_keys_update(
+    request: Request,
+    key_id: int,
+    name: str = Form(...),
+    access_mode: str = Form('scoped'),
+    scopes: list[str] = Form(default_factory=list),
+    allowed_company: str = Form(''),
+    allowed_email: str = Form(''),
+    allowed_email_domain: str = Form(''),
+    allow_internal_comments: bool = Form(False),
+    webhook_url: str = Form(''),
+    webhook_secret: str = Form(''),
+    webhook_events: list[str] = Form(default_factory=list),
+    webhook_secret_rotate: bool = Form(False),
+    webhook_secret_clear: bool = Form(False),
+    db: AsyncSession = Depends(get_session),
+):
+    """Update an existing key in place; the raw key and workspace never change."""
+    from app.models.api_key import APIKey
+
+    user, redirect = await _api_key_admin(request, db)
+    if redirect:
+        return redirect
+    key = (await db.execute(
+        select(APIKey).where(APIKey.id == key_id, APIKey.workspace_id == user.workspace_id)
+    )).scalar_one_or_none()
+    if not key:
+        raise HTTPException(status_code=404, detail='API key not found')
+
+    values = await _parse_api_key_form(
+        name, access_mode, scopes, allowed_company, allowed_email, allowed_email_domain,
+        allow_internal_comments, webhook_url, webhook_secret, webhook_events,
+        current_secret=key.webhook_secret, rotate_webhook_secret=webhook_secret_rotate,
+        clear_webhook_secret=webhook_secret_clear,
+    )
+    if values.error:
+        request.session['error_message'] = values.error
+        request.session.pop('new_webhook_secret', None)
+        return RedirectResponse('/web/admin/api-keys', status_code=303)
+
+    _apply_api_key_form(key, values)
+    await db.commit()
+
+    if values.webhook.shown_secret:
+        request.session['new_webhook_secret'] = values.webhook.shown_secret
+    else:
+        request.session.pop('new_webhook_secret', None)
+    request.session['success_message'] = f'API key "{values.name}" updated.'
     return RedirectResponse('/web/admin/api-keys', status_code=303)
 
 
 @router.post('/admin/api-keys/{key_id}/revoke')
 async def web_admin_api_keys_revoke(request: Request, key_id: int, db: AsyncSession = Depends(get_session)):
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user or not user.is_admin:
-        return RedirectResponse('/web/dashboard', status_code=303)
     from app.models.api_key import APIKey
-    key = (await db.execute(select(APIKey).where(APIKey.id == key_id, APIKey.workspace_id == user.workspace_id))).scalar_one_or_none()
-    if key:
-        key.is_active = False
-        await db.commit()
-        request.session['success_message'] = f'API key "{key.name}" has been revoked.'
+
+    user, redirect = await _api_key_admin(request, db)
+    if redirect:
+        return redirect
+    key = (await db.execute(
+        select(APIKey).where(APIKey.id == key_id, APIKey.workspace_id == user.workspace_id)
+    )).scalar_one_or_none()
+    if not key:
+        raise HTTPException(status_code=404, detail='API key not found')
+    key.is_active = False
+    await db.commit()
+    request.session['success_message'] = f'API key "{key.name}" has been revoked.'
     return RedirectResponse('/web/admin/api-keys', status_code=303)
 
 
 @router.post('/admin/api-keys/{key_id}/delete')
 async def web_admin_api_keys_delete(request: Request, key_id: int, db: AsyncSession = Depends(get_session)):
-    user_id = request.session.get('user_id')
-    if not user_id:
-        return RedirectResponse('/web/login', status_code=303)
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if not user or not user.is_admin:
-        return RedirectResponse('/web/dashboard', status_code=303)
     from app.models.api_key import APIKey
-    key = (await db.execute(select(APIKey).where(APIKey.id == key_id, APIKey.workspace_id == user.workspace_id))).scalar_one_or_none()
-    if key:
-        await db.delete(key)
-        await db.commit()
-        request.session['success_message'] = 'API key deleted.'
+
+    user, redirect = await _api_key_admin(request, db)
+    if redirect:
+        return redirect
+    key = (await db.execute(
+        select(APIKey).where(APIKey.id == key_id, APIKey.workspace_id == user.workspace_id)
+    )).scalar_one_or_none()
+    if not key:
+        raise HTTPException(status_code=404, detail='API key not found')
+    await db.delete(key)
+    await db.commit()
+    request.session['success_message'] = 'API key deleted.'
     return RedirectResponse('/web/admin/api-keys', status_code=303)
 
 

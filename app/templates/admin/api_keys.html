@@ -13,7 +13,7 @@
       </div>
       <div>
         <h1 class="text-2xl font-bold">API Keys</h1>
-        <p class="text-slate-300 mt-0.5">Allow external programs to connect to your CEM system</p>
+        <p class="text-slate-300 mt-0.5">Create scoped partner keys, lock them to a client, and configure two-way sync</p>
       </div>
     </div>
   </div>
@@ -32,64 +32,350 @@
   </div>
   {% endif %}
 
-  <!-- NEW KEY — shown once -->
-  {% if new_key %}
+  <!-- Shown-once values: raw API key and/or webhook signing secret -->
+  {% if new_key or new_webhook_secret %}
   <div class="bg-amber-50 border-2 border-amber-400 rounded-xl p-5">
     <div class="flex items-start gap-3">
       <svg class="w-6 h-6 text-amber-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
-      <div class="flex-1 min-w-0">
-        <p class="font-bold text-amber-800 text-sm mb-2">Copy your new API key now — it will never be shown again!</p>
-        <div class="flex items-center gap-2">
-          <code id="newKeyDisplay" class="flex-1 bg-white border border-amber-300 rounded-lg px-4 py-2.5 font-mono text-sm text-slate-800 break-all select-all">{{ new_key }}</code>
-          <button onclick="navigator.clipboard.writeText('{{ new_key }}').then(()=>{ this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy',2000) })"
-                  class="flex-shrink-0 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-semibold rounded-lg text-sm transition">Copy</button>
+      <div class="flex-1 min-w-0 space-y-3">
+        <p class="font-bold text-amber-800 text-sm">Copy these now — they will never be shown again!</p>
+        {% if new_key %}
+        <div>
+          <p class="text-xs font-semibold text-amber-800 mb-1">API key</p>
+          <div class="flex items-center gap-2">
+            <code id="newKeyDisplay" class="flex-1 bg-white border border-amber-300 rounded-lg px-4 py-2.5 font-mono text-sm text-slate-800 break-all select-all">{{ new_key }}</code>
+            <button type="button" onclick="cemCopy('newKeyDisplay', this)" class="flex-shrink-0 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-semibold rounded-lg text-sm transition">Copy</button>
+          </div>
         </div>
+        {% endif %}
+        {% if new_webhook_secret %}
+        <div>
+          <p class="text-xs font-semibold text-amber-800 mb-1">Webhook signing secret</p>
+          <div class="flex items-center gap-2">
+            <code id="newWebhookSecretDisplay" class="flex-1 bg-white border border-amber-300 rounded-lg px-4 py-2.5 font-mono text-sm text-slate-800 break-all select-all">{{ new_webhook_secret }}</code>
+            <button type="button" onclick="cemCopy('newWebhookSecretDisplay', this)" class="flex-shrink-0 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-semibold rounded-lg text-sm transition">Copy</button>
+          </div>
+        </div>
+        {% endif %}
       </div>
     </div>
   </div>
   {% endif %}
 
-  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+  {% macro scope_checkboxes(selected, prefix) %}
+  {% set groups = [
+    ('Tickets', [
+      ('tickets:read', 'Read tickets'),
+      ('tickets:create', 'Create tickets'),
+      ('tickets:update', 'Update tickets'),
+      ('tickets:comment', 'Comment on tickets'),
+    ]),
+    ('Tasks, projects & team', [
+      ('tasks:read', 'Read tasks'),
+      ('tasks:write', 'Create / edit tasks'),
+      ('projects:read', 'Read projects'),
+      ('users:read', 'Read users'),
+      ('time:read', 'Read time entries'),
+      ('overview:read', 'Read overview'),
+    ]),
+  ] %}
+  <div data-scope-fields class="space-y-3">
+    {% for group_title, scopes in groups %}
+    <div class="border border-slate-200 rounded-lg p-3">
+      <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">{{ group_title }}</p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        {% for scope, label in scopes %}
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input type="checkbox" name="scopes" value="{{ scope }}"
+                 id="{{ prefix }}-scope-{{ loop.index }}-{{ scope.replace(':', '-') }}"
+                 {% if scope in selected %}checked{% endif %}
+                 class="mt-0.5 w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500">
+          <span class="text-sm text-slate-700">{{ label }}</span>
+          <span class="text-[11px] text-slate-400 font-mono">{{ scope }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endmacro %}
 
-    <!-- LEFT: Key list -->
-    <div class="lg:col-span-2">
+  {% macro webhook_event_checkboxes(selected, prefix) %}
+  <div class="space-y-1.5">
+    {% for event, label in [
+      ('ticket.created', 'Ticket created'),
+      ('ticket.updated', 'Ticket updated'),
+      ('ticket.commented', 'Ticket commented'),
+      ('ticket.closed', 'Ticket closed'),
+    ] %}
+    <label class="flex items-center gap-2 cursor-pointer">
+      <input type="checkbox" name="webhook_events" value="{{ event }}"
+             id="{{ prefix }}-event-{{ loop.index }}"
+             {% if event in selected %}checked{% endif %}
+             class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500">
+      <span class="text-sm text-slate-700">{{ label }}</span>
+      <span class="text-[11px] text-slate-400 font-mono">{{ event }}</span>
+    </label>
+    {% endfor %}
+  </div>
+  {% endmacro %}
+
+  <datalist id="api-key-companies">
+    {% for company in companies %}
+    <option value="{{ company }}">{{ company }}</option>
+    {% endfor %}
+  </datalist>
+
+  <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+
+    <!-- LEFT: create + keys -->
+    <div class="xl:col-span-2 space-y-6">
+
+      <!-- Create key -->
+      <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-200">
+          <h3 class="font-semibold text-slate-900">Generate New Key</h3>
+          <p class="text-xs text-slate-500 mt-0.5">Start with a preset, then fine-tick permissions and client locks.</p>
+        </div>
+        <form method="post" action="/web/admin/api-keys/create" class="p-6 space-y-5">
+          <div>
+            <label for="create-name" class="block text-sm font-medium text-slate-700 mb-1.5">Key Name</label>
+            <input id="create-name" type="text" name="name" required placeholder="e.g. Leon / Mobilis"
+                   class="w-full px-4 py-2.5 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition">
+          </div>
+
+          <div>
+            <p class="text-sm font-medium text-slate-700 mb-2">Quick presets</p>
+            <div class="flex flex-wrap gap-2">
+              <button type="button" data-full="1" onclick="cemApplyPreset(this)"
+                      class="px-3 py-1.5 bg-slate-800 text-white rounded-lg text-xs font-semibold hover:bg-slate-900 transition">Full Workspace Access</button>
+              <button type="button" data-scopes="tickets:read,tickets:create,tickets:update,tickets:comment" onclick="cemApplyPreset(this)"
+                      class="px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-xs font-semibold hover:bg-blue-100 transition">Partner Ticket Sync (Read / Create / Update / Comment)</button>
+              <button type="button" data-scopes="tickets:read" onclick="cemApplyPreset(this)"
+                      class="px-3 py-1.5 bg-slate-50 text-slate-700 border border-slate-200 rounded-lg text-xs font-semibold hover:bg-slate-100 transition">Read-Only Tickets</button>
+            </div>
+          </div>
+
+          <div>
+            <p class="text-sm font-medium text-slate-700 mb-2">Access mode</p>
+            <div class="flex flex-wrap gap-4">
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="radio" name="access_mode" value="full" onchange="cemAccessMode(this.form)"
+                       class="w-4 h-4 text-blue-600 border-slate-300 focus:ring-blue-500">
+                <span class="text-sm text-slate-700">Full workspace access</span>
+              </label>
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="radio" name="access_mode" value="scoped" checked onchange="cemAccessMode(this.form)"
+                       class="w-4 h-4 text-blue-600 border-slate-300 focus:ring-blue-500">
+                <span class="text-sm text-slate-700">Scoped permissions</span>
+              </label>
+            </div>
+            <p class="text-xs text-slate-500 mt-1">Scoped keys must have at least one permission. Full access is for trusted internal integrations.</p>
+          </div>
+
+          <div>
+            <p class="text-sm font-medium text-slate-700 mb-2">Permissions</p>
+            {{ scope_checkboxes([], 'create') }}
+          </div>
+
+          <div class="border-t border-slate-100 pt-5">
+            <p class="text-sm font-medium text-slate-700 mb-1">Client / Email lock</p>
+            <p class="text-xs text-slate-500 mb-3">Leave blank for no restriction. A company, email or domain match is enough.</p>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label for="create-company" class="block text-xs font-medium text-slate-600 mb-1">Client / Company</label>
+                <input id="create-company" type="text" name="allowed_company" list="api-key-companies"
+                       placeholder="Mobilis" class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              </div>
+              <div>
+                <label for="create-email" class="block text-xs font-medium text-slate-600 mb-1">Specific email</label>
+                <input id="create-email" type="email" name="allowed_email" placeholder="leon@mobilis.co.za"
+                       class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              </div>
+              <div>
+                <label for="create-domain" class="block text-xs font-medium text-slate-600 mb-1">Email domain</label>
+                <input id="create-domain" type="text" name="allowed_email_domain" placeholder="mobilis.co.za"
+                       class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              </div>
+            </div>
+            <label class="flex items-start gap-2 cursor-pointer mt-3">
+              <input type="checkbox" name="allow_internal_comments"
+                     class="mt-0.5 w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500">
+              <span class="text-sm text-slate-700">Allow reading/posting internal staff notes</span>
+              <span class="text-xs text-slate-400">Off by default for safety</span>
+            </label>
+          </div>
+
+          <details class="border border-slate-200 rounded-lg">
+            <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">
+              Two-Way Sync Webhook (optional)
+            </summary>
+            <div class="px-4 pb-4 pt-2 space-y-4 border-t border-slate-100">
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label for="create-webhook-url" class="block text-xs font-medium text-slate-600 mb-1">Webhook URL</label>
+                  <input id="create-webhook-url" type="url" name="webhook_url" placeholder="https://partner.example/cem"
+                         class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+                <div>
+                  <label for="create-webhook-secret" class="block text-xs font-medium text-slate-600 mb-1">Signing secret</label>
+                  <input id="create-webhook-secret" type="password" name="webhook_secret" autocomplete="new-password"
+                         placeholder="Leave blank to generate"
+                         class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                </div>
+              </div>
+              <div>
+                <p class="text-xs font-medium text-slate-600 mb-2">Events to send (blank = all)</p>
+                {{ webhook_event_checkboxes([], 'create') }}
+              </div>
+              <p class="text-xs text-slate-500">Private/loopback destinations are rejected. Deliveries are signed with <code class="font-mono">sha256=</code> HMAC.</p>
+            </div>
+          </details>
+
+          <button type="submit" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg text-sm transition">
+            Generate Key
+          </button>
+        </form>
+      </div>
+
+      <!-- Key list -->
       <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
         <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
-          <h2 class="font-semibold text-slate-900">Active Keys</h2>
+          <h2 class="font-semibold text-slate-900">Keys in this workspace</h2>
           <span class="text-xs text-slate-500">{{ keys|length }} key{{ 's' if keys|length != 1 }}</span>
         </div>
         {% if keys %}
         <div class="divide-y divide-slate-100">
           {% for key in keys %}
-          <div class="px-6 py-4 flex items-center gap-4">
-            <div class="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 {{ 'bg-green-100' if key.is_active else 'bg-slate-100' }}">
-              <svg class="w-5 h-5 {{ 'text-green-600' if key.is_active else 'text-slate-400' }}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
-              </svg>
+          {% set selected_scopes = key.scopes.split(',') if key.scopes else [] %}
+          {% set selected_events = key.webhook_events.split(',') if key.webhook_events else [] %}
+          <div class="px-6 py-4">
+            <div class="flex items-center gap-4">
+              <div class="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 {{ 'bg-green-100' if key.is_active else 'bg-slate-100' }}">
+                <svg class="w-5 h-5 {{ 'text-green-600' if key.is_active else 'text-slate-400' }}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+                </svg>
+              </div>
+              <div class="flex-1 min-w-0">
+                <p class="font-semibold text-slate-900">{{ key.name }}</p>
+                <p class="text-xs text-slate-500 font-mono mt-0.5">{{ key.key_prefix }}••••••••••••••••••••••••••••••••••••••••••••••••••••••••</p>
+                <p class="text-xs text-slate-400 mt-0.5">
+                  Created {{ key.created_at | localtime('%Y-%m-%d') if key.created_at else 'unknown' }}
+                  {% if key.last_used_at %} · Last used {{ key.last_used_at | localtime('%Y-%m-%d %H:%M') }}{% endif %}
+                </p>
+              </div>
+              <div class="flex items-center gap-2 flex-shrink-0">
+                {% if key.is_active %}
+                <span class="px-2 py-1 bg-green-100 text-green-700 text-xs font-semibold rounded-full">Active</span>
+                <form method="post" action="/web/admin/api-keys/{{ key.id }}/revoke">
+                  <button type="submit" class="px-3 py-1.5 border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-lg text-xs font-medium transition">Revoke</button>
+                </form>
+                {% else %}
+                <span class="px-2 py-1 bg-slate-100 text-slate-500 text-xs font-semibold rounded-full">Revoked</span>
+                {% endif %}
+                <form method="post" action="/web/admin/api-keys/{{ key.id }}/delete" onsubmit="return confirm('Delete this API key permanently?')">
+                  <button type="submit" class="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition" aria-label="Delete API key">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                  </button>
+                </form>
+              </div>
             </div>
-            <div class="flex-1 min-w-0">
-              <p class="font-semibold text-slate-900">{{ key.name }}</p>
-              <p class="text-xs text-slate-500 font-mono mt-0.5">{{ key.key_prefix }}••••••••••••••••••••••••••••••••••••••••••••••••••••••••</p>
-              <p class="text-xs text-slate-400 mt-0.5">
-                Created {{ key.created_at | localtime('%Y-%m-%d') if key.created_at else 'unknown' }}
-                {% if key.last_used_at %} · Last used {{ key.last_used_at | localtime('%Y-%m-%d %H:%M') }}{% endif %}
-              </p>
-            </div>
-            <div class="flex items-center gap-2 flex-shrink-0">
-              {% if key.is_active %}
-              <span class="px-2 py-1 bg-green-100 text-green-700 text-xs font-semibold rounded-full">Active</span>
-              <form method="post" action="/web/admin/api-keys/{{ key.id }}/revoke">
-                <button type="submit" class="px-3 py-1.5 border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-lg text-xs font-medium transition">Revoke</button>
-              </form>
+
+            <div class="flex flex-wrap gap-1.5 mt-3">
+              {% if selected_scopes %}
+                {% for scope in selected_scopes %}
+                <span class="px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-100 rounded text-[11px] font-mono">{{ scope }}</span>
+                {% endfor %}
               {% else %}
-              <span class="px-2 py-1 bg-slate-100 text-slate-500 text-xs font-semibold rounded-full">Revoked</span>
+                <span class="px-2 py-0.5 bg-purple-50 text-purple-700 border border-purple-100 rounded text-[11px] font-semibold">Full Access</span>
               {% endif %}
-              <form method="post" action="/web/admin/api-keys/{{ key.id }}/delete" onsubmit="return confirm('Delete this API key permanently?')">
-                <button type="submit" class="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                </button>
-              </form>
+              {% if key.allowed_company %}<span class="px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded text-[11px]">Locked to: {{ key.allowed_company }}</span>{% endif %}
+              {% if key.allowed_email %}<span class="px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded text-[11px]">Email: {{ key.allowed_email }}</span>{% endif %}
+              {% if key.allowed_email_domain %}<span class="px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded text-[11px]">Domain: {{ key.allowed_email_domain }}</span>{% endif %}
+              {% if key.allow_internal_comments %}<span class="px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-100 rounded text-[11px]">Internal notes allowed</span>{% endif %}
+              {% if key.webhook_url and key.webhook_secret %}<span class="px-2 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-100 rounded text-[11px]">Webhook Active</span>
+              {% elif key.webhook_url %}<span class="px-2 py-0.5 bg-amber-50 text-amber-700 border border-amber-100 rounded text-[11px]">Webhook configured (no signing secret)</span>{% endif %}
             </div>
+
+            <details class="mt-3 border-t border-slate-100 pt-3">
+              <summary class="cursor-pointer text-xs font-semibold text-blue-600 hover:text-blue-700">Edit permissions, locks &amp; webhook</summary>
+              <form method="post" action="/web/admin/api-keys/{{ key.id }}/update" class="mt-3 space-y-4 bg-slate-50 rounded-lg p-4">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1">Key name</label>
+                    <input type="text" name="name" value="{{ key.name }}" required class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
+                  </div>
+                  <div>
+                    <p class="text-xs font-medium text-slate-600 mb-1">Access mode</p>
+                    <div class="flex gap-4">
+                      <label class="flex items-center gap-1.5 text-xs text-slate-700">
+                        <input type="radio" name="access_mode" value="full" onchange="cemAccessMode(this.form)" {% if not selected_scopes %}checked{% endif %}> Full
+                      </label>
+                      <label class="flex items-center gap-1.5 text-xs text-slate-700">
+                        <input type="radio" name="access_mode" value="scoped" onchange="cemAccessMode(this.form)" {% if selected_scopes %}checked{% endif %}> Scoped
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="flex flex-wrap gap-2">
+                  <button type="button" data-full="1" onclick="cemApplyPreset(this)" class="px-2.5 py-1 bg-slate-800 text-white rounded text-[11px] font-semibold">Full Workspace Access</button>
+                  <button type="button" data-scopes="tickets:read,tickets:create,tickets:update,tickets:comment" onclick="cemApplyPreset(this)" class="px-2.5 py-1 bg-blue-50 text-blue-700 border border-blue-200 rounded text-[11px] font-semibold">Partner Ticket Sync</button>
+                  <button type="button" data-scopes="tickets:read" onclick="cemApplyPreset(this)" class="px-2.5 py-1 bg-white text-slate-700 border border-slate-200 rounded text-[11px] font-semibold">Read-Only Tickets</button>
+                </div>
+                {{ scope_checkboxes(selected_scopes, 'edit-' ~ key.id) }}
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3 border-t border-slate-200 pt-3">
+                  <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1">Client / Company</label>
+                    <input type="text" name="allowed_company" list="api-key-companies" value="{{ key.allowed_company or '' }}"
+                           class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1">Specific email</label>
+                    <input type="email" name="allowed_email" value="{{ key.allowed_email or '' }}"
+                           class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1">Email domain</label>
+                    <input type="text" name="allowed_email_domain" value="{{ key.allowed_email_domain or '' }}"
+                           class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
+                  </div>
+                </div>
+                <label class="flex items-center gap-2 text-xs text-slate-700">
+                  <input type="checkbox" name="allow_internal_comments" {% if key.allow_internal_comments %}checked{% endif %}
+                         class="w-4 h-4 text-amber-600 border-slate-300 rounded"> Allow internal staff notes
+                </label>
+
+                <details class="border border-slate-200 rounded-lg bg-white">
+                  <summary class="cursor-pointer px-3 py-2 text-xs font-semibold text-slate-700">Two-Way Sync Webhook</summary>
+                  <div class="px-3 pb-3 pt-2 space-y-3 border-t border-slate-100">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div>
+                        <label class="block text-xs font-medium text-slate-600 mb-1">Webhook URL</label>
+                        <input type="url" name="webhook_url" value="{{ key.webhook_url or '' }}" placeholder="https://partner.example/cem"
+                               class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
+                      </div>
+                      <div>
+                        <label class="block text-xs font-medium text-slate-600 mb-1">Signing secret (masked)</label>
+                        <input type="password" name="webhook_secret" autocomplete="new-password" placeholder="•••••••• (leave blank to keep)"
+                               class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono">
+                      </div>
+                    </div>
+                    <div class="flex flex-wrap gap-4 text-xs text-slate-700">
+                      <label class="flex items-center gap-1.5"><input type="checkbox" name="webhook_secret_rotate" class="w-4 h-4 text-indigo-600 border-slate-300 rounded"> Rotate secret</label>
+                      <label class="flex items-center gap-1.5"><input type="checkbox" name="webhook_secret_clear" class="w-4 h-4 text-indigo-600 border-slate-300 rounded"> Clear secret</label>
+                    </div>
+                    <div>
+                      <p class="text-xs font-medium text-slate-600 mb-1.5">Events</p>
+                      {{ webhook_event_checkboxes(selected_events, 'edit-' ~ key.id) }}
+                    </div>
+                  </div>
+                </details>
+
+                <button type="submit" class="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg transition">Save Changes</button>
+              </form>
+            </details>
           </div>
           {% endfor %}
         </div>
@@ -97,51 +383,76 @@
         <div class="px-6 py-12 text-center text-slate-500">
           <svg class="w-10 h-10 mx-auto mb-3 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>
           <p class="font-medium">No API keys yet</p>
-          <p class="text-sm mt-1">Generate a key to allow external programs to connect.</p>
+          <p class="text-sm mt-1">Generate a scoped key to connect an external program.</p>
         </div>
         {% endif %}
       </div>
     </div>
 
-    <!-- RIGHT: Create + docs -->
+    <!-- RIGHT: API quick-start -->
     <div class="space-y-5">
-
-      <!-- Create key -->
-      <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-        <div class="px-5 py-4 border-b border-slate-200">
-          <h3 class="font-semibold text-slate-900 text-sm">Generate New Key</h3>
-        </div>
-        <form method="post" action="/web/admin/api-keys/create" class="p-5 space-y-4">
-          <div>
-            <label class="block text-sm font-medium text-slate-700 mb-1.5">Key Name</label>
-            <input type="text" name="name" required placeholder="e.g. Zapier Integration"
-                   class="w-full px-4 py-2.5 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition">
-            <p class="text-xs text-slate-500 mt-1">A label so you remember what this key is for.</p>
-          </div>
-          <button type="submit" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg text-sm transition">
-            Generate Key
-          </button>
-        </form>
-      </div>
-
-      <!-- How to use -->
       <div class="bg-slate-50 border border-slate-200 rounded-xl p-5">
-        <h3 class="font-semibold text-slate-800 text-sm mb-3">How to Use</h3>
-        <p class="text-xs text-slate-600 mb-3">Add this header to every API request from the other program:</p>
+        <h3 class="font-semibold text-slate-800 text-sm mb-3">API Quick-Start</h3>
+        <p class="text-xs text-slate-600 mb-3">Add this header to every request from the other program:</p>
         <code class="block bg-white border border-slate-200 rounded-lg p-3 text-xs font-mono text-slate-700 break-all">X-API-Key: cem_your_key_here</code>
-        <p class="text-xs text-slate-500 mt-3 font-semibold">Available endpoints:</p>
-        <ul class="text-xs text-slate-600 space-y-1 mt-1">
-          <li><span class="font-mono text-green-700">GET</span>  /api/v1/tickets</li>
-          <li><span class="font-mono text-green-700">GET</span>  /api/v1/tickets/{number}</li>
-          <li><span class="font-mono text-blue-700">POST</span> /api/v1/tickets</li>
-          <li><span class="font-mono text-amber-700">PATCH</span> /api/v1/tickets/{number}</li>
-          <li><span class="font-mono text-slate-500">GET</span>  /api/v1/ping</li>
+
+        <p class="text-xs text-slate-500 mt-4 font-semibold">Common endpoints</p>
+        <ul class="text-xs text-slate-600 space-y-2 mt-2">
+          <li><code class="font-mono text-green-700">GET /api/v1/me</code></li>
+          <li><code class="font-mono text-green-700">GET /api/v1/tickets?updated_since=...&amp;include=comments,history</code></li>
+          <li><code class="font-mono text-blue-700">POST /api/v1/tickets</code> <span class="text-slate-400">(including external_ref)</span></li>
+          <li><code class="font-mono text-amber-700">PATCH /api/v1/tickets/{ticket_number}</code> <span class="text-slate-400">(status, priority, closing_notes, close_type, billing fields, external_ref)</span></li>
+          <li><code class="font-mono text-indigo-700">POST /api/v1/tickets/{ticket_number}/comments</code></li>
         </ul>
-        <a href="/api/v1/ping" target="_blank"
-           class="inline-block mt-3 text-xs text-blue-600 hover:underline">Test connectivity (ping) &rarr;</a>
+
+        <p class="text-xs text-slate-500 mt-4 font-semibold">Outbound webhook headers</p>
+        <code class="block bg-white border border-slate-200 rounded-lg p-3 text-xs font-mono text-slate-700 whitespace-pre-line">X-CEM-Event: ticket.created
+X-CEM-Timestamp: 2026-01-01T12:00:00Z
+X-CEM-Signature: sha256=…</code>
+        <p class="text-xs text-slate-500 mt-2">Verify the signature with <code class="font-mono">timestamp + "." + raw body</code> using the webhook secret shown when you saved the key.</p>
+
+        <a href="/api/v1/ping" target="_blank" rel="noopener noreferrer"
+           class="inline-block mt-4 text-xs text-blue-600 hover:underline">Test connectivity (ping) &rarr;</a>
       </div>
     </div>
-
   </div>
 </div>
+
+<script>
+  function cemAccessMode(form) {
+    const full = form && form.querySelector('input[name="access_mode"][value="full"]');
+    const fields = form && form.querySelector('[data-scope-fields]');
+    if (!full || !fields) return;
+    const disabled = full.checked;
+    fields.classList.toggle('opacity-50', disabled);
+    fields.querySelectorAll('input[type="checkbox"]').forEach(function (box) { box.disabled = disabled; });
+  }
+
+  function cemApplyPreset(button) {
+    const form = button.closest('form');
+    const full = form.querySelector('input[name="access_mode"][value="full"]');
+    const scoped = form.querySelector('input[name="access_mode"][value="scoped"]');
+    if (button.dataset.full) {
+      full.checked = true;
+    } else {
+      scoped.checked = true;
+      const wanted = (button.dataset.scopes || '').split(',').filter(Boolean);
+      form.querySelectorAll('input[name="scopes"]').forEach(function (box) {
+        box.checked = wanted.indexOf(box.value) !== -1;
+      });
+    }
+    cemAccessMode(form);
+  }
+
+  function cemCopy(id, button) {
+    const node = document.getElementById(id);
+    if (!node) return;
+    navigator.clipboard.writeText(node.textContent.trim()).then(function () {
+      button.textContent = 'Copied!';
+      setTimeout(function () { button.textContent = 'Copy'; }, 2000);
+    });
+  }
+
+  document.querySelectorAll('form').forEach(cemAccessMode);
+</script>
 {% endblock %}
