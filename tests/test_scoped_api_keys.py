@@ -26,6 +26,7 @@ from app.core.api_scopes import (
     has_ticket_filter,
     parse_scopes,
     require_scope,
+    resolve_include_internal,
     ticket_matches_key_scope,
     ticket_scope_sql_filter,
 )
@@ -44,6 +45,7 @@ KEY_EMAIL = "cem_emailkey0123456789ab"
 KEY_DOMAIN = "cem_domainkey0123456789a"
 KEY_READONLY = "cem_readonly0123456789ab"
 KEY_INTERNAL = "cem_internal0123456789ab"
+KEY_FULL_INTERNAL = "cem_fullinternal0123456789ab"
 KEY_WEBHOOK = "cem_webhook0123456789ab"
 KEY_TIME = "cem_timekey0123456789ab"
 KEY_MULTI = "cem_multikey0123456789ab"
@@ -113,6 +115,28 @@ def test_can_access_internal_comments():
     assert can_access_internal_comments(_key_row(scopes="tickets:read")) is False
     assert can_access_internal_comments(
         _key_row(scopes="tickets:read", allow_internal_comments=True)) is True
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        # Legacy, full-access key: opt-in query still works; omission stays public.
+        (_key_row(scopes=None, allow_internal_comments=False), (False, False, True)),
+        (_key_row(scopes=None, allow_internal_comments=True), (True, False, True)),
+        # Scoped keys: permission is mandatory, explicit false always wins.
+        (_key_row(scopes="tickets:read", allow_internal_comments=False), (False, False, False)),
+        (_key_row(scopes="tickets:read", allow_internal_comments=True), (True, False, True)),
+    ],
+    ids=[
+        "legacy_not_allowed", "legacy_allowed",
+        "scoped_not_allowed", "scoped_allowed",
+    ],
+)
+def test_resolve_include_internal_truth_table(key, expected):
+    """Omitted -> the key's admin setting; explicit -> the query, if permitted."""
+    assert tuple(
+        resolve_include_internal(key, value) for value in (None, False, True)
+    ) == expected
 
 
 @pytest.mark.parametrize(
@@ -281,6 +305,8 @@ async def api(tmp_path):
         "internal": _key(KEY_INTERNAL, mobilis_ws.id, "Internal notes allowed",
                          scopes="tickets:read", allowed_company="Mobilis",
                          allow_internal_comments=True),
+        "full_internal": _key(KEY_FULL_INTERNAL, mobilis_ws.id, "Full access with notes",
+                              allow_internal_comments=True),
         "webhook": _key(KEY_WEBHOOK, mobilis_ws.id, "Webhook key", scopes="tickets:read",
                         allowed_company="Mobilis", webhook_url="https://partner.test/hook",
                         webhook_secret="secret-that-must-never-be-returned",
@@ -427,6 +453,96 @@ async def test_key_with_explicit_internal_comment_permission(api):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("key", [KEY_INTERNAL, KEY_FULL_INTERNAL],
+                         ids=["scoped_allowed", "full_access_allowed"])
+async def test_allowed_keys_get_internal_notes_without_the_query_parameter(api, key):
+    client, _, _, _ = api
+    headers = _headers(key)
+
+    detail = await client.get("/api/v1/tickets/TKT-2026-10001", headers=headers)
+    listing = await client.get("/api/v1/tickets?include=comments", headers=headers)
+    comments = await client.get("/api/v1/comments?limit=100", headers=headers)
+    for response in (detail, listing, comments):
+        assert response.status_code == 200, response.text
+
+    detail_notes = [c for c in detail.json()["comments"] if c["is_internal"]]
+    listed_ticket = next(t for t in listing.json()["tickets"]
+                         if t["ticket_number"] == "TKT-2026-10001")
+    assert "Mobilis private" in [c["body"] for c in detail_notes]
+    assert "Mobilis private" in [c["body"] for c in listed_ticket["comments"]]
+    assert "Mobilis private" in [c["body"] for c in comments.json()["comments"]]
+    assert all(c["is_internal"] is True for c in comments.json()["comments"]
+               if c["body"] == "Mobilis private")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", [KEY_INTERNAL, KEY_FULL_INTERNAL],
+                         ids=["scoped_allowed", "full_access_allowed"])
+async def test_explicit_false_hides_internal_notes_for_allowed_keys(api, key):
+    client, _, _, _ = api
+    headers = _headers(key)
+    detail = await client.get("/api/v1/tickets/TKT-2026-10001?include_internal=false",
+                              headers=headers)
+    listing = await client.get("/api/v1/tickets?include=comments&include_internal=false",
+                               headers=headers)
+    comments = await client.get("/api/v1/comments?include_internal=false&limit=100",
+                                headers=headers)
+    for bodies in (
+        [c["body"] for c in detail.json()["comments"]],
+        [c["body"] for t in listing.json()["tickets"] for c in t["comments"]],
+        [c["body"] for c in comments.json()["comments"]],
+    ):
+        assert "Mobilis private" not in bodies
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["", "?include_internal=true"])
+async def test_scoped_key_without_permission_never_sees_internal_notes(api, query):
+    client, _, _, _ = api
+    headers = _headers(KEY_PARTNER)
+    suffix = query or ""
+    detail = await client.get(f"/api/v1/tickets/TKT-2026-10001{suffix}", headers=headers)
+    listing = await client.get(f"/api/v1/tickets?include=comments"
+                               f"{'&include_internal=true' if query else ''}", headers=headers)
+    comments = await client.get(f"/api/v1/comments?limit=100"
+                                f"{'&include_internal=true' if query else ''}", headers=headers)
+    for bodies in (
+        [c["body"] for c in detail.json()["comments"]],
+        [c["body"] for t in listing.json()["tickets"] for c in t["comments"]],
+        [c["body"] for c in comments.json()["comments"]],
+    ):
+        assert "Mobilis private" not in bodies
+
+
+@pytest.mark.asyncio
+async def test_legacy_full_access_key_keeps_exact_include_internal_behaviour(api):
+    client, _, _, _ = api
+    headers = _headers(KEY_LEGACY)
+    default = await client.get("/api/v1/tickets/TKT-2026-10001", headers=headers)
+    listing = await client.get("/api/v1/tickets?include=comments", headers=headers)
+    comments = await client.get("/api/v1/comments?limit=100", headers=headers)
+    for bodies in (
+        [c["body"] for c in default.json()["comments"]],
+        [c["body"] for t in listing.json()["tickets"] for c in t["comments"]],
+        [c["body"] for c in comments.json()["comments"]],
+    ):
+        assert "Mobilis private" not in bodies
+
+    opted_in = await client.get("/api/v1/tickets/TKT-2026-10001?include_internal=true",
+                                headers=headers)
+    listing_in = await client.get(
+        "/api/v1/tickets?include=comments&include_internal=true", headers=headers)
+    comments_in = await client.get(
+        "/api/v1/comments?include_internal=true&limit=100", headers=headers)
+    for bodies in (
+        [c["body"] for c in opted_in.json()["comments"]],
+        [c["body"] for t in listing_in.json()["tickets"] for c in t["comments"]],
+        [c["body"] for c in comments_in.json()["comments"]],
+    ):
+        assert "Mobilis private" in bodies
+
+
+@pytest.mark.asyncio
 async def test_partner_key_is_denied_every_non_ticket_resource(api):
     client, _, _, _ = api
     for path in ("/api/v1/users", "/api/v1/tasks", "/api/v1/projects",
@@ -448,6 +564,7 @@ async def test_me_returns_safe_key_metadata_without_secrets(api):
     assert me["allowed_company"] == "Mobilis"
     assert me["allowed_email"] is None and me["allowed_email_domain"] is None
     assert me["allow_internal_comments"] is False
+    assert me["can_access_internal_comments"] is False
     assert me["webhook_configured"] is False
     assert "key_hash" not in me and "webhook_secret" not in me
 
@@ -457,6 +574,13 @@ async def test_me_returns_safe_key_metadata_without_secrets(api):
     assert "secret-that-must-never-be-returned" not in str(hooked)
     assert "webhook_secret" not in hooked and "key_hash" not in hooked
     assert hooked["workspace"]["name"] == "Mobilis"
+
+    legacy = (await client.get("/api/v1/me")).json()
+    assert legacy["allow_internal_comments"] is False
+    assert legacy["can_access_internal_comments"] is True
+    full = (await client.get("/api/v1/me", headers=_headers(KEY_FULL_INTERNAL))).json()
+    assert full["allow_internal_comments"] is True
+    assert full["can_access_internal_comments"] is True
 
 
 # ---------------------------------------------------------------------------

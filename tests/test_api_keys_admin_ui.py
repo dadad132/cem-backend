@@ -34,7 +34,7 @@ from app.core.api_webhooks import validate_webhook_url as _real_validate_webhook
 from app.core.database import get_session
 from app.models.api_key import APIKey
 from app.models.company import Company
-from app.models.ticket import Ticket
+from app.models.ticket import Ticket, TicketComment
 from app.models.user import User
 from app.models.workspace import Workspace
 from app.web import routes as web
@@ -447,12 +447,126 @@ async def test_page_documents_api_endpoints_and_webhook_headers(ui):
         "PATCH /api/v1/tickets/{ticket_number}",
         "closing_notes",
         "close_type",
-        "/comments",
+        "GET /api/v1/comments",
+        "include_internal=true|false",
+        "is_internal: true",
         "X-CEM-Event",
         "X-CEM-Timestamp",
         "X-CEM-Signature",
     ):
         assert text in html
+
+
+@pytest.mark.asyncio
+async def test_internal_permission_checkboxes_submit_true_and_explain_effects(ui):
+    html = await _page(ui)
+    boxes = re.findall(
+        r'<input[^>]*name="allow_internal_comments"[^>]*>', html)
+    assert len(boxes) >= 2, boxes          # create form + every editable key
+    assert all('value="true"' in box for box in boxes)
+    for text in (
+        "automatically included in API responses &amp; webhooks",
+        "post <code class=\"font-mono\">is_internal: true</code>",
+    ):
+        assert text in html
+
+
+async def _internal_test_comment(ui, content):
+    ui.db.add(TicketComment(
+        ticket_id=ui.tickets["mobilis"].id, user_id=ui.admin.id, content=content,
+        is_internal=True, created_at=NOW,
+    ))
+    await ui.db.commit()
+
+
+async def _raw_key_from_new_key_banner(ui) -> str:
+    html = (await ui.client.get("/web/admin/api-keys")).text
+    element = _element_by_id(html, "newKeyDisplay")
+    match = re.search(r'value="([^"]+)"', element)
+    assert match, element
+    return match.group(1)
+
+
+async def _api_bodies(ui, raw_key: str):
+    headers = {"X-API-Key": raw_key}
+    number = ui.tickets["mobilis"].ticket_number
+    paths = (
+        f"/api/v1/tickets/{number}",
+        "/api/v1/tickets?include=comments",
+        "/api/v1/comments?limit=100",
+    )
+    bodies = []
+    for path in paths:
+        response = await ui.client.get(path, headers=headers)
+        assert response.status_code == 200, response.text
+        data = response.json()
+        if "tickets" in data:
+            bodies.append([c["body"] for t in data["tickets"] for c in t["comments"]])
+        else:                                # detail and /comments both use "comments"
+            bodies.append([c["body"] for c in data["comments"]])
+    return bodies
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("checkbox", "expected"),
+    [("true", True), ("on", True), (None, False)],
+    ids=["value_true", "value_on", "omitted"],
+)
+async def test_real_http_create_form_persists_internal_permission(ui, checkbox, expected):
+    """The browser's checkbox values really reach SQLite and the external API."""
+    await _internal_test_comment(ui, "HTTP private note")
+    data = {
+        "name": "Internal form key", "access_mode": "scoped", "scopes": PARTNER_SCOPES,
+        "allowed_company": "Mobilis", "webhook_url": "",
+    }
+    if checkbox is not None:
+        data["allow_internal_comments"] = checkbox
+    response = await ui.client.post(
+        "/web/admin/api-keys/create", data=data, follow_redirects=False)
+    assert response.status_code == 303
+
+    raw = await _raw_key_from_new_key_banner(ui)
+    stored = (await ui.db.execute(
+        select(APIKey).where(APIKey.key_prefix == raw[:12]))).scalar_one()
+    assert bool(stored.allow_internal_comments) is expected
+
+    bodies = await _api_bodies(ui, raw)
+    for page_bodies in bodies:
+        assert ("HTTP private note" in page_bodies) is expected
+    me = (await ui.client.get("/api/v1/me", headers={"X-API-Key": raw})).json()
+    assert me["allow_internal_comments"] is expected
+    assert me["can_access_internal_comments"] is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("checkbox", "expected"),
+    [("true", True), ("on", True), (None, False)],
+    ids=["value_true", "value_on", "omitted"],
+)
+async def test_real_http_update_form_persists_internal_permission(ui, checkbox, expected):
+    """Editing the same key flips both the DB setting and immediate API visibility."""
+    await _internal_test_comment(ui, "HTTP private note")
+    key = ui.keys["edit"]
+    data = {
+        "name": "Updated internal key", "access_mode": "scoped",
+        "scopes": ["tickets:read"], "allowed_company": "Mobilis", "webhook_url": "",
+    }
+    if checkbox is not None:
+        data["allow_internal_comments"] = checkbox
+    response = await ui.client.post(
+        f"/web/admin/api-keys/{key.id}/update", data=data, follow_redirects=False)
+    assert response.status_code == 303
+    await ui.db.refresh(key)
+    assert bool(key.allow_internal_comments) is expected
+
+    bodies = await _api_bodies(ui, KEY_EDIT)
+    for page_bodies in bodies:
+        assert ("HTTP private note" in page_bodies) is expected
+    me = (await ui.client.get("/api/v1/me",
+                              headers={"X-API-Key": KEY_EDIT})).json()
+    assert me["can_access_internal_comments"] is expected
 
 
 @pytest.mark.asyncio

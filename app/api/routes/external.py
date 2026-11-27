@@ -41,6 +41,7 @@ from app.core.api_scopes import (
     has_ticket_filter,
     parse_scopes,
     require_scope,
+    resolve_include_internal,
     ticket_matches_key_scope,
     ticket_scope_sql_filter,
 )
@@ -521,7 +522,11 @@ async def list_tickets(
     updated_since: Optional[str] = Query(None, description="Only tickets with any activity since this time"),
     created_since: Optional[str] = Query(None, description="Only tickets created since this time"),
     include: Optional[str] = Query(None, description="comments,history,time_entries"),
-    include_internal: bool = Query(False, description="With include=comments: also private notes"),
+    include_internal: Optional[bool] = Query(
+        None,
+        description="With include=comments: include private notes "
+                    "(defaults to the key's allow_internal_comments setting)",
+    ),
     sort: str = Query("-created_at", description="-created_at, created_at, id or -id"),
     limit: int = Query(50, ge=1, le=200, description="Max results"),
     offset: int = Query(0, ge=0, description="Skip N results"),
@@ -532,8 +537,7 @@ async def list_tickets(
     api_key, workspace = auth
     require_scope(api_key, "tickets:read")
     allow_internal = can_access_internal_comments(api_key)
-    if not allow_internal:
-        include_internal = False
+    include_internal = resolve_include_internal(api_key, include_internal)
     wanted = _includes(include)
     conditions = [Ticket.workspace_id == workspace.id]
     key_scope = ticket_scope_sql_filter(api_key)
@@ -592,7 +596,11 @@ async def list_tickets(
 @router.get("/tickets/{ticket_number}")
 async def get_ticket(
     ticket_number: str,
-    include_internal: bool = Query(False, description="Also private notes"),
+    include_internal: Optional[bool] = Query(
+        None,
+        description="Include private notes "
+                    "(defaults to the key's allow_internal_comments setting)",
+    ),
     auth=Depends(require_api_key),
     db: AsyncSession = Depends(get_session),
 ):
@@ -601,8 +609,7 @@ async def get_ticket(
     api_key, workspace = auth
     require_scope(api_key, "tickets:read")
     allow_internal = can_access_internal_comments(api_key)
-    if not allow_internal:
-        include_internal = False
+    include_internal = resolve_include_internal(api_key, include_internal)
     ticket = (
         await db.execute(
             select(Ticket).where(
@@ -882,7 +889,11 @@ async def create_ticket_comment(
 async def list_comments(
     since: Optional[str] = Query(None, description="Only comments written since this time"),
     ticket_number: Optional[str] = Query(None, description="Only this ticket's comments"),
-    include_internal: bool = Query(False, description="Also private notes"),
+    include_internal: Optional[bool] = Query(
+        None,
+        description="Include private notes "
+                    "(defaults to the key's allow_internal_comments setting)",
+    ),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     auth=Depends(require_api_key),
@@ -893,8 +904,7 @@ async def list_comments(
     newest it already has."""
     api_key, workspace = auth
     require_scope(api_key, "tickets:read")
-    if not can_access_internal_comments(api_key):
-        include_internal = False
+    include_internal = resolve_include_internal(api_key, include_internal)
     conditions = [Ticket.workspace_id == workspace.id]
     key_scope = ticket_scope_sql_filter(api_key)
     if key_scope is not None:
@@ -1298,6 +1308,7 @@ async def api_key_identity(auth=Depends(require_api_key)):
         "allowed_email": api_key.allowed_email,
         "allowed_email_domain": api_key.allowed_email_domain,
         "allow_internal_comments": bool(api_key.allow_internal_comments),
+        "can_access_internal_comments": can_access_internal_comments(api_key),
         "webhook_configured": bool(api_key.webhook_url),
         "webhook_events": api_key.webhook_events,
     })

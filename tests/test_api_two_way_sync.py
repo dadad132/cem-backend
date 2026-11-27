@@ -36,6 +36,7 @@ from app.models.workspace import Workspace
 KEY_PARTNER = "cem_syncpartner0123456789a"
 KEY_READONLY = "cem_syncreadonly0123456789"
 KEY_INTERNAL = "cem_syncinternal0123456789"
+KEY_FULL_INTERNAL = "cem_syncfullinternal01234567"
 KEY_HOOK = "cem_synchook0123456789ab"
 KEY_MUTE = "cem_syncmute0123456789ab"
 KEY_OTHER = "cem_syncother0123456789ab"
@@ -64,6 +65,32 @@ def _iso(value: datetime) -> str:
 def _public_resolver(host: str, port: int):
     """DNS stands in for the real resolver; every public name maps to a public IP."""
     return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+
+
+async def _read_bodies(client, key: str, number: str, *, include_internal=None):
+    """Comment bodies from all three read endpoints for one key and ticket."""
+    flag = "" if include_internal is None else (
+        "true" if include_internal else "false")
+    detail_url = f"/api/v1/tickets/{number}"
+    if flag:
+        detail_url += f"?include_internal={flag}"
+    list_url = f"/api/v1/tickets?include=comments"
+    comments_url = f"/api/v1/comments?limit=100"
+    if flag:
+        suffix = f"&include_internal={flag}"
+        list_url += suffix
+        comments_url += suffix
+    headers = _headers(key)
+    detail = await client.get(detail_url, headers=headers)
+    listing = await client.get(list_url, headers=headers)
+    comments = await client.get(comments_url, headers=headers)
+    for response in (detail, listing, comments):
+        assert response.status_code == 200, response.text
+    return (
+        [c["body"] for c in detail.json()["comments"]],
+        [c["body"] for t in listing.json()["tickets"] for c in t["comments"]],
+        [c["body"] for c in comments.json()["comments"]],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +143,8 @@ async def api(tmp_path):
         "internal": _key(KEY_INTERNAL, ws.id, "Internal allowed",
                          scopes="tickets:read,tickets:comment", allowed_company="Mobilis",
                          allow_internal_comments=True),
+        "full_internal": _key(KEY_FULL_INTERNAL, ws.id, "Full access with notes",
+                              allow_internal_comments=True),
         "hook": _key(KEY_HOOK, ws.id, "Leon's listener", scopes="tickets:read",
                      allowed_company="Mobilis", webhook_url="https://hooks.partner.test/cem",
                      webhook_secret="hook-secret", webhook_events="ticket.created,ticket.updated,"
@@ -241,6 +270,84 @@ async def test_internal_comment_needs_explicit_permission(api):
     comment = (await db.execute(select(TicketComment).where(
         TicketComment.id == allowed.json()["id"]))).scalar_one()
     assert comment.is_internal is True and comment.user_id is None
+
+
+@pytest.mark.asyncio
+async def test_api_created_internal_comment_is_readable_by_allowed_keys(api, monkeypatch):
+    client, db, _, tickets, _, _ = api
+    number = tickets["mobilis"].ticket_number
+    dispatched = []
+
+    async def capture(db_arg, workspace_id, event, ticket_arg, **kwargs):
+        dispatched.append((event, kwargs))
+
+    monkeypatch.setattr(external, "dispatch_ticket_webhook", capture)
+
+    created = await client.post(
+        f"/api/v1/tickets/{number}/comments", headers=_headers(KEY_INTERNAL),
+        json={"body": "API private note", "is_internal": True},
+    )
+    assert created.status_code == 201, created.text
+    item = created.json()
+    assert item["is_internal"] is True
+    comment = (await db.execute(select(TicketComment).where(
+        TicketComment.id == item["id"]))).scalar_one()
+    assert comment.is_internal is True and comment.user_id is None
+    assert dispatched and dispatched[-1][0] == "ticket.commented"
+    assert dispatched[-1][1]["comment"].id == comment.id
+    assert dispatched[-1][1]["source_api_key_id"] is not None
+
+    for key in (KEY_INTERNAL, KEY_FULL_INTERNAL):
+        for bodies in await _read_bodies(client, key, number):
+            assert "API private note" in bodies
+        for bodies in await _read_bodies(client, key, number, include_internal=False):
+            assert "API private note" not in bodies
+
+    for bodies in await _read_bodies(client, KEY_PARTNER, number, include_internal=True):
+        assert "API private note" not in bodies
+    denied = await client.post(f"/api/v1/tickets/{number}/comments",
+                               headers=_headers(KEY_PARTNER),
+                               json={"body": "Denied", "is_internal": True})
+    assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_web_ui_internal_comment_is_visible_to_permitted_api_keys(
+        api, tmp_path, monkeypatch):
+    from app.web import routes as web
+
+    client, db, _, tickets, _, ada = api
+    number = tickets["mobilis"].ticket_number
+    monkeypatch.chdir(tmp_path)          # the comment route writes logs in cwd
+    dispatched = []
+
+    async def capture(db_arg, workspace_id, event, ticket_arg, **kwargs):
+        dispatched.append((event, kwargs))
+
+    monkeypatch.setattr(web, "dispatch_ticket_webhook", capture)
+    request = SimpleNamespace(
+        session={"user_id": ada.id}, headers={}, state=SimpleNamespace(),
+        url=SimpleNamespace(path="/web/tickets/1", query=""), method="POST",
+    )
+    response = await web.web_tickets_add_comment(
+        request, tickets["mobilis"].id, content="Web private note", is_internal=True,
+        files=[], background_tasks=BackgroundTasks(), db=db,
+    )
+    assert response.status_code == 303
+    comment = (await db.execute(select(TicketComment).where(
+        TicketComment.content == "Web private note"))).scalar_one()
+    assert comment.is_internal is True and comment.user_id == ada.id
+    assert any(event == "ticket.commented" and kwargs["comment"].id == comment.id
+               for event, kwargs in dispatched)
+
+    for key in (KEY_INTERNAL, KEY_FULL_INTERNAL):
+        for bodies in await _read_bodies(client, key, number):
+            assert "Web private note" in bodies
+        for bodies in await _read_bodies(client, key, number, include_internal=False):
+            assert "Web private note" not in bodies
+
+    for bodies in await _read_bodies(client, KEY_PARTNER, number, include_internal=True):
+        assert "Web private note" not in bodies
 
 
 # ---------------------------------------------------------------------------

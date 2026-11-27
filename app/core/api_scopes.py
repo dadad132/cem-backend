@@ -65,6 +65,19 @@ def can_access_internal_comments(api_key: APIKey) -> bool:
     return parse_scopes(api_key.scopes) is None or bool(api_key.allow_internal_comments)
 
 
+def resolve_include_internal(api_key: APIKey, include_internal: Optional[bool]) -> bool:
+    """Default a read request's internal-note visibility to the key's setting.
+
+    An explicit query value wins for keys that may read notes at all; keys that
+    lack that permission never see them, whatever the caller asks for.
+    """
+    if not can_access_internal_comments(api_key):
+        return False
+    if include_internal is not None:
+        return bool(include_internal)
+    return bool(api_key.allow_internal_comments)
+
+
 def has_ticket_filter(api_key: APIKey) -> bool:
     return any((_values(api_key.allowed_company), _values(api_key.allowed_email),
                 _values(api_key.allowed_email_domain)))

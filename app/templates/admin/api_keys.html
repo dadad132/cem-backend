@@ -207,10 +207,12 @@
               </div>
             </div>
             <label class="flex items-start gap-2 cursor-pointer mt-3">
-              <input type="checkbox" name="allow_internal_comments"
+              <input type="checkbox" name="allow_internal_comments" value="true"
                      class="mt-0.5 w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500">
-              <span class="text-sm text-slate-700">Allow reading/posting internal staff notes</span>
-              <span class="text-xs text-slate-400">Off by default for safety</span>
+              <span>
+                <span class="text-sm text-slate-700">Allow reading/posting internal staff notes</span>
+                <span class="block text-xs text-slate-500 mt-1">When ticked, internal staff notes are automatically included in API responses &amp; webhooks, and this key may post <code class="font-mono">is_internal: true</code> comments. Off by default for safety.</span>
+              </span>
             </label>
           </div>
 
@@ -350,9 +352,12 @@
                            class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
                   </div>
                 </div>
-                <label class="flex items-center gap-2 text-xs text-slate-700">
-                  <input type="checkbox" name="allow_internal_comments" {% if key.allow_internal_comments %}checked{% endif %}
-                         class="w-4 h-4 text-amber-600 border-slate-300 rounded"> Allow internal staff notes
+                <label class="flex items-start gap-2 text-xs text-slate-700">
+                  <input type="checkbox" name="allow_internal_comments" value="true" {% if key.allow_internal_comments %}checked{% endif %}
+                         class="mt-0.5 w-4 h-4 text-amber-600 border-slate-300 rounded">
+                  <span>Allow internal staff notes
+                    <span class="block text-slate-500 mt-1">Automatically included in API responses &amp; webhooks; may post <code class="font-mono">is_internal: true</code> notes.</span>
+                  </span>
                 </label>
 
                 <details class="border border-slate-200 rounded-lg bg-white">
@@ -408,9 +413,10 @@
         <ul class="text-xs text-slate-600 space-y-2 mt-2">
           <li><code class="font-mono text-green-700">GET /api/v1/me</code></li>
           <li><code class="font-mono text-green-700">GET /api/v1/tickets?updated_since=...&amp;include=comments,history</code></li>
+          <li><code class="font-mono text-green-700">GET /api/v1/comments</code> <span class="text-slate-400">(include_internal=true|false overrides the key default)</span></li>
           <li><code class="font-mono text-blue-700">POST /api/v1/tickets</code> <span class="text-slate-400">(including external_ref)</span></li>
           <li><code class="font-mono text-amber-700">PATCH /api/v1/tickets/{ticket_number}</code> <span class="text-slate-400">(status, priority, closing_notes, close_type, billing fields, external_ref)</span></li>
-          <li><code class="font-mono text-indigo-700">POST /api/v1/tickets/{ticket_number}/comments</code></li>
+          <li><code class="font-mono text-indigo-700">POST /api/v1/tickets/{ticket_number}/comments</code> <span class="text-slate-400">(is_internal: true with permission)</span></li>
         </ul>
 
         <p class="text-xs text-slate-500 mt-4 font-semibold">Outbound webhook headers</p>
