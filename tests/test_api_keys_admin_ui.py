@@ -11,7 +11,11 @@ Executable user journeys:
 from __future__ import annotations
 
 import hashlib
+import re
+import shutil
+import subprocess
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -198,6 +202,222 @@ async def _create(ui, **overrides):
     request = _request(ui.admin)
     response = await web.web_admin_api_keys_create(request, db=ui.db, **form)
     return response, request.session
+
+
+def _element_by_id(html: str, element_id: str) -> str:
+    """Return the opening tag of the element carrying ``element_id``."""
+    match = re.search(
+        r"<[a-zA-Z][^>]*\bid=[\"']" + re.escape(element_id) + r"[\"'][^>]*>", html
+    )
+    assert match, f"No element with id={element_id!r} in rendered HTML"
+    return match.group(0)
+
+
+def _script_containing(html: str, needle: str) -> str:
+    """Return the inline <script> block that contains ``needle``."""
+    for block in re.findall(r"<script[^>]*>(.*?)</script>", html, re.S):
+        if needle in block:
+            return block
+    pytest.fail(f"No <script> block containing {needle!r}")
+
+
+# Minimal DOM stub so the real inline copy script can be executed under Node.
+# It exercises observable outcomes (clipboard content, button label/classes,
+# selection, timers) rather than merely matching source text.
+_COPY_JS_PRELUDE = r"""
+const assert = require('assert');
+
+function makeNode(tag, id) {
+  const classes = new Set();
+  return {
+    tagName: String(tag).toUpperCase(), id: id || '', value: '', textContent: '',
+    dataset: {}, style: {}, attributes: {}, parentNode: null, children: [],
+    scrollTop: 0, focused: false, selected: false, selection: null,
+    scrollArgs: undefined,
+    classList: {
+      add: function () { for (const c of arguments) classes.add(c); },
+      remove: function () { for (const c of arguments) classes.delete(c); },
+      contains: function (c) { return classes.has(c); },
+    },
+    focus: function () { this.focused = true; },
+    select: function () { this.selected = true; },
+    setSelectionRange: function (a, b) { this.selection = [a, b]; },
+    scrollIntoView: function (arg) { this.scrollArgs = arg; },
+    setAttribute: function (k, v) { this.attributes[k] = v; },
+    removeAttribute: function (k) { delete this.attributes[k]; },
+    appendChild: function (n) { n.parentNode = this; this.children.push(n); },
+    removeChild: function (n) {
+      n.parentNode = null;
+      this.children = this.children.filter(x => x !== n);
+    },
+  };
+}
+
+const input = makeNode('input', 'newKeyDisplay');
+input.value = 'cem_secret_value';
+const status = makeNode('span', 'newKeyDisplayCopyStatus');
+const banner = makeNode('div', 'newKeyBanner');
+const main = makeNode('div', 'main-content');
+main.scrollTop = 250;
+const nodes = {
+  newKeyDisplay: input,
+  newKeyDisplayCopyStatus: status,
+  newKeyBanner: banner,
+  'main-content': main,
+};
+const created = [];
+let execResult = true;
+let copiedText = null;
+let timerId = 0;
+const timers = new Map();
+
+global.document = {
+  getElementById: function (id) { return nodes[id] || null; },
+  querySelectorAll: function () { return []; },
+  createElement: function (tag) {
+    const node = makeNode(tag);
+    created.push(node);
+    return node;
+  },
+  body: makeNode('body'),
+  execCommand: function (cmd) { assert.strictEqual(cmd, 'copy'); return execResult; },
+};
+global.window = {
+  isSecureContext: true,
+  location: { pathname: '/web/admin/api-keys' },
+  requestAnimationFrame: function (cb) { cb(); },
+};
+Object.defineProperty(global, 'navigator', {
+  configurable: true,
+  writable: true,
+  value: {
+    clipboard: {
+      writeText: function (text) { copiedText = text; return Promise.resolve(); },
+    },
+  },
+});
+const storage = { 'scrollPos_/web/admin/api-keys': '250' };
+global.sessionStorage = {
+  removeItem: function (key) { delete storage[key]; },
+  getItem: function (key) { return storage[key] === undefined ? null : storage[key]; },
+};
+global.setTimeout = function (cb, ms) {
+  timerId += 1;
+  timers.set(timerId, { cb: cb, ms: ms });
+  return timerId;
+};
+global.clearTimeout = function (id) { timers.delete(id); };
+
+function freshButton() {
+  const b = makeNode('button');
+  b.textContent = 'Copy';
+  return b;
+}
+
+function onlyTimer(expectedMs) {
+  const pending = Array.from(timers.values());
+  assert.strictEqual(pending.length, 1, 'expected exactly one pending reset timer');
+  assert.strictEqual(pending[0].ms, expectedMs);
+  timers.clear();
+  return pending[0].cb;
+}
+"""
+
+_COPY_JS_EPILOGUE = r"""
+(async function () {
+  // The banner IIFE runs on load, before base.html can restore the scroll key.
+  assert.strictEqual(storage['scrollPos_/web/admin/api-keys'], undefined);
+  assert.strictEqual(main.scrollTop, 0);
+  assert.deepStrictEqual(banner.scrollArgs, { block: 'start' });
+
+  // Secure context, clipboard resolves: copies exact value + green feedback.
+  let button = freshButton();
+  window.isSecureContext = true;
+  navigator.clipboard.writeText = function (text) {
+    copiedText = text;
+    return Promise.resolve();
+  };
+  execResult = false;
+  cemCopy('newKeyDisplay', button);
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  assert.strictEqual(copiedText, 'cem_secret_value');
+  assert.strictEqual(button.textContent, 'Copied!');
+  assert.ok(button.classList.contains('bg-green-600'));
+  assert.ok(status.textContent.indexOf('Copied') !== -1);
+  onlyTimer(2000)();
+  assert.strictEqual(button.textContent, 'Copy');
+  assert.ok(button.classList.contains('bg-amber-500'));
+
+  // Clipboard rejects: fall back to execCommand, still report success.
+  button = freshButton();
+  navigator.clipboard.writeText = function () {
+    return Promise.reject(new Error('permission denied'));
+  };
+  execResult = true;
+  input.selected = false;
+  cemCopy('newKeyDisplay', button);
+  await new Promise(function (resolve) { setImmediate(resolve); });
+  assert.strictEqual(button.textContent, 'Copied!');
+  assert.ok(input.selected);
+  onlyTimer(2000)();
+
+  // Plain HTTP: no clipboard API, synchronous execCommand fallback succeeds.
+  button = freshButton();
+  window.isSecureContext = false;
+  cemCopy('newKeyDisplay', button);
+  assert.strictEqual(button.textContent, 'Copied!');
+  onlyTimer(2000)();
+
+  // A writeText implementation that throws synchronously must not fail silently.
+  button = freshButton();
+  window.isSecureContext = true;
+  navigator.clipboard.writeText = function () { throw new Error('security error'); };
+  cemCopy('newKeyDisplay', button);
+  assert.strictEqual(button.textContent, 'Copied!');
+  onlyTimer(2000)();
+
+  // Both methods fail: select the field, show persistent guidance for 3s.
+  button = freshButton();
+  window.isSecureContext = false;
+  execResult = false;
+  input.focused = false;
+  input.selected = false;
+  cemCopy('newKeyDisplay', button);
+  assert.strictEqual(button.textContent, 'Press Ctrl+C');
+  assert.ok(input.focused && input.selected);
+  assert.deepStrictEqual(input.selection, [0, 'cem_secret_value'.length]);
+  assert.ok(status.textContent.indexOf('Ctrl+C') !== -1);
+  onlyTimer(3000)();
+  assert.strictEqual(button.textContent, 'Copy');
+
+  // Repeated clicks replace the reset timer instead of racing it.
+  button = freshButton();
+  window.isSecureContext = false;
+  execResult = true;
+  cemCopy('newKeyDisplay', button);
+  cemCopy('newKeyDisplay', button);
+  onlyTimer(2000)();
+
+  // Non-input nodes use a temporary, in-viewport textarea that is cleaned up.
+  button = freshButton();
+  const code = makeNode('code');
+  delete code.value;
+  code.textContent = '  spaced  ';
+  nodes.newKeyDisplay = code;
+  cemCopy('newKeyDisplay', button);
+  const temporary = created[created.length - 1];
+  assert.strictEqual(temporary.value, 'spaced');
+  assert.strictEqual(temporary.style.opacity, '0');
+  assert.strictEqual(temporary.parentNode, null);
+  assert.strictEqual(document.body.children.length, 0);
+  onlyTimer(2000)();
+
+  console.log('OK');
+})().catch(function (error) {
+  console.error(error);
+  process.exitCode = 1;
+});
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -623,3 +843,131 @@ async def test_other_workspace_admin_sees_only_own_keys_and_gets_404_on_edit(ui)
         assert exc.value.status_code == 404
 
     assert (await _stored_key(ui, ui.keys["cross"].id)).is_active is True
+
+
+# ---------------------------------------------------------------------------
+# One-time secrets: selectable fields, universal copy, and visible banner
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_created_secrets_render_as_selectable_readonly_inputs(ui):
+    _, session = await _create(ui)
+    raw, secret = session["new_api_key"], session["new_webhook_secret"]
+    html = await _page(ui, session=session)
+
+    for element_id, value in (
+        ("newKeyDisplay", raw),
+        ("newWebhookSecretDisplay", secret),
+    ):
+        element = _element_by_id(html, element_id)
+        assert element.startswith("<input "), element
+        assert 'type="text"' in element
+        assert "readonly" in element
+        assert f'value="{value}"' in element
+        assert 'autocomplete="off"' in element
+        assert 'spellcheck="false"' in element
+        assert "this.focus(); this.select();" in element
+        assert "this.setSelectionRange(0, this.value.length)" in element
+        assert "font-mono" in element and "w-full" in element
+        assert "bg-white" in element and "text-slate-800" in element
+
+
+@pytest.mark.asyncio
+async def test_secret_fields_have_labels_and_live_copy_status(ui):
+    _, session = await _create(ui)
+    assert session["new_api_key"]
+    html = await _page(ui, session=session)
+
+    for element_id in ("newKeyDisplay", "newWebhookSecretDisplay"):
+        assert f'<label for="{element_id}"' in html
+        status = _element_by_id(html, f"{element_id}CopyStatus")
+        assert 'role="status"' in status
+        assert 'aria-live="polite"' in status
+        assert "sr-only" in status
+
+
+@pytest.mark.asyncio
+async def test_copy_buttons_target_the_readonly_secret_inputs(ui):
+    _, session = await _create(ui)
+    html = await _page(ui, session=session)
+
+    for element_id in ("newKeyDisplay", "newWebhookSecretDisplay"):
+        onclick = f"cemCopy('{element_id}', this)"
+        assert f'onclick="{onclick}"' in html
+        button = re.search(
+            r"<button[^>]*\bonclick=\"" + re.escape(onclick) + r"\"[^>]*>(.*?)</button>",
+            html, re.S,
+        )
+        assert button, f"No Copy button wired to {element_id}"
+        assert button.group(1).strip() == "Copy"
+
+
+@pytest.mark.asyncio
+async def test_copy_script_guards_clipboard_and_falls_back_to_exec_command(ui):
+    script = _script_containing(await _page(ui), "function cemCopy")
+
+    assert "function fallbackCopy(text, node)" in script
+    assert "window.isSecureContext && navigator.clipboard" in script
+    assert "typeof navigator.clipboard.writeText === 'function'" in script
+    assert "Promise.resolve(navigator.clipboard.writeText(text))" in script
+    assert ".catch(tryFallback)" in script
+    assert "if (fallbackCopy(text, node)) copied(); else manualCopy();" in script
+    assert "document.execCommand('copy')" in script
+    assert "setSelectionRange(0, text.length)" in script
+    assert "typeof node.value === 'string' ? node.value : (node.textContent || '').trim()" in script
+    assert "'Copied!'" in script and "setTimeout(" in script
+    assert "'Press Ctrl+C'" in script
+    assert "clearTimeout(button._cemTimer)" in script
+
+
+def test_copy_javascript_behaves_correctly_across_copy_paths(tmp_path):
+    """Execute the real inline script with stubbed browser APIs under Node."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node runtime unavailable")
+    template = Path(__file__).resolve().parents[1] / "app/templates/admin/api_keys.html"
+    script = _script_containing(template.read_text(), "function cemCopy")
+    js_file = tmp_path / "copy_behaviour.js"
+    js_file.write_text(_COPY_JS_PRELUDE + script + _COPY_JS_EPILOGUE)
+
+    result = subprocess.run(
+        [node, str(js_file)], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OK" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_new_secret_banner_is_scrolled_into_view_on_page_load(ui):
+    _, session = await _create(ui)
+    assert session["new_api_key"] and session["new_webhook_secret"]
+    html = await _page(ui, session=session)
+
+    banner = _element_by_id(html, "newKeyBanner")
+    assert "border-amber-300" in banner
+    assert "border-amber-400" not in banner
+
+    script = _script_containing(html, "newKeyBanner")
+    assert "document.getElementById('newKeyBanner')" in script
+    assert "sessionStorage.removeItem('scrollPos_' + window.location.pathname)" in script
+    assert "scrollIntoView({ block: 'start' })" in script
+    assert "main-content" in script and "scrollTop = 0" in script
+
+
+@pytest.mark.asyncio
+async def test_no_secret_banner_or_code_elements_when_nothing_was_created(ui):
+    html = await _page(ui)
+
+    assert 'id="newKeyBanner"' not in html
+    assert '<code id="newKeyDisplay"' not in html
+    assert '<code id="newWebhookSecretDisplay"' not in html
+
+
+@pytest.mark.asyncio
+async def test_manual_webhook_secret_is_html_escaped_in_readonly_input(ui):
+    secret = 'a"b<c>&d'
+    _, session = await _update(ui, webhook_secret=secret)
+    assert session["new_webhook_secret"] == secret
+    html = await _page(ui, session=session)
+
+    assert 'value="a&#34;b&lt;c&gt;&amp;d"' in html

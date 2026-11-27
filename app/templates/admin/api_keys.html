@@ -34,27 +34,35 @@
 
   <!-- Shown-once values: raw API key and/or webhook signing secret -->
   {% if new_key or new_webhook_secret %}
-  <div class="bg-amber-50 border-2 border-amber-400 rounded-xl p-5">
+  <div id="newKeyBanner" class="bg-amber-50 border-2 border-amber-300 rounded-xl p-5">
     <div class="flex items-start gap-3">
       <svg class="w-6 h-6 text-amber-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
       <div class="flex-1 min-w-0 space-y-3">
         <p class="font-bold text-amber-800 text-sm">Copy these now — they will never be shown again!</p>
         {% if new_key %}
         <div>
-          <p class="text-xs font-semibold text-amber-800 mb-1">API key</p>
+          <label for="newKeyDisplay" class="block text-xs font-semibold text-amber-800 mb-1">API key</label>
           <div class="flex items-center gap-2">
-            <code id="newKeyDisplay" class="flex-1 bg-white border border-amber-300 rounded-lg px-4 py-2.5 font-mono text-sm text-slate-800 break-all select-all">{{ new_key }}</code>
-            <button type="button" onclick="cemCopy('newKeyDisplay', this)" class="flex-shrink-0 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-semibold rounded-lg text-sm transition">Copy</button>
+            <input id="newKeyDisplay" type="text" readonly value="{{ new_key }}" autocomplete="off" spellcheck="false"
+                   onclick="this.focus(); this.select(); this.setSelectionRange(0, this.value.length);"
+                   title="Click to select; on touch devices long-press to copy"
+                   class="w-full bg-white border border-amber-300 rounded-lg px-4 py-2.5 font-mono text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <button type="button" onclick="cemCopy('newKeyDisplay', this)" class="flex-shrink-0 px-4 py-2.5 bg-amber-500 hover:bg-amber-700 text-white font-semibold rounded-lg text-sm transition">Copy</button>
           </div>
+          <span id="newKeyDisplayCopyStatus" role="status" aria-live="polite" class="sr-only"></span>
         </div>
         {% endif %}
         {% if new_webhook_secret %}
         <div>
-          <p class="text-xs font-semibold text-amber-800 mb-1">Webhook signing secret</p>
+          <label for="newWebhookSecretDisplay" class="block text-xs font-semibold text-amber-800 mb-1">Webhook signing secret</label>
           <div class="flex items-center gap-2">
-            <code id="newWebhookSecretDisplay" class="flex-1 bg-white border border-amber-300 rounded-lg px-4 py-2.5 font-mono text-sm text-slate-800 break-all select-all">{{ new_webhook_secret }}</code>
-            <button type="button" onclick="cemCopy('newWebhookSecretDisplay', this)" class="flex-shrink-0 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-semibold rounded-lg text-sm transition">Copy</button>
+            <input id="newWebhookSecretDisplay" type="text" readonly value="{{ new_webhook_secret }}" autocomplete="off" spellcheck="false"
+                   onclick="this.focus(); this.select(); this.setSelectionRange(0, this.value.length);"
+                   title="Click to select; on touch devices long-press to copy"
+                   class="w-full bg-white border border-amber-300 rounded-lg px-4 py-2.5 font-mono text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <button type="button" onclick="cemCopy('newWebhookSecretDisplay', this)" class="flex-shrink-0 px-4 py-2.5 bg-amber-500 hover:bg-amber-700 text-white font-semibold rounded-lg text-sm transition">Copy</button>
           </div>
+          <span id="newWebhookSecretDisplayCopyStatus" role="status" aria-live="polite" class="sr-only"></span>
         </div>
         {% endif %}
       </div>
@@ -444,14 +452,120 @@ X-CEM-Signature: sha256=…</code>
     cemAccessMode(form);
   }
 
-  function cemCopy(id, button) {
-    const node = document.getElementById(id);
-    if (!node) return;
-    navigator.clipboard.writeText(node.textContent.trim()).then(function () {
-      button.textContent = 'Copied!';
-      setTimeout(function () { button.textContent = 'Copy'; }, 2000);
-    });
+  // Synchronous copy path for plain HTTP / non-secure contexts where the
+  // asynchronous Clipboard API is unavailable (or rejects its permission).
+  function fallbackCopy(text, node) {
+    var temporary = null;
+    try {
+      if (node && (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA')) {
+        node.focus();
+        node.select();
+        if (typeof node.setSelectionRange === 'function') node.setSelectionRange(0, text.length);
+      } else {
+        temporary = document.createElement('textarea');
+        temporary.value = text;
+        temporary.setAttribute('readonly', '');
+        temporary.style.position = 'fixed';
+        temporary.style.top = '0';
+        temporary.style.left = '0';
+        temporary.style.opacity = '0';
+        temporary.style.fontSize = '16px';
+        document.body.appendChild(temporary);
+        temporary.focus();
+        temporary.select();
+        if (typeof temporary.setSelectionRange === 'function') temporary.setSelectionRange(0, text.length);
+      }
+      return !!document.execCommand('copy');
+    } catch (error) {
+      return false;
+    } finally {
+      if (temporary && temporary.parentNode) temporary.parentNode.removeChild(temporary);
+    }
   }
+
+  function cemCopy(id, button) {
+    var node = document.getElementById(id);
+    if (!node || !button) return;
+    var text = typeof node.value === 'string' ? node.value : (node.textContent || '').trim();
+    if (!text) return;
+    var status = document.getElementById(id + 'CopyStatus');
+    var originalLabel = button.dataset.cemLabel || button.textContent;
+    button.dataset.cemLabel = originalLabel;
+    if (button._cemTimer) clearTimeout(button._cemTimer);
+
+    function restore(delay) {
+      button._cemTimer = setTimeout(function () {
+        button.textContent = originalLabel;
+        button.classList.remove('bg-green-600', 'hover:bg-green-700', 'bg-red-600', 'hover:bg-red-700');
+        button.classList.add('bg-amber-500', 'hover:bg-amber-700');
+        button.removeAttribute('aria-label');
+        if (status) status.textContent = '';
+      }, delay);
+    }
+
+    function copied() {
+      button.textContent = 'Copied!';
+      button.classList.remove('bg-amber-500', 'hover:bg-amber-700', 'bg-red-600', 'hover:bg-red-700');
+      button.classList.add('bg-green-600', 'hover:bg-green-700');
+      button.setAttribute('aria-label', 'Copied to clipboard');
+      if (status) status.textContent = 'Copied to clipboard';
+      restore(2000);
+    }
+
+    function manualCopy() {
+      try {
+        node.focus();
+        if (typeof node.select === 'function') node.select();
+        if (typeof node.setSelectionRange === 'function') node.setSelectionRange(0, text.length);
+      } catch (error) {
+        // Selection can be blocked by the browser; the message below still applies.
+      }
+      button.textContent = 'Press Ctrl+C';
+      button.classList.remove('bg-amber-500', 'hover:bg-amber-700', 'bg-green-600', 'hover:bg-green-700');
+      button.classList.add('bg-red-600', 'hover:bg-red-700');
+      button.setAttribute('aria-label', 'Automatic copy unavailable; select and copy manually');
+      if (status) status.textContent = 'Automatic copy unavailable. The field is selected; press Ctrl+C or long-press the selected field to copy.';
+      restore(3000);
+    }
+
+    function tryFallback() {
+      if (fallbackCopy(text, node)) copied(); else manualCopy();
+    }
+
+    if (window.isSecureContext && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      try {
+        Promise.resolve(navigator.clipboard.writeText(text)).then(copied).catch(tryFallback);
+      } catch (error) {
+        tryFallback();
+      }
+    } else {
+      tryFallback();
+    }
+  }
+
+  // A POST /web/admin/api-keys/create redirects back with 303; make sure the
+  // one-time secrets banner is visible instead of the persisted scroll offset.
+  (function () {
+    var banner = document.getElementById('newKeyBanner');
+    if (!banner) return;
+    try {
+      sessionStorage.removeItem('scrollPos_' + window.location.pathname);
+    } catch (error) {
+      // Storage may be disabled; the scroll-into-view below still applies.
+    }
+    var reveal = function () {
+      var main = document.getElementById('main-content');
+      if (main) main.scrollTop = 0;
+      if (typeof banner.scrollIntoView !== 'function') return;
+      try {
+        banner.scrollIntoView({ block: 'start' });
+      } catch (error) {
+        banner.scrollIntoView(true);
+      }
+    };
+    if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(reveal);
+    else reveal();
+  })();
 
   document.querySelectorAll('form').forEach(cemAccessMode);
 </script>
