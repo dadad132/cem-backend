@@ -22,6 +22,13 @@ VALID_API_SCOPES = frozenset({
     "tasks:read", "tasks:write", "projects:read", "users:read", "time:read", "overview:read",
 })
 
+# Private notes create a history row for staff, but a partner without internal
+# note access must not see that row (or the activity time it carries). Mark the
+# two writers' rows so the external API can hide them from those keys.
+WEB_INTERNAL_NOTE_HISTORY = "Added an internal note"
+API_INTERNAL_NOTE_HISTORY_PREFIX = "api-internal:"
+INTERNAL_NOTE_HISTORY_MARKERS = (WEB_INTERNAL_NOTE_HISTORY, API_INTERNAL_NOTE_HISTORY_PREFIX)
+
 # Ready-made choices for a partner integration. "full" is the legacy behaviour.
 API_SCOPE_PRESETS: dict[str, Optional[str]] = {
     "full": None,

@@ -36,6 +36,8 @@ from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.api_scopes import (
+    API_INTERNAL_NOTE_HISTORY_PREFIX,
+    INTERNAL_NOTE_HISTORY_MARKERS,
     can_access_internal_comments,
     configured_values,
     has_ticket_filter,
@@ -286,6 +288,15 @@ def _comment_item(c: TicketComment, users: dict, customer: Optional[str]) -> dic
 # Tickets
 # ---------------------------------------------------------------------------
 
+def _visible_history_filter():
+    """History rows a key without private-note access is allowed to see."""
+    return or_(
+        TicketHistory.new_value.is_(None),
+        ~or_(*(TicketHistory.new_value.startswith(marker)
+               for marker in INTERNAL_NOTE_HISTORY_MARKERS)),
+    )
+
+
 async def _ticket_context(db: AsyncSession, workspace, tickets: list, include: set,
                           include_internal: bool, allow_internal: bool = True) -> dict:
     """Everything the ticket fields need, fetched once for a whole page."""
@@ -315,9 +326,11 @@ async def _ticket_context(db: AsyncSession, workspace, tickets: list, include: s
         last_comments.group_by(TicketComment.ticket_id)
     )).all():
         ctx["last_comment"][ticket_id] = last
+    history_query = select(TicketHistory).where(TicketHistory.ticket_id.in_(ids))
+    if not allow_internal:
+        history_query = history_query.where(_visible_history_filter())
     for h in (await db.execute(
-        select(TicketHistory).where(TicketHistory.ticket_id.in_(ids))
-        .order_by(TicketHistory.created_at.asc(), TicketHistory.id.asc())
+        history_query.order_by(TicketHistory.created_at.asc(), TicketHistory.id.asc())
     )).scalars().all():
         ctx["history"].setdefault(h.ticket_id, []).append(h)
     for e in (await db.execute(
@@ -493,14 +506,17 @@ def _changed_since(since: datetime, allow_internal: bool = True):
     """A ticket with any activity since: an edit, a comment, a history entry
     (status, reassignment, priority), or a timer started or stopped. Internal
     notes only count as activity for keys allowed to read them."""
-    comment_changed = TicketComment.ticket_id == Ticket.id, TicketComment.created_at >= since
+    comment_changed = [TicketComment.ticket_id == Ticket.id, TicketComment.created_at >= since]
     if not allow_internal:
-        comment_changed += (TicketComment.is_internal == False,)  # noqa: E712
+        comment_changed.append(TicketComment.is_internal == False)  # noqa: E712
+    history_changed = [TicketHistory.ticket_id == Ticket.id, TicketHistory.created_at >= since]
+    if not allow_internal:
+        history_changed.append(_visible_history_filter())
     return or_(
         Ticket.updated_at >= since, Ticket.created_at >= since,
         Ticket.closed_at >= since, Ticket.resolved_at >= since,
         exists().where(*comment_changed),
-        exists().where(TicketHistory.ticket_id == Ticket.id, TicketHistory.created_at >= since),
+        exists().where(*history_changed),
         exists().where(TicketTimeEntry.ticket_id == Ticket.id,
                        or_(TicketTimeEntry.started_at >= since, TicketTimeEntry.ended_at >= since)),
     )
@@ -856,9 +872,13 @@ async def create_ticket_comment(
     )
     db.add(comment)
     await db.flush()
+    history_value = (f"{API_INTERNAL_NOTE_HISTORY_PREFIX}{api_key.name}"
+                     if payload.is_internal else f"api:{api_key.name}")
     db.add(TicketHistory(ticket_id=ticket.id, action="commented",
-                         new_value=f"api:{api_key.name}", created_at=now))
-    ticket.updated_at = now
+                         new_value=history_value, created_at=now))
+    # A private note must not move the public activity clock for another key.
+    if not payload.is_internal:
+        ticket.updated_at = now
     await db.commit()
     await db.refresh(comment)
 

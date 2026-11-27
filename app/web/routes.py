@@ -35,7 +35,7 @@ from sqlalchemy import select, or_, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
-from app.core.api_scopes import VALID_API_SCOPES
+from app.core.api_scopes import VALID_API_SCOPES, WEB_INTERNAL_NOTE_HISTORY
 from app.core.api_webhooks import (
     VALID_WEBHOOK_EVENTS, dispatch_ticket_webhook, validate_webhook_url,
 )
@@ -16466,16 +16466,21 @@ Thank you.
             attachment_count += 1
             write_log(f"✓ Attachment saved: {name} ({len(file_content)} bytes)")
     
-    # Update ticket timestamp
+    # A private note must not move the public activity clock that partner keys
+    # read. Staff still get a history row, marked so the external API can hide
+    # it from keys that may not read internal comments.
     from datetime import datetime
-    ticket.updated_at = datetime.utcnow()
-    
-    # Add history
+    if not is_internal:
+        ticket.updated_at = datetime.utcnow()
+
+    history_value = (
+        WEB_INTERNAL_NOTE_HISTORY if is_internal else 'Added a comment'
+    ) + (f' with {attachment_count} attachment(s)' if attachment_count > 0 else '')
     history = TicketHistory(
         ticket_id=ticket_id,
         user_id=user_id,
         action='commented',
-        new_value=f'Added a comment' + (f' with {attachment_count} attachment(s)' if attachment_count > 0 else '')
+        new_value=history_value
     )
     db.add(history)
     
