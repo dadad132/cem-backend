@@ -1,0 +1,29 @@
+{# One public update on the tracking page. show_full swaps in the whole message. #}
+{% set text = comment.content|tidy_text %}
+{% set db_truncated = not show_full and (comment.is_truncated_in_db|default(False, true)) %}
+{% set clipped = not show_full and (db_truncated or text|length > comment_clip_chars) %}
+{% set collapsible = show_full and (comment.content|length > comment_clip_chars or text|length > comment_clip_chars) %}
+<div class="tk-comment border-l-4 border-blue-500 pl-4 py-2 bg-slate-50 rounded-r-lg">
+    <div class="flex justify-between items-start mb-2">
+        <span class="font-medium text-gray-900">
+            {% if user %}{{ user.shown_name or user.username }} (Support Team){% else %}System{% endif %}
+        </span>
+        <span class="text-sm text-slate-500">
+            {{ comment.created_at | localtime(comment_time_fmt if comment_time_fmt else '%b %d, %Y %I:%M %p') }}
+        </span>
+    </div>
+    <div class="text-slate-700 whitespace-pre-wrap break-words">{{ (text[:comment_clip_chars] if clipped else text)|linkify }}{% if clipped %}…{% endif %}</div>
+    {% if clipped %}
+    <button type="button" class="tk-load-more mt-2"
+            hx-get="/web/tickets/track/{{ ticket.ticket_number }}/comments/{{ comment.id }}/full"
+            hx-target="closest .tk-comment" hx-swap="outerHTML" hx-disabled-elt="this">
+        <i class="fas fa-chevron-down mr-1"></i>Show the full message
+    </button>
+    {% elif collapsible %}
+    <button type="button" class="tk-load-more mt-2"
+            hx-get="/web/tickets/track/{{ ticket.ticket_number }}/comments/{{ comment.id }}/summary"
+            hx-target="closest .tk-comment" hx-swap="outerHTML" hx-disabled-elt="this">
+        <i class="fas fa-chevron-up mr-1"></i>Show less
+    </button>
+    {% endif %}
+</div>

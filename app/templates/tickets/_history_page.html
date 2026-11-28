@@ -1,7 +1,7 @@
 {# A page of history entries, newest first, then a button for older ones.
    Used by the ticket page and by "Show older history". #}
 {% for entry in history %}
-<div class="flex gap-3 text-sm">
+<div class="tk-history-row flex gap-3 text-sm">
     <div class="text-gray-500">
         {{ entry.created_at | localtime('%b %d, %I:%M %p') }}
     </div>

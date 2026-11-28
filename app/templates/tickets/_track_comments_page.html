@@ -1,0 +1,13 @@
+{# A bounded page of public updates, newest first, then a button for older ones. #}
+{% for item in comments %}
+{% set comment = item.comment %}
+{% set user = item.user %}
+{% include 'tickets/_track_comment.html' %}
+{% endfor %}
+{% if older_comments %}
+<button type="button" class="tk-load-more tk-load-more-block"
+        hx-get="/web/tickets/track/{{ ticket.ticket_number }}/comments/older?before={{ (comments|last).comment.id }}"
+        hx-target="this" hx-swap="outerHTML" hx-disabled-elt="this">
+    <i class="fas fa-chevron-down mr-1"></i>Show older updates ({{ older_comments }})
+</button>
+{% endif %}

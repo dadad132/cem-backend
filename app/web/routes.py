@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request, File, Uplo
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, or_, and_, func
+from sqlalchemy.orm import defer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
@@ -287,17 +288,34 @@ templates.env.filters['tidy_text'] = lambda text: _tidy_email_text(text) or ''
 
 # Long-running tickets: the page shows the newest comments and history, and
 # the rest load when asked for. Longer comments (often whole HTML e-mails)
-# show their start, with "Show the full message".
-TICKET_COMMENTS_SHOWN = 30
+# show their start, with "Show the full message". The SQL projection fetches
+# extra characters so tidy_text can collapse whitespace before the clip.
+TICKET_COMMENTS_SHOWN = 15
 TICKET_HISTORY_SHOWN = 20
 TICKET_ATTACHMENTS_SHOWN = 12
 TICKET_DESCRIPTION_CLIP_CHARS = 3000
+ARCHIVED_TICKETS_PER_PAGE = 50
+_COMMENT_CLIP_CHARS = 1500
+_COMMENT_FETCH_CHARS = _COMMENT_CLIP_CHARS + 1500
+
+
+class TicketCommentPreview(NamedTuple):
+    """Only the comment fields a preview needs; never a whole e-mail body."""
+    id: int
+    ticket_id: int
+    user_id: Optional[int]
+    is_internal: bool
+    created_at: datetime
+    content: str
+    is_truncated_in_db: bool
+
+
 # Pillow decoding is memory-heavy: wait in the event loop (not in a worker)
 # so at most two thumbnails are generated at once without starving the shared
 # thread pool used by backups and mail. One semaphore per running loop keeps
 # pytest's sequential event loops independent.
 _THUMBNAIL_SEMAPHORES = weakref.WeakKeyDictionary()
-templates.env.globals['comment_clip_chars'] = 5000
+templates.env.globals['comment_clip_chars'] = _COMMENT_CLIP_CHARS
 
 
 def _thumbnail_semaphore() -> asyncio.Semaphore:
@@ -12211,7 +12229,7 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
     search_query = request.query_params.get('search', '').strip()
     
     # Base query - exclude closed and resolved (those go to archived tab)
-    query = select(Ticket).where(
+    query = select(Ticket).options(defer(Ticket.description)).where(
         Ticket.workspace_id == user.workspace_id,
         Ticket.status.notin_(['closed', 'resolved']),
         Ticket.is_archived == False,
@@ -12338,7 +12356,23 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
         # that ticket to the bottom of its Board column and the List view.
         query = query.order_by(activity_ts.asc(), Ticket.id.asc())
     tickets = (await db.execute(query)).scalars().all()
-    
+
+    # Only the first 200 characters of each description reach Python. The
+    # full bodies stay in SQLite until someone opens a ticket for editing.
+    description_snippets = {}
+    if tickets:
+        ticket_ids = [ticket.id for ticket in tickets]
+        # Chunk the IN list so SQLite builds with a low parameter limit still
+        # work when a workspace has thousands of tickets.
+        for start in range(0, len(ticket_ids), 500):
+            snippet_rows = (await db.execute(
+                select(Ticket.id, func.substr(Ticket.description, 1, 200))
+                .where(Ticket.id.in_(ticket_ids[start:start + 500]))
+            )).all()
+            description_snippets.update({
+                row[0]: row[1] or '' for row in snippet_rows
+            })
+
     # Get user's projects for filter dropdown
     user_projects = []
     if not user.is_admin and not user.can_see_all_tickets:
@@ -12368,6 +12402,7 @@ async def web_tickets_list(request: Request, db: AsyncSession = Depends(get_sess
         'request': request,
         'user': user,
         'tickets': tickets,
+        'description_snippets': description_snippets,
         'users': users,
         'status_filter': status_filter,
         'priority_filter': priority_filter,
@@ -15304,6 +15339,87 @@ async def web_tickets_track_submit(
     return RedirectResponse(f'/web/tickets/track/{ticket_number}', status_code=303)
 
 
+async def _track_ticket_access(request: Request, db: AsyncSession, ticket_number: str):
+    """The exact access rule shared by the public tracking page and its partials.
+
+    Returns ``(ticket, workspace, denial_response)``; exactly one of ticket and
+    denial_response is None. Staff skip email verification only in their own
+    workspace; everyone else needs the number in ``verified_tickets``.
+    """
+    from app.models.ticket import Ticket
+
+    def deny(message):
+        request.session['error_message'] = message
+        if request.headers.get('HX-Request'):
+            # htmx follows a 303 inside its swap target; tell the browser to
+            # navigate instead of putting the tracking form into a comment.
+            return HTMLResponse('', status_code=204, headers={
+                'HX-Redirect': '/web/tickets/track',
+                'Cache-Control': 'no-store, private',
+            })
+        return RedirectResponse('/web/tickets/track', status_code=303)
+
+    user_id = request.session.get('user_id')
+    verified_tickets = request.session.get('verified_tickets', [])
+    staff_workspace_id = None
+    if user_id:
+        staff = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        # A deactivated account keeps its cookie; it must not keep the staff
+        # shortcut into its old workspace.
+        staff_workspace_id = staff.workspace_id if staff and staff.is_active else None
+
+    if staff_workspace_id is None and ticket_number not in verified_tickets:
+        return None, None, deny('Please verify your email to view this ticket.')
+
+    # The description can be megabytes of HTML mail; the page only needs its start.
+    ticket = (await db.execute(
+        select(Ticket).options(defer(Ticket.description))
+        .where(Ticket.ticket_number == ticket_number)
+    )).scalar_one_or_none()
+
+    if (ticket and staff_workspace_id is not None
+            and ticket.workspace_id != staff_workspace_id
+            and ticket_number not in verified_tickets):
+        return None, None, deny('Please verify your email to view this ticket.')
+    if not ticket:
+        return None, None, deny('Ticket not found.')
+
+    workspace = (await db.execute(
+        select(Workspace).where(Workspace.id == ticket.workspace_id)
+    )).scalar_one_or_none()
+    return ticket, workspace, None
+
+
+async def _ticket_description_preview(
+    db: AsyncSession, ticket_id: int, clip: int = TICKET_DESCRIPTION_CLIP_CHARS
+):
+    """The description start and whether the full body is available on demand.
+
+    A column expression is used instead of loading the ORM object, so even
+    callers with a deferred description pay only for the visible characters.
+    """
+    from app.models.ticket import Ticket
+
+    row = (await db.execute(
+        select(
+            func.substr(Ticket.description, 1, clip).label('snippet'),
+            func.length(Ticket.description).label('raw_length'),
+        ).where(Ticket.id == ticket_id)
+    )).one_or_none()
+    if not row:
+        return '', False
+    return row.snippet or '', (row.raw_length or 0) > clip
+
+
+async def _ticket_description_raw(db: AsyncSession, ticket_id: int):
+    """The whole description, only for explicit full-content requests."""
+    from app.models.ticket import Ticket
+
+    return (await db.execute(
+        select(Ticket.description).where(Ticket.id == ticket_id)
+    )).scalar_one_or_none() or ''
+
+
 @router.get('/tickets/track/{ticket_number}', response_class=HTMLResponse)
 async def web_tickets_track_detail(
     request: Request,
@@ -15311,77 +15427,156 @@ async def web_tickets_track_detail(
     db: AsyncSession = Depends(get_session)
 ):
     """Show ticket tracking details (must have verified via POST first or have session)"""
-    from app.models.ticket import Ticket, TicketComment
-    
-    # Check if user is logged in (staff) or has verified access via email
-    user_id = request.session.get('user_id')
-    verified_tickets = request.session.get('verified_tickets', [])
+    ticket, workspace, denied = await _track_ticket_access(request, db, ticket_number)
+    if denied:
+        return denied
 
-    # Staff skip email verification, but only for their own company's tickets.
-    staff_workspace_id = None
-    if user_id:
-        staff = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-        staff_workspace_id = staff.workspace_id if staff else None
-
-    if staff_workspace_id is None and ticket_number not in verified_tickets:
-        request.session['error_message'] = 'Please verify your email to view this ticket.'
-        return RedirectResponse('/web/tickets/track', status_code=303)
-
-    # Find ticket
-    result = await db.execute(
-        select(Ticket).where(Ticket.ticket_number == ticket_number)
+    # Public view: newest updates first, a bounded page of bounded bodies.
+    comments, older_comments = await _ticket_comments_page(
+        db, ticket.id, TICKET_COMMENTS_SHOWN, public_only=True
     )
-    ticket = result.scalar_one_or_none()
-
-    # A signed-in user from another company gets no shortcut: they must verify
-    # by email like any other guest.
-    if (ticket and staff_workspace_id is not None
-            and ticket.workspace_id != staff_workspace_id
-            and ticket_number not in verified_tickets):
-        request.session['error_message'] = 'Please verify your email to view this ticket.'
-        return RedirectResponse('/web/tickets/track', status_code=303)
-    
-    if not ticket:
-        request.session['error_message'] = 'Ticket not found.'
-        return RedirectResponse('/web/tickets/track', status_code=303)
-    
-    # Get comments (only non-internal ones for public view)
-    comments_result = await db.execute(
-        select(TicketComment)
-        .where(TicketComment.ticket_id == ticket.id)
-        .where(TicketComment.is_internal == False)
-        .order_by(TicketComment.created_at.asc())
-    )
-    comments = comments_result.scalars().all()
-    
-    # Load user info for comments in a single batch query (avoid N+1)
-    user_ids = list(set(c.user_id for c in comments if c.user_id))
-    users_map = {}
-    if user_ids:
-        users_result = await db.execute(select(User).where(User.id.in_(user_ids)))
-        for u in users_result.scalars().all():
-            users_map[u.id] = u
-    
-    comments_with_users = []
-    for comment in comments:
-        comments_with_users.append({
-            'comment': comment,
-            'user': users_map.get(comment.user_id) if comment.user_id else None
-        })
-
-    workspace = (await db.execute(
-        select(Workspace).where(Workspace.id == ticket.workspace_id)
-    )).scalar_one_or_none()
-
+    authors = await _comment_authors(db, comments)
+    comments_with_users = [{
+        'comment': comment,
+        'user': authors.get(comment.user_id) if comment.user_id else None,
+    } for comment in comments]
+    description, description_truncated = await _ticket_description_preview(db, ticket.id)
     comment_time_fmt = _comment_time_format(workspace)
 
     return templates.TemplateResponse('tickets/track_detail.html', {
         'request': request,
         'ticket': ticket,
         'comments': comments_with_users,
+        'older_comments': older_comments,
+        'description': description,
+        'description_truncated': description_truncated,
         'workspace': workspace,
         'comment_time_fmt': comment_time_fmt,
-    })
+    }, headers={'Cache-Control': 'no-store, private'})
+
+
+@router.get('/tickets/track/{ticket_number}/comments/older', response_class=HTMLResponse)
+async def web_tickets_track_comments_older(
+    request: Request, ticket_number: str, before: int,
+    db: AsyncSession = Depends(get_session),
+):
+    """The next page of public updates for the tracking page."""
+    ticket, workspace, denied = await _track_ticket_access(request, db, ticket_number)
+    if denied:
+        return denied
+    anchor = await _ticket_comment_anchor(db, ticket.id, before, public_only=True)
+    if not anchor:
+        return HTMLResponse('', status_code=404)
+
+    comments, older_comments = await _ticket_comments_page(
+        db, ticket.id, TICKET_COMMENTS_SHOWN, before=anchor, public_only=True
+    )
+    authors = await _comment_authors(db, comments)
+    return templates.TemplateResponse('tickets/_track_comments_page.html', {
+        'request': request,
+        'ticket': ticket,
+        'comments': [{
+            'comment': comment,
+            'user': authors.get(comment.user_id) if comment.user_id else None,
+        } for comment in comments],
+        'older_comments': older_comments,
+        'workspace': workspace,
+        'comment_time_fmt': _comment_time_format(workspace),
+    }, headers={'Cache-Control': 'no-store, private'})
+
+
+@router.get('/tickets/track/{ticket_number}/comments/{comment_id}/full', response_class=HTMLResponse)
+async def web_tickets_track_comment_full(
+    request: Request, ticket_number: str, comment_id: int,
+    db: AsyncSession = Depends(get_session),
+):
+    """One full public update, loaded only when the customer asks for it."""
+    from app.models.ticket import TicketComment
+
+    ticket, workspace, denied = await _track_ticket_access(request, db, ticket_number)
+    if denied:
+        return denied
+    comment = (await db.execute(
+        select(TicketComment).where(
+            TicketComment.id == comment_id,
+            TicketComment.ticket_id == ticket.id,
+            TicketComment.is_internal == False,
+        )
+    )).scalar_one_or_none()
+    if not comment:
+        return HTMLResponse('', status_code=404)
+
+    authors = await _comment_authors(db, [comment])
+    return templates.TemplateResponse('tickets/_track_comment.html', {
+        'request': request,
+        'ticket': ticket,
+        'comment': comment,
+        'user': authors.get(comment.user_id) if comment.user_id else None,
+        'show_full': True,
+        'workspace': workspace,
+        'comment_time_fmt': _comment_time_format(workspace),
+    }, headers={'Cache-Control': 'no-store, private'})
+
+
+@router.get('/tickets/track/{ticket_number}/comments/{comment_id}/summary', response_class=HTMLResponse)
+async def web_tickets_track_comment_summary(
+    request: Request, ticket_number: str, comment_id: int,
+    db: AsyncSession = Depends(get_session),
+):
+    """Collapse a full public update back to its bounded preview."""
+    ticket, workspace, denied = await _track_ticket_access(request, db, ticket_number)
+    if denied:
+        return denied
+    comment = await _ticket_comment_preview(db, ticket.id, comment_id, public_only=True)
+    if not comment:
+        return HTMLResponse('', status_code=404)
+
+    authors = await _comment_authors(db, [comment])
+    return templates.TemplateResponse('tickets/_track_comment.html', {
+        'request': request,
+        'ticket': ticket,
+        'comment': comment,
+        'user': authors.get(comment.user_id) if comment.user_id else None,
+        'show_full': False,
+        'workspace': workspace,
+        'comment_time_fmt': _comment_time_format(workspace),
+    }, headers={'Cache-Control': 'no-store, private'})
+
+
+@router.get('/tickets/track/{ticket_number}/description/full', response_class=HTMLResponse)
+async def web_tickets_track_description_full(
+    request: Request, ticket_number: str, db: AsyncSession = Depends(get_session)
+):
+    """The whole description, loaded only by an authorized tracking-page click."""
+    ticket, _workspace, denied = await _track_ticket_access(request, db, ticket_number)
+    if denied:
+        return denied
+    description = await _ticket_description_raw(db, ticket.id)
+    return templates.TemplateResponse('tickets/_track_description.html', {
+        'request': request,
+        'ticket': ticket,
+        'description': description,
+        'description_truncated': len(description) > TICKET_DESCRIPTION_CLIP_CHARS,
+        'show_full': True,
+    }, headers={'Cache-Control': 'no-store, private'})
+
+
+@router.get('/tickets/track/{ticket_number}/description/summary', response_class=HTMLResponse)
+async def web_tickets_track_description_summary(
+    request: Request, ticket_number: str, db: AsyncSession = Depends(get_session)
+):
+    """The clipped description again, for "Show less"."""
+    ticket, _workspace, denied = await _track_ticket_access(request, db, ticket_number)
+    if denied:
+        return denied
+    description, truncated = await _ticket_description_preview(db, ticket.id)
+    return templates.TemplateResponse('tickets/_track_description.html', {
+        'request': request,
+        'ticket': ticket,
+        'description': description,
+        'description_truncated': truncated,
+        'show_full': False,
+    }, headers={'Cache-Control': 'no-store, private'})
 
 
 @router.post('/tickets/track/{ticket_number}/reply')
@@ -15495,18 +15690,24 @@ async def web_tickets_archived(request: Request, db: AsyncSession = Depends(get_
     
     from app.models.ticket import Ticket
     
-    # Get search parameter
+    # Get search and page parameters
     search_query = request.query_params.get('search', '').strip()
-    
-    # Get archived tickets + closed/resolved tickets
+    try:
+        page = max(1, int(request.query_params.get('page', '1')))
+    except (TypeError, ValueError):
+        page = 1
+
+    # Get archived tickets + closed/resolved tickets; never hydrate the full
+    # description blob just to render a table row.
     from sqlalchemy import or_
-    query = select(Ticket).where(
+    conditions = [
         Ticket.workspace_id == user.workspace_id,
         or_(
             Ticket.is_archived == True,
             Ticket.status.in_(['closed', 'resolved'])
-        )
-    )
+        ),
+    ]
+    query = select(Ticket).options(defer(Ticket.description)).where(*conditions)
     
     # Search filter
     if search_query:
@@ -15520,27 +15721,39 @@ async def web_tickets_archived(request: Request, db: AsyncSession = Depends(get_
             TicketComment.content.ilike(search_pattern)
         )
         
-        query = query.where(
-            or_(
-                Ticket.ticket_number.ilike(search_pattern),
-                Ticket.subject.ilike(search_pattern),
-                Ticket.description.ilike(search_pattern),
-                Ticket.guest_email.ilike(search_pattern),
-                Ticket.guest_name.ilike(search_pattern),
-                Ticket.guest_surname.ilike(search_pattern),
-                Ticket.guest_company.ilike(search_pattern),
-                comment_match
-            )
-        )
-    
-    query = query.order_by(Ticket.archived_at.desc())
+        conditions.append(or_(
+            Ticket.ticket_number.ilike(search_pattern),
+            Ticket.subject.ilike(search_pattern),
+            Ticket.description.ilike(search_pattern),
+            Ticket.guest_email.ilike(search_pattern),
+            Ticket.guest_name.ilike(search_pattern),
+            Ticket.guest_surname.ilike(search_pattern),
+            Ticket.guest_company.ilike(search_pattern),
+            comment_match
+        ))
+        query = query.where(conditions[-1])
+
+    total_count = (await db.execute(
+        select(func.count()).select_from(Ticket).where(*conditions)
+    )).scalar() or 0
+    total_pages = max(1, (total_count + ARCHIVED_TICKETS_PER_PAGE - 1) // ARCHIVED_TICKETS_PER_PAGE)
+    page = min(page, total_pages)
+    query = (
+        query.order_by(Ticket.archived_at.desc(), Ticket.id.desc())
+        .limit(ARCHIVED_TICKETS_PER_PAGE)
+        .offset((page - 1) * ARCHIVED_TICKETS_PER_PAGE)
+    )
     tickets = (await db.execute(query)).scalars().all()
-    
+
     return templates.TemplateResponse('tickets/archived.html', {
         'request': request,
         'user': user,
         'tickets': tickets,
-        'search_query': search_query
+        'search_query': search_query,
+        'page': page,
+        'total_pages': total_pages,
+        'total_count': total_count,
+        'per_page': ARCHIVED_TICKETS_PER_PAGE,
     })
 
 
@@ -15703,18 +15916,22 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         request.session.clear()
         return RedirectResponse('/web/login', status_code=303)
     
-    from app.models.ticket import Ticket, TicketComment, TicketAttachment, TicketHistory
-    
+    from app.models.ticket import Ticket, TicketAttachment, TicketHistory
+
     # Get ticket
     ticket = (await db.execute(
-        select(Ticket).where(
+        select(Ticket).options(defer(Ticket.description)).where(
             Ticket.id == ticket_id,
             Ticket.workspace_id == user.workspace_id
         )
     )).scalar_one_or_none()
-    
+
     if not ticket:
         return RedirectResponse('/web/tickets', status_code=303)
+
+    # The visible description and the edit drawer's laziness come from a
+    # bounded SQL projection; the raw body stays in SQLite until asked for.
+    description, description_truncated = await _ticket_description_preview(db, ticket_id)
     
     # Get creator
     creator = (await db.execute(select(User).where(User.id == ticket.created_by_id))).scalar_one_or_none()
@@ -15724,9 +15941,10 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
     if ticket.assigned_to_id:
         assigned_user = (await db.execute(select(User).where(User.id == ticket.assigned_to_id))).scalar_one_or_none()
     
-    # Newest comments only (newest first); "Show older comments" loads the rest
-    comments, older_comments = await _ticket_rows_page(
-        db, TicketComment, ticket_id, TICKET_COMMENTS_SHOWN
+    # Newest comments only (newest first); "Show older comments" loads the rest.
+    # Bodies come from a bounded SQL projection, never from a full ORM row.
+    comments, older_comments = await _ticket_comments_page(
+        db, ticket_id, TICKET_COMMENTS_SHOWN
     )
     comment_count = len(comments) + older_comments
     comment_authors = await _comment_authors(db, comments)
@@ -15799,6 +16017,8 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         'request': request,
         'user': user,
         'ticket': ticket,
+        'description': description,
+        'description_truncated': description_truncated,
         'creator': creator,
         'assigned_user': assigned_user,
         'comments': comments,
@@ -15846,6 +16066,97 @@ async def _ticket_rows_page(db: AsyncSession, model, ticket_id: int, limit: int,
     from sqlalchemy import func
     total = (await db.execute(select(func.count()).select_from(model).where(*conditions))).scalar() or 0
     return rows, total - len(rows)
+
+
+def _comment_preview_columns():
+    """Bounded columns for a comment preview, shared by all ticket page parts."""
+    from app.models.ticket import TicketComment
+
+    return (
+        TicketComment.id,
+        TicketComment.ticket_id,
+        TicketComment.user_id,
+        TicketComment.is_internal,
+        TicketComment.created_at,
+        func.substr(TicketComment.content, 1, _COMMENT_FETCH_CHARS).label('content'),
+        func.length(TicketComment.content).label('raw_length'),
+    )
+
+
+def _comment_preview(row) -> TicketCommentPreview:
+    return TicketCommentPreview(
+        id=row.id,
+        ticket_id=row.ticket_id,
+        user_id=row.user_id,
+        is_internal=bool(row.is_internal),
+        created_at=row.created_at,
+        content=row.content or '',
+        is_truncated_in_db=(row.raw_length or 0) > _COMMENT_FETCH_CHARS,
+    )
+
+
+async def _ticket_comments_page(
+    db: AsyncSession, ticket_id: int, limit: int, before=None, public_only: bool = False
+):
+    """A page of comment previews, newest first, and how many older rows remain.
+
+    Only the first ``_COMMENT_FETCH_CHARS`` characters of each body leave the
+    database, so a multi-megabyte e-mail never lands in Python just to render a
+    short preview. ``public_only`` is used by the customer tracking page.
+    """
+    from app.models.ticket import TicketComment
+
+    conditions = [TicketComment.ticket_id == ticket_id]
+    if public_only:
+        conditions.append(TicketComment.is_internal == False)
+    if before is not None:
+        conditions.append(or_(
+            TicketComment.created_at < before.created_at,
+            and_(
+                TicketComment.created_at == before.created_at,
+                TicketComment.id < before.id,
+            ),
+        ))
+    rows = (await db.execute(
+        select(*_comment_preview_columns())
+        .where(*conditions)
+        .order_by(TicketComment.created_at.desc(), TicketComment.id.desc())
+        .limit(limit)
+    )).all()
+    comments = [_comment_preview(row) for row in rows]
+    if len(comments) < limit:
+        return comments, 0
+    total = (await db.execute(
+        select(func.count()).select_from(TicketComment).where(*conditions)
+    )).scalar() or 0
+    return comments, max(0, total - len(comments))
+
+
+async def _ticket_comment_preview(db: AsyncSession, ticket_id: int, comment_id: int,
+                                  public_only: bool = False):
+    """One bounded comment preview, or None when it is not part of this ticket."""
+    from app.models.ticket import TicketComment
+
+    conditions = [TicketComment.id == comment_id, TicketComment.ticket_id == ticket_id]
+    if public_only:
+        conditions.append(TicketComment.is_internal == False)
+    row = (await db.execute(
+        select(*_comment_preview_columns()).where(*conditions)
+    )).one_or_none()
+    return _comment_preview(row) if row else None
+
+
+async def _ticket_comment_anchor(db: AsyncSession, ticket_id: int, comment_id: int,
+                                 public_only: bool = False):
+    """Just the timestamp/id of a paging anchor, without any comment body."""
+    from app.models.ticket import TicketComment
+
+    conditions = [TicketComment.id == comment_id, TicketComment.ticket_id == ticket_id]
+    if public_only:
+        conditions.append(TicketComment.is_internal == False)
+    return (await db.execute(
+        select(TicketComment.id, TicketComment.created_at).where(*conditions)
+    )).one_or_none()
 
 
 async def _ticket_attachments_page(db: AsyncSession, ticket_id: int, limit: int, before=None):
@@ -15902,7 +16213,9 @@ async def _ticket_part_access(request: Request, db: AsyncSession, ticket_id: int
     if not user or not user.is_active:
         return None, None, None
     ticket = (await db.execute(
-        select(Ticket).where(Ticket.id == ticket_id, Ticket.workspace_id == user.workspace_id)
+        select(Ticket).options(defer(Ticket.description)).where(
+            Ticket.id == ticket_id, Ticket.workspace_id == user.workspace_id
+        )
     )).scalar_one_or_none()
     workspace = (await db.execute(select(Workspace).where(Workspace.id == user.workspace_id))).scalar_one_or_none()
     return user, ticket, workspace
@@ -15923,10 +16236,13 @@ async def web_ticket_description_full(
         return _htmx_login_redirect()
     if not ticket:
         return HTMLResponse('', status_code=404)
+    description = await _ticket_description_raw(db, ticket_id)
     return templates.TemplateResponse('tickets/_description.html', {
         'request': request,
         'workspace': workspace,
         'ticket': ticket,
+        'description': description,
+        'description_truncated': len(description) > TICKET_DESCRIPTION_CLIP_CHARS,
         'show_full': True,
     }, headers={'Cache-Control': 'no-store, private'})
 
@@ -15941,10 +16257,13 @@ async def web_ticket_description_summary(
         return _htmx_login_redirect()
     if not ticket:
         return HTMLResponse('', status_code=404)
+    description, truncated = await _ticket_description_preview(db, ticket_id)
     return templates.TemplateResponse('tickets/_description.html', {
         'request': request,
         'workspace': workspace,
         'ticket': ticket,
+        'description': description,
+        'description_truncated': truncated,
         'show_full': False,
     }, headers={'Cache-Control': 'no-store, private'})
 
@@ -15966,7 +16285,7 @@ async def web_ticket_description_raw(
     if not ticket:
         return JSONResponse({'error': 'Ticket not found'}, status_code=404)
     return JSONResponse(
-        {'description': ticket.description or ''},
+        {'description': await _ticket_description_raw(db, ticket_id)},
         headers={'Cache-Control': 'no-store, private'},
     )
 
@@ -15976,18 +16295,15 @@ async def web_ticket_older_comments(
     request: Request, ticket_id: int, before: int, db: AsyncSession = Depends(get_session)
 ):
     """The next comments for "Show older comments" on the ticket page."""
-    from app.models.ticket import TicketComment
     user, ticket, workspace = await _ticket_part_access(request, db, ticket_id)
     if not user:
         return _htmx_login_redirect()
-    anchor = ticket and (await db.execute(
-        select(TicketComment).where(TicketComment.id == before, TicketComment.ticket_id == ticket_id)
-    )).scalar_one_or_none()
+    anchor = ticket and await _ticket_comment_anchor(db, ticket_id, before)
     if not anchor:
         return HTMLResponse('', status_code=404)
 
-    comments, older_comments = await _ticket_rows_page(
-        db, TicketComment, ticket_id, TICKET_COMMENTS_SHOWN, before=anchor
+    comments, older_comments = await _ticket_comments_page(
+        db, ticket_id, TICKET_COMMENTS_SHOWN, before=anchor
     )
     comment_time_fmt = _comment_time_format(workspace)
     return templates.TemplateResponse('tickets/_comments_page.html', {
@@ -15998,7 +16314,8 @@ async def web_ticket_older_comments(
         'older_comments': older_comments,
         'comment_authors': await _comment_authors(db, comments),
         'comment_time_fmt': comment_time_fmt,
-    })
+        'show_reset': True,
+    }, headers={'Cache-Control': 'no-store, private'})
 
 
 @router.get('/tickets/{ticket_id}/attachments/more', response_class=HTMLResponse)
@@ -16054,7 +16371,56 @@ async def web_ticket_comment_full(
         'show_full': True,
         'comment_authors': await _comment_authors(db, [comment]),
         'comment_time_fmt': comment_time_fmt,
-    })
+    }, headers={'Cache-Control': 'no-store, private'})
+
+
+@router.get('/tickets/{ticket_id}/comments/{comment_id}/summary', response_class=HTMLResponse)
+async def web_ticket_comment_summary(
+    request: Request, ticket_id: int, comment_id: int, db: AsyncSession = Depends(get_session)
+):
+    """Collapse an expanded comment back to its bounded preview."""
+    user, ticket, workspace = await _ticket_part_access(request, db, ticket_id)
+    if not user:
+        return _htmx_login_redirect()
+    comment = ticket and await _ticket_comment_preview(db, ticket_id, comment_id)
+    if not comment:
+        return HTMLResponse('', status_code=404)
+
+    comment_time_fmt = _comment_time_format(workspace)
+    return templates.TemplateResponse('tickets/_comment.html', {
+        'request': request,
+        'workspace': workspace,
+        'comment': comment,
+        'show_full': False,
+        'comment_authors': await _comment_authors(db, [comment]),
+        'comment_time_fmt': comment_time_fmt,
+    }, headers={'Cache-Control': 'no-store, private'})
+
+
+@router.get('/tickets/{ticket_id}/comments/reset', response_class=HTMLResponse)
+async def web_ticket_comments_reset(
+    request: Request, ticket_id: int, db: AsyncSession = Depends(get_session)
+):
+    """Drop all paged-in comments and show the newest page again."""
+    user, ticket, workspace = await _ticket_part_access(request, db, ticket_id)
+    if not user:
+        return _htmx_login_redirect()
+    if not ticket:
+        return HTMLResponse('', status_code=404)
+
+    comments, older_comments = await _ticket_comments_page(
+        db, ticket_id, TICKET_COMMENTS_SHOWN
+    )
+    return templates.TemplateResponse('tickets/_comments_page.html', {
+        'request': request,
+        'workspace': workspace,
+        'ticket': ticket,
+        'comments': comments,
+        'older_comments': older_comments,
+        'comment_authors': await _comment_authors(db, comments),
+        'comment_time_fmt': _comment_time_format(workspace),
+        'show_reset': False,
+    }, headers={'Cache-Control': 'no-store, private'})
 
 
 @router.get('/tickets/{ticket_id}/history/older', response_class=HTMLResponse)

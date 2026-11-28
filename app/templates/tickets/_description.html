@@ -1,8 +1,19 @@
 {# One ticket description, clipped unless show_full. Also swapped by the
    "Show full description"/"Show less" buttons on the ticket page. #}
 {% set show_full = show_full|default(false) %}
-{% set text = ticket.description|tidy_text %}
-{% set clipped = not show_full and text|length > description_clip_chars %}
+{# Callers pass a bounded SQL snippet; direct renders may still pass an ORM row. #}
+{% if description is defined %}
+{% set raw = description %}
+{% else %}
+{% set raw = ticket.description %}
+{% endif %}
+{% set text = raw|tidy_text %}
+{% if description_truncated is defined %}
+{% set truncated = description_truncated %}
+{% else %}
+{% set truncated = raw|length > description_clip_chars %}
+{% endif %}
+{% set clipped = not show_full and (truncated or text|length > description_clip_chars) %}
 <div class="bg-white rounded-lg shadow-sm p-6 overflow-hidden tk-description-box">
     <h2 class="text-lg font-semibold text-gray-900 mb-3">Description</h2>
     <div id="ticket-description" class="text-gray-700 whitespace-pre-wrap break-words overflow-wrap-anywhere" style="word-break: break-word; overflow-wrap: anywhere;">{{ (text[:description_clip_chars] if clipped else text)|linkify }}{% if clipped %}…{% endif %}</div>
@@ -12,7 +23,7 @@
             hx-target="closest .tk-description-box" hx-swap="outerHTML" hx-disabled-elt="this">
         <i class="fas fa-chevron-down mr-1"></i>Show full description
     </button>
-    {% elif show_full and text|length > description_clip_chars %}
+    {% elif show_full and (truncated or text|length > description_clip_chars) %}
     <button type="button" class="tk-load-more mt-2"
             hx-get="/web/tickets/{{ ticket.id }}/description/summary"
             hx-target="closest .tk-description-box" hx-swap="outerHTML" hx-disabled-elt="this">

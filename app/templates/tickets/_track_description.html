@@ -1,0 +1,19 @@
+{# Bounded description on the public tracking page; full text loads on demand. #}
+{% set text = description|tidy_text %}
+{% set clipped = not show_full and (description_truncated or text|length > description_clip_chars) %}
+<div id="track-description" class="text-slate-700 whitespace-pre-wrap break-words">
+    <div>{{ (text[:description_clip_chars] if clipped else text)|linkify }}{% if clipped %}…{% endif %}</div>
+    {% if clipped %}
+    <button type="button" class="tk-load-more mt-2"
+            hx-get="/web/tickets/track/{{ ticket.ticket_number }}/description/full"
+            hx-target="#track-description" hx-swap="outerHTML" hx-disabled-elt="this">
+        <i class="fas fa-chevron-down mr-1"></i>Show full description
+    </button>
+    {% elif show_full and (description|length > description_clip_chars or text|length > description_clip_chars) %}
+    <button type="button" class="tk-load-more mt-2"
+            hx-get="/web/tickets/track/{{ ticket.ticket_number }}/description/summary"
+            hx-target="#track-description" hx-swap="outerHTML" hx-disabled-elt="this">
+        <i class="fas fa-chevron-up mr-1"></i>Show less
+    </button>
+    {% endif %}
+</div>

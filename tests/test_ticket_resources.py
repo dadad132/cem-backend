@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 from PIL import Image
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import SQLModel, select
 
@@ -28,8 +29,13 @@ from app.web.routes import templates
 ROOT = Path(__file__).resolve().parents[1]
 BASE_HTML = (ROOT / 'app/templates/base.html').read_text(encoding='utf-8')
 DETAIL_HTML = (ROOT / 'app/templates/tickets/detail.html').read_text(encoding='utf-8')
+LIST_HTML = (ROOT / 'app/templates/tickets/list.html').read_text(encoding='utf-8')
+COMMENTS_PAGE_HTML = (ROOT / 'app/templates/tickets/_comments_page.html').read_text(encoding='utf-8')
+HISTORY_PAGE_HTML = (ROOT / 'app/templates/tickets/_history_page.html').read_text(encoding='utf-8')
+TRACK_HTML = (ROOT / 'app/templates/tickets/track_detail.html').read_text(encoding='utf-8')
 SW_JS = (ROOT / 'app/static/sw.js').read_text(encoding='utf-8')
 LONG_DESC = 'HEADER ' + 'x' * 3100 + ' https://example.com/end'
+HUGE_TEXT = 'START ' + 'z' * 500_000 + ' https://example.com/end'
 
 
 def _thumbnails():
@@ -1034,6 +1040,579 @@ async def test_detail_page_keeps_short_edit_description_inline(tmp_path):
         modal_html = html[html.index('id="editTicketModal"'):html.index('<!-- Forward Ticket Modal')]
         save = re.search(r'<button type="submit"[^>]*>', modal_html, re.S)
         assert save and 'disabled' not in save.group(0)
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+# --- DB-projected comments, collapse controls, and page reset -----------------
+
+HUGE_COMMENT = 'START ' + 'z' * 500_000 + ' https://example.com/end'
+COMMENT_TIME = datetime(2026, 3, 1, 8, 0)
+
+
+async def _add_comments(db, ticket, count, prefix, *, internal=False, start=COMMENT_TIME):
+    from app.models.ticket import TicketComment
+
+    rows = []
+    for index in range(count):
+        row = TicketComment(
+            ticket_id=ticket.id,
+            user_id=None,
+            content=f'{prefix} {index}',
+            is_internal=internal,
+            created_at=start + timedelta(minutes=index),
+        )
+        db.add(row)
+        rows.append(row)
+    await db.commit()
+    return rows
+
+
+def _query_request(user, query=None):
+    request = _request(user)
+    request.query_params = query or {}
+    return request
+
+
+def _track_request(user=None, ticket_number=None, query=None):
+    request = _request(user)
+    if ticket_number:
+        request.session['verified_tickets'] = [ticket_number]
+    request.query_params = query or {}
+    return request
+
+
+def test_comment_clip_and_page_size_are_bounded():
+    assert routes.TICKET_COMMENTS_SHOWN == 15
+    assert templates.env.globals['comment_clip_chars'] == 1500
+    assert routes._COMMENT_FETCH_CHARS == 3000
+    assert 'content-visibility: auto' in DETAIL_HTML
+    assert 'contain-intrinsic-size: auto 120px' in DETAIL_HTML
+    assert 'tk-history-row' in HISTORY_PAGE_HTML
+    assert 'id="ticket-comments-list"' in DETAIL_HTML
+
+
+@pytest.mark.asyncio
+async def test_comment_preview_slices_huge_content_in_sql(tmp_path):
+    engine, db, _admin, _tech, _outsider, ticket, _other = await _seed(
+        tmp_path / 'projection.db'
+    )
+    try:
+        from app.models.ticket import TicketComment
+
+        huge = TicketComment(
+            ticket_id=ticket.id, content=HUGE_COMMENT, is_internal=False,
+            created_at=COMMENT_TIME + timedelta(days=1),
+        )
+        db.add(huge)
+        await db.commit()
+
+        page, older = await routes._ticket_comments_page(db, ticket.id, 15)
+        assert older == 0
+        assert [row.id for row in page] == [huge.id]
+        preview = page[0]
+        assert preview.ticket_id == ticket.id
+        assert preview.user_id is None
+        assert preview.is_internal is False
+        assert preview.created_at == huge.created_at
+        assert preview.is_truncated_in_db is True
+        assert len(preview.content) <= routes._COMMENT_FETCH_CHARS
+        assert 'https://example.com/end' not in preview.content
+        assert preview.content.startswith('START zzz')
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_comment_full_then_summary_collapses_it_back(tmp_path):
+    engine, db, admin, _tech, _outsider, ticket, _other = await _seed(
+        tmp_path / 'comment-toggle.db'
+    )
+    try:
+        from app.models.ticket import TicketComment
+
+        huge = TicketComment(
+            ticket_id=ticket.id, content=HUGE_COMMENT, is_internal=False,
+            created_at=COMMENT_TIME,
+        )
+        db.add(huge)
+        await db.commit()
+
+        full = await routes.web_ticket_comment_full(
+            _request(admin), ticket.id, huge.id, db=db
+        )
+        html = full.body.decode()
+        assert full.status_code == 200
+        assert 'Show less' in html
+        assert f'/web/tickets/{ticket.id}/comments/{huge.id}/summary' in html
+        assert 'Show the full message' not in html
+        assert '<a href="https://example.com/end"' in html
+
+        summary = await routes.web_ticket_comment_summary(
+            _request(admin), ticket.id, huge.id, db=db
+        )
+        html = summary.body.decode()
+        assert summary.status_code == 200
+        assert summary.headers['Cache-Control'] == 'no-store, private'
+        assert 'Show the full message' in html
+        assert 'Show less' not in html
+        assert 'https://example.com/end' not in html
+        assert len(html) < 20_000, 'a 500 KB e-mail must not ship in the summary'
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reset_restores_newest_comments_and_stays_workspace_scoped(tmp_path):
+    engine, db, admin, _tech, outsider, ticket, other_ticket = await _seed(
+        tmp_path / 'comment-reset.db'
+    )
+    try:
+        rows = await _add_comments(db, ticket, 40, 'marker')
+        first = await routes._ticket_comments_page(db, ticket.id, 15)
+        anchor = first[0][-1]
+        older = await routes.web_ticket_older_comments(
+            _request(admin), ticket.id, before=anchor.id, db=db
+        )
+        older_html = older.body.decode()
+        assert f'/web/tickets/{ticket.id}/comments/reset' in older_html
+        assert 'hx-target="#ticket-comments-list"' in older_html
+        assert 'Back to newest comments' in older_html
+        assert 'marker 24' in older_html
+        older_button = re.search(
+            r'<button[^>]*hx-get="[^"]*/comments/older[^"]*"[^>]*>', older_html
+        )
+        assert older_button, 'the older-page control is still present'
+        assert 'hx-target="#ticket-comments-list"' in older_button.group(0), (
+            'replace the whole list so reset controls cannot pile up'
+        )
+
+        reset = await routes.web_ticket_comments_reset(
+            _request(admin), ticket.id, db=db
+        )
+        html = reset.body.decode()
+        assert reset.status_code == 200
+        assert reset.headers['Cache-Control'] == 'no-store, private'
+        assert html.count('tk-comment ') == routes.TICKET_COMMENTS_SHOWN
+        for row in rows[-15:]:
+            assert f'>{row.content}</p>' in html
+        for row in rows[:-15]:
+            assert f'>{row.content}</p>' not in html, 'reset must drop everything paged in'
+        assert f'Show older comments ({40 - routes.TICKET_COMMENTS_SHOWN})' in html
+        assert 'Back to newest comments' not in html
+
+        signed_out = await routes.web_ticket_comments_reset(_request(), ticket.id, db=db)
+        assert signed_out.headers['HX-Redirect'] == '/web/login'
+        for user, ticket_id in ((outsider, ticket.id), (admin, other_ticket.id)):
+            denied = await routes.web_ticket_comments_reset(
+                _request(user), ticket_id, db=db
+            )
+            assert (denied.status_code, denied.body) == (404, b'')
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_track_detail_paginates_and_clips_public_comments(tmp_path):
+    engine, db, admin, _tech, _outsider, ticket, _other = await _seed(
+        tmp_path / 'track-page.db'
+    )
+    try:
+        from app.models.ticket import TicketComment
+
+        ticket.description = HUGE_TEXT
+        await db.commit()
+        public = await _add_comments(db, ticket, 40, 'public')
+        huge = TicketComment(
+            ticket_id=ticket.id, content=HUGE_COMMENT, is_internal=False,
+            created_at=COMMENT_TIME + timedelta(days=1),
+        )
+        internal = TicketComment(
+            ticket_id=ticket.id, content='SECRET INTERNAL NOTE', is_internal=True,
+            created_at=COMMENT_TIME + timedelta(days=1),
+        )
+        db.add_all([huge, internal])
+        await db.commit()
+
+        request = _track_request(admin, ticket.ticket_number)
+        page = await routes.web_tickets_track_detail(
+            request, ticket.ticket_number, db=db
+        )
+        html = page.body.decode()
+        assert page.status_code == 200
+        assert 'htmx.org' in html, 'HTMX powers the older/full partials'
+        assert 'id="track-comments-list"' in html
+        assert 'Show older updates (26)' in html
+        assert 'SECRET INTERNAL NOTE' not in html
+        assert 'https://example.com/end' not in html, 'huge e-mails and descriptions are clipped'
+        assert 'Show full description' in html
+        assert 'Show the full message' in html
+        # The huge public update is newer than all the short ones and takes
+        # one slot on the first page, leaving room for 14 of the short ones.
+        first_page = public[-(routes.TICKET_COMMENTS_SHOWN - 1):]
+        for row in first_page:
+            assert f'>{row.content}</div>' in html
+        for row in public[:-(routes.TICKET_COMMENTS_SHOWN - 1)]:
+            assert f'>{row.content}</div>' not in html
+        assert public[-1].content in html and public[0].content not in html
+
+        preview = (await routes._ticket_comments_page(
+            db, ticket.id, 15, public_only=True
+        ))[0]
+        older = await routes.web_tickets_track_comments_older(
+            _track_request(admin, ticket.ticket_number),
+            ticket.ticket_number, before=preview[-1].id, db=db,
+        )
+        older_html = older.body.decode()
+        assert older.status_code == 200
+        assert older.headers['Cache-Control'] == 'no-store, private'
+        assert 'SECRET INTERNAL NOTE' not in older_html
+        assert 'public 24' in older_html
+        assert 'public 39' not in older_html
+        assert 'Show older updates (11)' in older_html
+
+        full = await routes.web_tickets_track_comment_full(
+            _track_request(admin, ticket.ticket_number),
+            ticket.ticket_number, huge.id, db=db,
+        )
+        full_html = full.body.decode()
+        assert full.status_code == 200
+        assert 'Show less' in full_html
+        assert '<a href="https://example.com/end"' in full_html
+        clipped = await routes.web_tickets_track_comment_summary(
+            _track_request(admin, ticket.ticket_number),
+            ticket.ticket_number, huge.id, db=db,
+        )
+        assert 'Show the full message' in clipped.body.decode()
+        assert 'https://example.com/end' not in clipped.body.decode()
+
+        denied = await routes.web_tickets_track_comment_full(
+            _track_request(admin, ticket.ticket_number),
+            ticket.ticket_number, internal.id, db=db,
+        )
+        assert (denied.status_code, denied.body) == (404, b'')
+
+        description_full = await routes.web_tickets_track_description_full(
+            _track_request(admin, ticket.ticket_number),
+            ticket.ticket_number, db=db,
+        )
+        full_description_html = description_full.body.decode()
+        assert description_full.status_code == 200
+        assert 'Show less' in full_description_html
+        assert 'https://example.com/end' in full_description_html
+        description_summary = await routes.web_tickets_track_description_summary(
+            _track_request(admin, ticket.ticket_number),
+            ticket.ticket_number, db=db,
+        )
+        assert 'Show full description' in description_summary.body.decode()
+        assert 'https://example.com/end' not in description_summary.body.decode()
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_track_partials_use_the_same_access_check_as_the_page(tmp_path):
+    engine, db, admin, _tech, outsider, ticket, other_ticket = await _seed(
+        tmp_path / 'track-access.db'
+    )
+    try:
+        rows = await _add_comments(db, ticket, 2, 'public')
+        preview = (await routes._ticket_comments_page(
+            db, ticket.id, 15, public_only=True
+        ))[0]
+        anchor = preview[-1].id
+        number = ticket.ticket_number
+
+        for user, verified in ((None, None), (outsider, None)):
+            request = _track_request(user, verified)
+            for response in (
+                await routes.web_tickets_track_detail(request, number, db=db),
+                await routes.web_tickets_track_comments_older(
+                    request, number, before=anchor, db=db
+                ),
+                await routes.web_tickets_track_comment_full(
+                    request, number, rows[0].id, db=db
+                ),
+                await routes.web_tickets_track_description_full(
+                    request, number, db=db
+                ),
+            ):
+                assert response.status_code == 303
+                assert response.headers['location'] == '/web/tickets/track'
+
+        # Staff from another company get no shortcut unless email-verified.
+        foreign = _track_request(outsider, None)
+        assert (await routes.web_tickets_track_detail(
+            foreign, number, db=db
+        )).status_code == 303
+        verified_foreign = _track_request(outsider, number)
+        assert (await routes.web_tickets_track_detail(
+            verified_foreign, number, db=db
+        )).status_code == 200
+
+        # Their own workspace is enough for staff, without email verification.
+        local = _track_request(admin, None)
+        assert (await routes.web_tickets_track_detail(
+            local, number, db=db
+        )).status_code == 200
+        assert (await routes.web_tickets_track_comment_full(
+            local, number, rows[0].id, db=db
+        )).status_code == 200
+
+        # A comment from a different ticket never opens this one up.
+        wrong = await routes.web_tickets_track_comment_full(
+            verified_foreign, other_ticket.ticket_number, rows[0].id, db=db
+        )
+        assert (wrong.status_code, wrong.body) == (404, b'')
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_list_defers_description_blobs_and_passes_snippets(tmp_path):
+    huge_description = 'HEADER ' + 'a' * 500_000 + ' https://example.com/end'
+    engine, db, admin, _tech, _outsider, ticket, _other = await _seed(
+        tmp_path / 'list-snippets.db', description=huge_description
+    )
+    try:
+        response = await routes.web_tickets_list(_query_request(admin), db=db)
+        html = response.body.decode()
+        assert response.status_code == 200
+        snippets = response.context['description_snippets']
+        assert len(snippets[ticket.id]) == 200
+        assert snippets[ticket.id] == huge_description[:200]
+        assert 'HEADER ' + 'a' * 193 in html
+        assert 'https://example.com/end' not in html
+        assert 'content-visibility: auto' in LIST_HTML
+        assert 'contain-intrinsic-size: auto 96px' in LIST_HTML
+        assert 'ticket-list-item' in LIST_HTML
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+async def _seed_archived(path, count, prefix='Arch', searchable=False):
+    import app.models  # noqa: F401  (registers every model)
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+    db = AsyncSession(engine, expire_on_commit=False, autoflush=False)
+    acme, other = Workspace(name='Acme'), Workspace(name='Other Co')
+    db.add_all([acme, other])
+    await db.flush()
+    admin = User(username='ada', hashed_password='x', is_admin=True, workspace_id=acme.id)
+    outsider = User(username='olive', hashed_password='x', is_admin=True, workspace_id=other.id)
+    db.add_all([admin, outsider])
+    base = datetime(2026, 4, 1)
+    rows = []
+    for index in range(count):
+        subject = f'{prefix} {index}'
+        row = Ticket(
+            ticket_number=f'TKT-ARCH-{prefix}-{index:05d}', subject=subject,
+            description='long ' * 1000, workspace_id=acme.id,
+            is_archived=True, archived_at=base + timedelta(minutes=index),
+        )
+        db.add(row)
+        rows.append(row)
+    db.add(Ticket(
+        ticket_number='TKT-ARCH-FOREIGN', subject=f'{prefix} foreign',
+        description='secret', workspace_id=other.id, is_archived=True,
+        archived_at=base + timedelta(days=1),
+    ))
+    await db.commit()
+    return engine, db, admin, rows
+
+
+@pytest.mark.asyncio
+async def test_archived_tickets_paginate_fifty_per_page(tmp_path):
+    engine, db, admin, rows = await _seed_archived(tmp_path / 'archived-pages.db', 120)
+    try:
+        assert routes.ARCHIVED_TICKETS_PER_PAGE == 50
+        first = await routes.web_tickets_archived(_query_request(admin), db=db)
+        first_html = first.body.decode()
+        assert first.status_code == 200
+        assert len(re.findall(r'<tr class="hover:bg-gray-50">', first_html)) == 50
+        assert 'Page 1 of 3' in first_html
+        assert '/web/tickets/archived?page=2' in first_html
+        assert rows[-1].subject in first_html
+        assert rows[0].subject not in first_html
+
+        second = await routes.web_tickets_archived(
+            _query_request(admin, {'page': '2'}), db=db
+        )
+        second_html = second.body.decode()
+        assert len(re.findall(r'<tr class="hover:bg-gray-50">', second_html)) == 50
+        assert 'Page 2 of 3' in second_html
+        assert '/web/tickets/archived?page=1' in second_html
+        assert rows[69].subject in second_html
+        assert rows[119].subject not in second_html
+
+        third = await routes.web_tickets_archived(
+            _query_request(admin, {'page': '3'}), db=db
+        )
+        third_html = third.body.decode()
+        assert len(re.findall(r'<tr class="hover:bg-gray-50">', third_html)) == 20
+        assert rows[0].subject in third_html
+        assert '/web/tickets/archived?page=4' not in third_html
+        assert 'foreign' not in first_html + second_html + third_html
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_archived_pagination_preserves_search(tmp_path):
+    engine, db, admin, _rows = await _seed_archived(
+        tmp_path / 'archived-search.db', 120, prefix='Needle'
+    )
+    try:
+        response = await routes.web_tickets_archived(
+            _query_request(admin, {'search': 'Needle', 'page': '2'}), db=db
+        )
+        html = response.body.decode()
+        assert response.status_code == 200
+        assert len(re.findall(r'<tr class="hover:bg-gray-50">', html)) == 50
+        assert 'Page 2 of 3' in html
+        assert '/web/tickets/archived?search=Needle&amp;page=1' in html
+        assert '/web/tickets/archived?search=Needle&amp;page=3' in html
+        assert 'search=Needle&amp;amp;' not in html
+        assert 'search=Needle' in html
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+def test_new_comment_and_track_partials_are_mounted_under_web_prefix():
+    from app.main import app
+
+    paths = {getattr(route, 'path', '') for route in app.routes}
+    for included in app.routes:
+        router = getattr(included, 'original_router', None)
+        if router:
+            paths.update('/web' + getattr(route, 'path', '') for route in router.routes)
+    for path in (
+        '/web/tickets/{ticket_id}/comments/{comment_id}/summary',
+        '/web/tickets/{ticket_id}/comments/reset',
+        '/web/tickets/track/{ticket_number}/comments/older',
+        '/web/tickets/track/{ticket_number}/comments/{comment_id}/full',
+        '/web/tickets/track/{ticket_number}/comments/{comment_id}/summary',
+        '/web/tickets/track/{ticket_number}/description/full',
+    ):
+        assert path in paths, path
+
+
+@pytest.mark.asyncio
+async def test_expired_track_verification_redirects_htmx_partials(tmp_path):
+    engine, db, _admin, _tech, _outsider, ticket, _other = await _seed(
+        tmp_path / 'track-htmx-denial.db'
+    )
+    try:
+        rows = await _add_comments(db, ticket, 1, 'public')
+        request = _track_request()
+        request.headers = {'HX-Request': 'true'}
+        number = ticket.ticket_number
+        for response in (
+            await routes.web_tickets_track_comments_older(
+                request, number, before=rows[0].id, db=db
+            ),
+            await routes.web_tickets_track_comment_full(
+                request, number, rows[0].id, db=db
+            ),
+            await routes.web_tickets_track_comment_summary(
+                request, number, rows[0].id, db=db
+            ),
+            await routes.web_tickets_track_description_full(request, number, db=db),
+            await routes.web_tickets_track_description_summary(request, number, db=db),
+        ):
+            assert response.status_code == 204
+            assert response.headers['HX-Redirect'] == '/web/tickets/track'
+            assert response.headers['Cache-Control'] == 'no-store, private'
+            assert response.body == b'', 'never swap the tracking form into a partial'
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_deactivated_staff_lose_the_tracking_shortcut(tmp_path):
+    engine, db, admin, _tech, _outsider, ticket, _other = await _seed(
+        tmp_path / 'track-inactive.db'
+    )
+    try:
+        admin.is_active = False
+        await db.commit()
+        number = ticket.ticket_number
+        request = _track_request(admin)
+        for response in (
+            await routes.web_tickets_track_detail(request, number, db=db),
+            await routes.web_tickets_track_description_full(request, number, db=db),
+            await routes.web_tickets_track_comment_full(
+                request, number, 1, db=db
+            ),
+        ):
+            assert response.status_code == 303
+            assert response.headers['location'] == '/web/tickets/track'
+    finally:
+        await db.close()
+        await engine.dispose()
+
+
+def test_expanded_comments_stay_collapsible_after_tidy_shrinks_them():
+    # Tidy collapses long blank runs, so the rendered text can be shorter than
+    # the raw body while the DB flag still says this was a huge message.
+    comment = SimpleNamespace(
+        id=1, ticket_id=7, user_id=None, is_internal=False,
+        content='x' * 1400 + '\n' * 3000,
+        created_at=datetime(2026, 3, 1),
+        is_truncated_in_db=True,
+    )
+    html = templates.env.get_template('tickets/_comment.html').render(
+        comment=comment, show_full=True, comment_authors={}, comment_time_fmt=None,
+    )
+    assert 'Show less' in html
+    assert '/web/tickets/7/comments/1/summary' in html
+
+
+@pytest.mark.asyncio
+async def test_staff_detail_previews_the_description_without_hydrating_it(tmp_path):
+    engine, db, admin, _tech, _outsider, ticket, _other = await _seed(
+        tmp_path / 'detail-bounded.db', description=HUGE_TEXT
+    )
+    try:
+        # Build the lightweight requests before expiring the seeded objects.
+        detail_request = _request(admin)
+        summary_request = _request(admin)
+        full_request = _request(admin)
+        ticket_id = ticket.id
+        db.expire_all()
+        detail = await routes.web_tickets_detail(detail_request, ticket_id, db=db)
+        html = detail.body.decode()
+        assert detail.status_code == 200
+        assert detail.context['description'] == HUGE_TEXT[:3000]
+        assert detail.context['description_truncated'] is True
+        assert 'description' in sa_inspect(detail.context['ticket']).unloaded
+        assert 'https://example.com/end' not in html
+        assert 'Show full description' in html
+
+        db.expire_all()
+        summary = await routes.web_ticket_description_summary(
+            summary_request, ticket_id, db=db
+        )
+        assert summary.context['description'] == HUGE_TEXT[:3000]
+        assert 'description' in sa_inspect(summary.context['ticket']).unloaded
+        assert 'https://example.com/end' not in summary.body.decode()
+
+        db.expire_all()
+        full = await routes.web_ticket_description_full(full_request, ticket_id, db=db)
+        assert full.context['description'] == HUGE_TEXT
+        assert 'Show less' in full.body.decode()
     finally:
         await db.close()
         await engine.dispose()

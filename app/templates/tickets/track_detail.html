@@ -5,7 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ticket #{{ ticket.ticket_number }}</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .tk-comment { content-visibility: auto; contain-intrinsic-size: auto 120px; }
+        .tk-load-more { font-size:.875rem; font-weight:600; color:#2563eb; }
+        .tk-load-more:hover { text-decoration:underline; }
+        .tk-load-more:disabled { opacity:.5; cursor:wait; }
+        .tk-load-more-block {
+            display:block; width:100%; padding:.6rem; text-align:center; background:#fff;
+            border:1px dashed #cbd5e1; border-radius:.5rem;
+        }
+    </style>
 </head>
 <body class="bg-gradient-to-br from-slate-50 via-slate-100 to-blue-50 min-h-screen">
     <div class="container mx-auto px-4 py-8">
@@ -108,8 +119,8 @@
         </div>
         {% endif %}
 
-        <!-- Description -->
-        {% if ticket.description %}
+        <!-- Description: only the start ships; the rest loads on request -->
+        {% if description %}
         <div class="bg-white rounded-xl shadow-lg border border-slate-200 p-6 mb-6">
             <h2 class="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
                 <svg class="w-5 h-5 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -117,11 +128,11 @@
                 </svg>
                 Description
             </h2>
-            <div class="text-slate-700 whitespace-pre-wrap">{{ ticket.description|tidy_text }}</div>
+            {% include 'tickets/_track_description.html' %}
         </div>
         {% endif %}
 
-        <!-- Comments -->
+        <!-- Comments: newest bounded page first, older updates load on request -->
         <div class="bg-white rounded-xl shadow-lg border border-slate-200 p-6 mb-6">
             <h2 class="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                 <svg class="w-5 h-5 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -129,37 +140,20 @@
                 </svg>
                 Comments & Updates
             </h2>
-            
-            {% if comments %}
-            <div class="space-y-4">
-                {% for item in comments %}
-                <div class="border-l-4 border-blue-500 pl-4 py-2 bg-slate-50 rounded-r-lg">
-                    <div class="flex justify-between items-start mb-2">
-                        <span class="font-medium text-gray-900">
-                            {% if item.user %}
-                                {{ item.user.shown_name }} (Support Team)
-                            {% else %}
-                                System
-                            {% endif %}
-                        </span>
-                        <span class="text-sm text-slate-500">
-                            {{ item.comment.created_at | localtime(comment_time_fmt if comment_time_fmt else '%b %d, %Y %I:%M %p') }}
-                        </span>
+            <div id="track-comments-list" class="space-y-4">
+                {% if comments %}
+                    {% include 'tickets/_track_comments_page.html' %}
+                {% else %}
+                <div class="text-center py-8">
+                    <div class="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-3">
+                        <svg class="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                        </svg>
                     </div>
-                    <div class="text-slate-700">{{ item.comment.content|tidy_text }}</div>
+                    <p class="text-slate-500">No updates yet</p>
                 </div>
-                {% endfor %}
+                {% endif %}
             </div>
-            {% else %}
-            <div class="text-center py-8">
-                <div class="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-3">
-                    <svg class="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-                    </svg>
-                </div>
-                <p class="text-slate-500">No updates yet</p>
-            </div>
-            {% endif %}
         </div>
 
         <!-- Status Information -->

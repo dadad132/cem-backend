@@ -112,7 +112,14 @@ async def test_pages_cover_every_comment_once_newest_first(tmp_path):
             if not older:
                 break
             before = rows[-1]
-        assert remaining == [46, 16, 0]
+        expected_remaining = []
+        left = 76
+        while True:
+            left = max(0, left - TICKET_COMMENTS_SHOWN)
+            expected_remaining.append(left)
+            if left == 0:
+                break
+        assert remaining == expected_remaining
         assert len({c.id for c in seen}) == len(seen) == 76, 'no comment twice, none missing'
         keys = [(c.created_at, c.id) for c in seen]
         assert keys == sorted(keys, reverse=True)
@@ -130,8 +137,10 @@ async def test_show_older_comments(tmp_path):
         response = await web_ticket_older_comments(_request(admin), ticket.id, before=newest[-1].id, db=db)
         html = response.body.decode()
         shown = re.findall(r'comment (\d+)</p>', html)
-        assert shown == [str(i) for i in range(44, 14, -1)], 'the next 30, newest first'
-        assert 'Show older comments (16)' in html
+        expected = range(75 - TICKET_COMMENTS_SHOWN - 1,
+                         75 - 2 * TICKET_COMMENTS_SHOWN - 1, -1)
+        assert shown == [str(i) for i in expected], 'the next page, newest first'
+        assert f'Show older comments ({76 - 2 * TICKET_COMMENTS_SHOWN})' in html
         assert 'Show the full message' not in html
     finally:
         await db.close()

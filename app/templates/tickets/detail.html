@@ -178,7 +178,7 @@
             {% endif %}
 
             <!-- Description: clipped on load; the full text loads on request -->
-            {% if ticket.description %}
+            {% if description %}
             {% include 'tickets/_description.html' %}
             {% endif %}
 
@@ -224,7 +224,7 @@
             <!-- Comments List (newest first) -->
             <div class="bg-white rounded-lg shadow-sm p-6">
                 <h2 class="text-lg font-semibold text-gray-900 mb-4">Comments</h2>
-                <div class="space-y-4">
+                <div id="ticket-comments-list" class="space-y-4">
                     {% if comments %}
                         {% include 'tickets/_comments_page.html' %}
                     {% else %}
@@ -1091,7 +1091,17 @@ function showCloseStep(step) {
   .tk-tab-active .tk-tab-count { background:var(--ac-12); color:var(--ac); }
   /* Long photo grids: only lay out cards that are near the viewport */
   .tk-attachment-card { content-visibility: auto; contain-intrinsic-size: auto 220px; }
+  /* Hundreds of comments/history lines must not all paint on page load */
+  .tk-comment, .tk-history-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 120px;
+  }
   /* "Show older ..." and "Show the full message": the rest loads when pressed */
+  .tk-back-newest {
+    display:block; margin-bottom:.75rem; padding:.35rem .6rem;
+    background:#f8fafc; border:1px solid #e2e8f0; border-radius:.5rem;
+  }
+
   .tk-load-more { font-size:.875rem; font-weight:600; color:var(--ac); }
   .tk-load-more:hover { text-decoration:underline; }
   .tk-load-more:disabled { opacity:.5; cursor:wait; }
@@ -1509,9 +1519,9 @@ if (location.hash === '#signed') {
           </div>
           <div>
             <label class="et-label" for="etDescription">Description</label>
-            {% set lazy_desc = ticket.description and ticket.description|length > description_clip_chars %}
+            {% set lazy_desc = description_truncated %}
             <textarea class="et-input" id="etDescription" name="description" rows="5"
-                      {% if lazy_desc %}data-lazy-desc-url="/web/tickets/{{ ticket.id }}/description/raw" placeholder="Loading full description..."{% endif %}>{% if not lazy_desc %}{{ ticket.description or '' }}{% endif %}</textarea>
+                      {% if lazy_desc %}data-lazy-desc-url="/web/tickets/{{ ticket.id }}/description/raw" placeholder="Loading full description..."{% endif %}>{% if not lazy_desc %}{{ description or '' }}{% endif %}</textarea>
           </div>
           <div class="grid grid-cols-2" style="column-gap:1rem; row-gap:1rem">
             <div>
