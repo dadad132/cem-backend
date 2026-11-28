@@ -24,6 +24,7 @@ from app.api.routes import users as users_routes
 from app.api.routes import projects as projects_routes
 from app.api.routes import tasks as tasks_routes
 from app.models.user import User
+from app.models.workspace import Workspace
 
 settings = get_settings()
 
@@ -222,6 +223,23 @@ if ProxyHeadersMiddleware is not None:
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_proxies)
 
 
+class CapturePeerMiddleware(BaseHTTPMiddleware):
+    """Preserve the direct peer IP before ProxyHeadersMiddleware rewrites it.
+
+    Subdomain portal host trust must be based on the actual proxy connection,
+    not on X-Forwarded-For content that ProxyHeadersMiddleware may surface as
+    request.client.host.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        request.scope["original_peer"] = request.client.host if request.client else ""
+        return await call_next(request)
+
+
+# Added after ProxyHeadersMiddleware so it runs before it on requests (outermost).
+app.add_middleware(CapturePeerMiddleware)
+
+
 class PrivateUploadCacheMiddleware(BaseHTTPMiddleware):
     """The thumbnail cache lives under /uploads but is never publicly served.
 
@@ -310,6 +328,27 @@ async def index(request: Request, db: AsyncSession = Depends(get_session)):
             return RedirectResponse(safe_landing_page(user.default_landing_page), status_code=303)
     # Get workspace from request state (added by middleware)
     workspace = getattr(request.state, 'workspace', None)
+
+    # Client-company subdomains land directly on the guest ticket form with
+    # company auto-filled, so customers don't see the staff/team landing page.
+    try:
+        from app.core.subdomain_portal import resolve_subdomain_company
+
+        subdomain_portal = await resolve_subdomain_company(
+            request, db, workspace_id=workspace.id if workspace else 1
+        )
+    except Exception:
+        subdomain_portal = {"is_client_subdomain": False, "subdomain": None, "host": "", "company_name": ""}
+    if subdomain_portal.get("is_client_subdomain"):
+        if workspace is None:
+            workspace = (await db.execute(select(Workspace).where(Workspace.id == 1))).scalar_one_or_none()
+        return templates.TemplateResponse("tickets/guest.html", {
+            "request": request,
+            "workspace": workspace,
+            "success": False,
+            "subdomain_portal": subdomain_portal,
+        })
+
     # Render the landing page template
     return templates.TemplateResponse("index.html", {
         "request": request,

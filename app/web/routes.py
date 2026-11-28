@@ -12653,10 +12653,17 @@ async def web_tickets_guest_form(request: Request, db: AsyncSession = Depends(ge
     workspace = getattr(request.state, 'workspace', None)
     if workspace is None:
         workspace = (await db.execute(select(Workspace).where(Workspace.id == 1))).scalar_one_or_none()
+    workspace_id = workspace.id if workspace else 1
+    try:
+        from app.core.subdomain_portal import resolve_subdomain_company
+        subdomain_portal = await resolve_subdomain_company(request, db, workspace_id=workspace_id)
+    except Exception:
+        subdomain_portal = {"is_client_subdomain": False, "subdomain": None, "host": "", "company_name": ""}
     return templates.TemplateResponse('tickets/guest.html', {
         'request': request,
         'success': False,
         'workspace': workspace,
+        'subdomain_portal': subdomain_portal,
     })
 
 
@@ -12676,14 +12683,25 @@ async def web_tickets_guest_submit(
     guest_surname: str = Form(...),
     guest_email: str = Form(...),
     guest_phone: str = Form(...),
-    guest_company: str = Form(...),
+    guest_company: str = Form(""),
     guest_office_number: Optional[str] = Form(None),
     guest_branch: Optional[str] = Form(None),
     subject: str = Form(...),
     description: str = Form(...),
     files: list[UploadFile] = File(default=[]),
     camera_files: list[UploadFile] = File(default=[]),
-    db: AsyncSession = Depends(get_session)
+    db: AsyncSession = Depends(get_session),
+    *,
+    issue_type: Optional[str] = Form(None),
+    it_system: Optional[str] = Form(None),
+    it_device: Optional[str] = Form(None),
+    it_error: Optional[str] = Form(None),
+    it_started: Optional[str] = Form(None),
+    printer_problem: Optional[str] = Form(None),
+    printer_model: Optional[str] = Form(None),
+    printer_serial: Optional[str] = Form(None),
+    printer_location: Optional[str] = Form(None),
+    printer_error_code: Optional[str] = Form(None),
 ):
     """Handle guest ticket submission with optional file attachments and camera photos"""
     from app.models.ticket import Ticket, TicketHistory, TicketAttachment
@@ -12695,12 +12713,137 @@ async def web_tickets_guest_submit(
     import uuid
     import os
     
+    subdomain_portal = {"is_client_subdomain": False, "subdomain": None, "host": "", "company_name": ""}
     try:
         # Combine regular files and camera files
         all_files = list(files) + list(camera_files)
-        
+
         # Use workspace 1 as default for guest tickets
         workspace_id = 1
+        try:
+            from app.core.subdomain_portal import resolve_subdomain_company
+            subdomain_portal = await resolve_subdomain_company(request, db, workspace_id=workspace_id)
+        except Exception:
+            pass
+
+        # Auto-fill company from client subdomain when missing.
+        guest_company = (guest_company or "").strip()
+        if not guest_company and subdomain_portal.get("company_name"):
+            guest_company = subdomain_portal["company_name"]
+        if not guest_company:
+            workspace = getattr(request.state, 'workspace', None)
+            if workspace is None:
+                workspace = (await db.execute(select(Workspace).where(Workspace.id == workspace_id))).scalar_one_or_none()
+            return templates.TemplateResponse('tickets/guest.html', {
+                'request': request,
+                'success': False,
+                'error': 'Company is required.',
+                'workspace': workspace,
+                'subdomain_portal': subdomain_portal,
+            }, status_code=400)
+
+        # Validate issue type. Backward compat: missing/empty is accepted for
+        # programmatic callers; the HTML form marks the select required.
+        IT_SYSTEMS = {
+            "Computer / Laptop",
+            "Email / Outlook",
+            "Internet / Wi-Fi / Network",
+            "Software / Application",
+            "Password / Account Access",
+            "Phone / VoIP",
+            "Other",
+        }
+        PRINTER_PROBLEMS = {
+            "Won't Print / Offline",
+            "Paper Jam",
+            "Toner / Ink Low or Empty",
+            "Scan-to-Email / Scanning",
+            "Print Quality / Lines / Smudges",
+            "Error Code on Screen",
+            "Printer Setup / Driver",
+            "Other",
+        }
+
+        def _form_str(value: Optional[str], limit: int = 500) -> str:
+            if not isinstance(value, str):
+                return ""
+            text = " ".join(value.split())
+            return text[:limit]
+
+        issue_type_norm = _form_str(issue_type, 20).lower()
+        it_system = _form_str(it_system, 120)
+        it_device = _form_str(it_device, 200)
+        it_error = _form_str(it_error, 300)
+        it_started = _form_str(it_started, 200)
+        printer_problem = _form_str(printer_problem, 120)
+        printer_model = _form_str(printer_model, 200)
+        printer_serial = _form_str(printer_serial, 120)
+        printer_location = _form_str(printer_location, 200)
+        printer_error_code = _form_str(printer_error_code, 120)
+        if issue_type_norm and issue_type_norm not in {"it", "printer"}:
+            workspace = getattr(request.state, 'workspace', None)
+            if workspace is None:
+                workspace = (await db.execute(select(Workspace).where(Workspace.id == workspace_id))).scalar_one_or_none()
+            return templates.TemplateResponse('tickets/guest.html', {
+                'request': request,
+                'success': False,
+                'error': 'Invalid issue type. Please choose IT Issue or Printer Issue.',
+                'workspace': workspace,
+                'subdomain_portal': subdomain_portal,
+            }, status_code=400)
+        if it_system and it_system not in IT_SYSTEMS:
+            it_system = "Other"
+        if printer_problem and printer_problem not in PRINTER_PROBLEMS:
+            printer_problem = "Other"
+
+        # Build a clean structured description header when we have template data.
+        structured_fields = {
+            "it_system": it_system,
+            "it_device": it_device,
+            "it_error": it_error,
+            "it_started": it_started,
+            "printer_problem": printer_problem,
+            "printer_model": printer_model,
+            "printer_serial": printer_serial,
+            "printer_location": printer_location,
+            "printer_error_code": printer_error_code,
+        }
+        has_structured = any(structured_fields.values()) or bool(issue_type_norm) or bool(subdomain_portal.get("is_client_subdomain"))
+        description_body = (description or "").strip()
+        if has_structured:
+            header_lines = []
+            if issue_type_norm == "it":
+                header_lines.append("Issue Type: IT Issue")
+            elif issue_type_norm == "printer":
+                header_lines.append("Issue Type: Printer Issue")
+            if issue_type_norm == "it":
+                if structured_fields["it_system"]:
+                    header_lines.append(f"Affected Area: {structured_fields['it_system']}")
+                if structured_fields["it_device"]:
+                    header_lines.append(f"Device / AnyDesk ID: {structured_fields['it_device']}")
+                if structured_fields["it_error"]:
+                    header_lines.append(f"Error Message: {structured_fields['it_error']}")
+                if structured_fields["it_started"]:
+                    header_lines.append(f"When Started / Users Affected: {structured_fields['it_started']}")
+            elif issue_type_norm == "printer":
+                if structured_fields["printer_problem"]:
+                    header_lines.append(f"Printer Problem: {structured_fields['printer_problem']}")
+                if structured_fields["printer_model"]:
+                    header_lines.append(f"Printer Make & Model: {structured_fields['printer_model']}")
+                if structured_fields["printer_serial"]:
+                    header_lines.append(f"Serial Number / Asset Tag: {structured_fields['printer_serial']}")
+                if structured_fields["printer_location"]:
+                    header_lines.append(f"Printer Location / Floor: {structured_fields['printer_location']}")
+                if structured_fields["printer_error_code"]:
+                    header_lines.append(f"Error Code on Screen: {structured_fields['printer_error_code']}")
+            if subdomain_portal.get("is_client_subdomain") and subdomain_portal.get("host"):
+                header_lines.append(f"Portal Subdomain: {subdomain_portal['host']}")
+            if header_lines:
+                description = "\n".join(header_lines) + "\n\n--- Details ---\n" + description_body
+            else:
+                description = description_body
+        else:
+            description = description_body
         
         # Auto-set priority to medium for guest tickets
         priority = 'medium'
@@ -12902,6 +13045,7 @@ async def web_tickets_guest_submit(
             'email_sent': email_sent,
             'file_upload_warning': '; '.join(skipped),
             'workspace': workspace,
+            'subdomain_portal': subdomain_portal,
         })
 
     except Exception as e:
@@ -12911,6 +13055,7 @@ async def web_tickets_guest_submit(
             'success': False,
             'error': 'Failed to create ticket. Please try again or contact support.',
             'workspace': getattr(request.state, 'workspace', None),
+            'subdomain_portal': subdomain_portal,
         })
 
 

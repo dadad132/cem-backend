@@ -3,12 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{{ workspace.site_title if workspace and workspace.site_title else 'Submit a Ticket' }} — Support</title>
+  <title>{{ (subdomain_portal.company_name ~ ' — ' if subdomain_portal and subdomain_portal.is_client_subdomain and subdomain_portal.company_name else '') }}{{ workspace.site_title if workspace and workspace.site_title else 'Support' }} — Log a Ticket</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:ital,wght@0,400;0,700;0,800;1,400&family=Lato:ital,wght@0,400;0,700;1,400&family=Montserrat:ital,wght@0,400;0,700;0,800;1,400&family=Open+Sans:ital,wght@0,400;0,700;0,800;1,400&family=Oswald:wght@400;700&family=Playfair+Display:ital,wght@0,400;0,700;0,800;1,400&family=Poppins:ital,wght@0,400;0,700;0,800;1,400&family=Raleway:ital,wght@0,400;0,700;0,800;1,400&family=Roboto:ital,wght@0,400;0,700;0,900;1,400&display=swap" rel="stylesheet">
   <style>
     {% if workspace and workspace.gui_theme == 'ocean' %}
     :root { --brand: #0284c7; --brand-dark: #0369a1; --brand-xdark: #075985; --brand-light: #e0f2fe; --brand-ring: #7dd3fc; }
@@ -21,21 +18,26 @@
     {% else %}
     :root { --brand: #b91c1c; --brand-dark: #991b1b; --brand-xdark: #7f1d1d; --brand-light: #fee2e2; --brand-ring: #fca5a5; }
     {% endif %}
-    body { background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 60%, var(--brand-light) 100%); }
-    .brand-btn { background: linear-gradient(135deg, var(--brand), var(--brand-dark)); color: #fff; transition: all .2s; }
-    .brand-btn:hover { background: linear-gradient(135deg, var(--brand-dark), var(--brand-xdark)); box-shadow: 0 8px 25px rgba(0,0,0,.2); transform: translateY(-1px); }
-    .brand-icon { background: linear-gradient(135deg, var(--brand), var(--brand-dark)); }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif; background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 55%, var(--brand-light) 140%); color:#0f172a; }
+    .brand-btn { background: linear-gradient(135deg, var(--brand), var(--brand-dark)); color:#fff; transition: all .18s ease; }
+    .brand-btn:hover { filter: brightness(.97); transform: translateY(-1px); box-shadow: 0 10px 24px rgba(15,23,42,.12); }
+    .brand-focus:focus { outline:none; box-shadow: 0 0 0 3px var(--brand-ring); border-color: var(--brand); }
     .brand-text { color: var(--brand); }
     .brand-bg-light { background-color: var(--brand-light); }
-    .brand-focus:focus { outline: none; box-shadow: 0 0 0 3px var(--brand-ring); border-color: var(--brand); }
-    .brand-link { color: var(--brand); }
-    .brand-link:hover { color: var(--brand-dark); text-decoration: underline; }
-    .section-title { border-left: 3px solid var(--brand); padding-left: 0.75rem; }
+    .section-title { border-left: 3px solid var(--brand); padding-left: .75rem; }
+    .surface { background:#fff; border:1px solid #e5e7eb; border-radius: 1rem; box-shadow: 0 1px 2px rgba(15,23,42,.03); }
+    .field { width:100%; padding:.7rem .9rem; border:1px solid #d1d5db; border-radius:.75rem; font-size:.925rem; background:#fff; }
+    .field::placeholder { color:#94a3b8; }
+    .label { display:block; font-size:.875rem; font-weight:600; color:#334155; margin-bottom:.4rem; }
+    .hint { font-size:.75rem; color:#64748b; margin-top:.35rem; }
+    .hidden-panel { display:none; }
   </style>
 </head>
-<body class="min-h-screen py-8 px-4">
+<body class="min-h-screen py-6 px-4 sm:py-8">
+  {% set sp = subdomain_portal if subdomain_portal is defined and subdomain_portal else {'is_client_subdomain': False, 'company_name': '', 'host': ''} %}
+  {% set is_client_portal = sp.is_client_subdomain %}
 
-  {% if workspace and (workspace.logo_url or workspace.guest_portal_company_name or workspace.guest_portal_phone) %}
+  {% if not is_client_portal and workspace and (workspace.logo_url or workspace.guest_portal_company_name or workspace.guest_portal_phone) %}
   {% set s = workspace.guest_portal_styles | fromjson if workspace.guest_portal_styles else {} %}
   {% set hs = s.get('header', {}) %}
   {% set bg_type = hs.get('bgType', 'dots') %}
@@ -56,20 +58,14 @@
   {% else %}
     {% set header_bg = 'background-image: radial-gradient(circle, #e5e7eb 1px, transparent 1px); background-size: 18px 18px; background-color: ' ~ bg_color ~ ';' %}
   {% endif %}
-  <!-- Guest portal branded header -->
   <div class="w-full border-b border-gray-100 shadow-sm mb-6" style="{{ header_bg }}">
-    <!-- Stacked on phones, three across from tablets up -->
     <div class="max-w-6xl mx-auto px-6 grid grid-cols-1 sm:grid-cols-3 gap-3 items-center" style="padding-top:{{ pad_y }}px; padding-bottom:{{ pad_y }}px;">
-      <!-- Left: Send email -->
       <div class="flex items-center justify-center sm:justify-start gap-2">
         {% if workspace.guest_portal_email %}
-        <div class="w-9 h-9 rounded-full border-2 flex items-center justify-center flex-shrink-0" style="border-color: var(--brand); color: var(--brand);">
-          <i class="fas fa-envelope text-sm"></i>
-        </div>
+        <div class="w-9 h-9 rounded-full border-2 flex items-center justify-center flex-shrink-0" style="border-color: var(--brand); color: var(--brand);"><i class="fas fa-envelope text-sm"></i></div>
         <a href="mailto:{{ workspace.guest_portal_email }}" class="text-sm font-semibold text-gray-700 tracking-widest uppercase hover:opacity-70 transition-opacity">Send Email</a>
         {% endif %}
       </div>
-      <!-- Center: Logo + company name -->
       <div class="flex justify-center">
         <div class="flex items-center gap-2">
           {% if workspace.logo_url %}
@@ -77,95 +73,71 @@
           {% endif %}
           {% if workspace.guest_portal_company_name %}
           <div class="flex flex-col leading-tight">
-            <span style="font-size:{{ cs.get('size', 30) }}px; font-weight:{{ '800' if cs.get('bold', True) else '400' }}; color:{{ cs.get('color', '#111827') }}; font-style:{{ 'italic' if cs.get('italic', False) else 'normal' }}; letter-spacing:{{ cs.get('spacing', 0.05) }}em; font-family:{{ cs.get('font', 'inherit') }}; text-transform:{{ cs.get('transform', 'none') }}; text-decoration:{{ cs.get('decoration', 'none') }};{{ ' background:' ~ cs.get('bg') ~ '; padding:0 4px; border-radius:2px;' if cs.get('bg') else '' }}{{ ' text-shadow:2px 2px 4px rgba(0,0,0,0.3);' if cs.get('shadow') else '' }}">{{ workspace.guest_portal_company_name | safe }}</span>
+            <span style="font-size:{{ cs.get('size', 30) }}px; font-weight:{{ '800' if cs.get('bold', True) else '400' }}; color:{{ cs.get('color', '#111827') }}; font-style:{{ 'italic' if cs.get('italic', False) else 'normal' }}; letter-spacing:{{ cs.get('spacing', 0.05) }}em; font-family:{{ cs.get('font', 'inherit') }}; text-transform:{{ cs.get('transform', 'none') }}; text-decoration:{{ cs.get('decoration', 'none') }};">{{ workspace.guest_portal_company_name | safe }}</span>
             {% if workspace.guest_portal_tagline %}
-            <span style="font-size:{{ ts.get('size', 9) }}px; font-weight:{{ '700' if ts.get('bold', False) else '400' }}; color:{{ ts.get('color', '#6b7280') }}; font-style:{{ 'italic' if ts.get('italic', False) else 'normal' }}; letter-spacing:{{ ts.get('spacing', 0.18) }}em; font-family:{{ ts.get('font', 'inherit') }}; text-transform:{{ ts.get('transform', 'uppercase') }}; text-decoration:{{ ts.get('decoration', 'none') }};{{ ' background:' ~ ts.get('bg') ~ '; padding:0 4px; border-radius:2px;' if ts.get('bg') else '' }}{{ ' text-shadow:2px 2px 4px rgba(0,0,0,0.3);' if ts.get('shadow') else '' }}">{{ workspace.guest_portal_tagline | safe }}</span>
+            <span style="font-size:{{ ts.get('size', 9) }}px; font-weight:{{ '700' if ts.get('bold', False) else '400' }}; color:{{ ts.get('color', '#6b7280') }}; font-style:{{ 'italic' if ts.get('italic', False) else 'normal' }}; letter-spacing:{{ ts.get('spacing', 0.18) }}em; font-family:{{ ts.get('font', 'inherit') }}; text-transform:{{ ts.get('transform', 'uppercase') }}; text-decoration:{{ ts.get('decoration', 'none') }};">{{ workspace.guest_portal_tagline | safe }}</span>
             {% endif %}
           </div>
           {% endif %}
         </div>
       </div>
-      <!-- Right: Phone + headset -->
       <div class="flex items-center justify-center sm:justify-end gap-3">
         {% if workspace.guest_portal_phone %}
-        <span style="font-size:{{ ps.get('size', 16) }}px; font-weight:{{ '700' if ps.get('bold', False) else '400' }}; color:{{ ps.get('color', '#374151') }}; font-style:{{ 'italic' if ps.get('italic', False) else 'normal' }}; letter-spacing:{{ ps.get('spacing', 0) }}em; font-family:{{ ps.get('font', 'inherit') }}; text-transform:{{ ps.get('transform', 'none') }}; text-decoration:{{ ps.get('decoration', 'none') }};{{ ' background:' ~ ps.get('bg') ~ '; padding:0 4px; border-radius:2px;' if ps.get('bg') else '' }}{{ ' text-shadow:2px 2px 4px rgba(0,0,0,0.3);' if ps.get('shadow') else '' }}">{{ workspace.guest_portal_phone }}</span>
+        <span style="font-size:{{ ps.get('size', 16) }}px; font-weight:{{ '700' if ps.get('bold', False) else '400' }}; color:{{ ps.get('color', '#374151') }}; font-family:{{ ps.get('font', 'inherit') }};">{{ workspace.guest_portal_phone }}</span>
         {% endif %}
-        <div class="w-9 h-9 rounded-full border-2 flex items-center justify-center flex-shrink-0" style="border-color: var(--brand); color: var(--brand);">
-          <i class="fas fa-headset text-sm"></i>
-        </div>
+        <div class="w-9 h-9 rounded-full border-2 flex items-center justify-center flex-shrink-0" style="border-color: var(--brand); color: var(--brand);"><i class="fas fa-headset text-sm"></i></div>
       </div>
     </div>
   </div>
   {% endif %}
 
-  <!-- Top nav -->
-  <div class="max-w-3xl mx-auto mb-6 flex items-center justify-between">
-    <a href="/" class="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 transition-colors">
-      <i class="fas fa-arrow-left text-xs"></i> Back to Portal
-    </a>
-    <a href="/web/tickets/bubbles"
-       class="flex items-center gap-2 text-sm font-medium brand-text hover:opacity-80 transition-opacity">
-      <span>🫧</span> Chat with Bubbles first
-    </a>
-  </div>
-
   <div class="max-w-3xl mx-auto">
-
-    <!-- Header -->
-    <div class="text-center mb-8">
-      {% if workspace and workspace.logo_url %}
-      <img src="{{ workspace.logo_url }}" alt="Logo" class="h-12 mx-auto mb-3 object-contain">
-      {% else %}
-      <div class="inline-flex items-center justify-center w-14 h-14 rounded-2xl brand-icon shadow-lg mb-3">
-        <i class="fas fa-ticket-alt text-2xl text-white"></i>
-      </div>
-      {% endif %}
-      <h1 class="text-3xl font-bold text-gray-900">
-        {{ workspace.site_title if workspace and workspace.site_title else 'Support Center' }}
-      </h1>
-      <p class="text-gray-500 mt-1">Submit a ticket or track an existing one</p>
-    </div>
-
-    <!-- Tab switcher -->
-    {% if not success %}
-    <div class="flex gap-3 mb-6">
-      <button onclick="showTab('submit')" id="tab-submit"
-              class="flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm brand-btn">
-        <i class="fas fa-plus-circle"></i> Submit a Ticket
-      </button>
-      <button onclick="showTab('track')" id="tab-track"
-              class="flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm bg-white text-gray-600 border border-gray-200 hover:border-gray-400 hover:text-gray-900">
-        <i class="fas fa-search"></i> Track a Ticket
-      </button>
+    {% if not is_client_portal %}
+    <div class="mb-6 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 transition-colors"><i class="fas fa-arrow-left text-xs"></i> Back to Portal</a>
+      <a href="/web/tickets/bubbles" class="flex items-center gap-2 text-sm font-medium brand-text hover:opacity-80 transition-opacity"><span>🫧</span> Chat with Bubbles first</a>
     </div>
     {% endif %}
 
-    <!-- Flash messages -->
+    <div class="text-center mb-8">
+      {% if not is_client_portal and workspace and workspace.logo_url %}
+      <img src="{{ workspace.logo_url }}" alt="Logo" class="h-12 mx-auto mb-3 object-contain">
+      {% else %}
+      <div class="inline-flex items-center justify-center w-14 h-14 rounded-2xl brand-btn shadow-sm mb-3"><i class="fas fa-ticket-alt text-2xl"></i></div>
+      {% endif %}
+      <h1 class="text-3xl font-bold text-gray-900">{{ 'Log a Support Ticket' if is_client_portal else (workspace.site_title if workspace and workspace.site_title else 'Support Center') }}</h1>
+      {% if is_client_portal %}
+      <p class="text-gray-500 mt-2">Submit an IT or Printer support request or track an existing ticket</p>
+      {% if sp.company_name %}
+      <div class="mt-3 inline-flex items-center gap-2 rounded-full bg-white border border-gray-200 px-4 py-1.5 text-sm text-gray-700 shadow-sm">
+        <i class="fas fa-building brand-text"></i><span class="font-semibold">{{ sp.company_name }}</span>
+      </div>
+      {% endif %}
+      {% else %}
+      <p class="text-gray-500 mt-1">Submit a ticket or track an existing one</p>
+      {% endif %}
+    </div>
+
+    {% if not success %}
+    <div class="flex gap-3 mb-6">
+      <button onclick="showTab('submit')" id="tab-submit" class="flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm brand-btn"><i class="fas fa-plus-circle"></i> Submit a Ticket</button>
+      <button onclick="showTab('track')" id="tab-track" class="flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm bg-white text-gray-600 border border-gray-200 hover:border-gray-400 hover:text-gray-900"><i class="fas fa-search"></i> Track a Ticket</button>
+    </div>
+    {% endif %}
+
     {% if success %}
     <div class="bg-green-50 border border-green-200 rounded-2xl p-6 mb-6 flex items-start gap-4">
-      <div class="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center flex-shrink-0">
-        <i class="fas fa-check-circle text-green-600 text-xl"></i>
-      </div>
+      <div class="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center flex-shrink-0"><i class="fas fa-check-circle text-green-600 text-xl"></i></div>
       <div>
         <h3 class="text-lg font-semibold text-green-800 mb-1">Ticket Created!</h3>
         <p class="text-green-700 mb-1">Your ticket number is <strong class="font-mono">{{ ticket_number }}</strong>.</p>
-        <p class="text-green-600 text-sm mb-4">
-          {% if email_sent %}A confirmation email has been sent to <strong>{{ guest_email }}</strong>.{% else %}Our team will review your request shortly.{% endif %}
-        </p>
+        <p class="text-green-600 text-sm mb-4">{% if email_sent %}A confirmation email has been sent to <strong>{{ guest_email }}</strong>.{% else %}Our team will review your request shortly.{% endif %}</p>
         {% if file_upload_warning %}
-        <p class="mb-4 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-sm text-amber-800" role="status">
-          <i class="fas fa-triangle-exclamation mr-1"></i>Some files were not attached: {{ file_upload_warning }}
-        </p>
+        <p class="mb-4 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-sm text-amber-800" role="status"><i class="fas fa-triangle-exclamation mr-1"></i>Some files were not attached: {{ file_upload_warning }}</p>
         {% endif %}
         <div class="flex flex-wrap gap-3">
-          <a href="/web/tickets/track"
-             class="brand-btn px-5 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2">
-            <i class="fas fa-search"></i> Track This Ticket
-          </a>
-          <a href="/"
-             class="px-5 py-2.5 bg-white border border-gray-200 text-gray-700 rounded-xl text-sm font-semibold hover:bg-gray-50 transition flex items-center gap-2">
-            <i class="fas fa-home"></i> Back to Portal
-          </a>
+          <a href="/web/tickets/track" class="brand-btn px-5 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2"><i class="fas fa-search"></i> Track This Ticket</a>
+          <a href="{{ '/' if is_client_portal else '/web/tickets/guest' }}" class="px-5 py-2.5 bg-white border border-gray-200 text-gray-700 rounded-xl text-sm font-semibold hover:bg-gray-50 transition flex items-center gap-2"><i class="fas fa-plus"></i> Log Another Ticket</a>
         </div>
       </div>
     </div>
@@ -182,132 +154,168 @@
     {% endif %}
 
     {% if not success %}
-
-    <!-- Track form -->
     <div id="panel-track" style="display:none">
-      <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 sm:p-8">
+      <div class="surface p-6 sm:p-8">
         <h2 class="text-xl font-semibold text-gray-900 mb-1 section-title">Track Your Ticket</h2>
         <p class="text-gray-500 text-sm mb-6 mt-2">Enter your ticket number and email to check status.</p>
         <form method="post" action="/web/tickets/track" class="space-y-4">
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1.5">Ticket Number <span class="text-red-500">*</span></label>
-            <input type="text" name="ticket_number" required placeholder="TKT-2025-00001"
-                   class="brand-focus w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm">
+            <label class="label">Ticket Number <span class="text-red-500">*</span></label>
+            <input type="text" name="ticket_number" required placeholder="TKT-2025-00001" class="field brand-focus">
           </div>
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1.5">Email Address <span class="text-red-500">*</span></label>
-            <input type="email" name="email" required placeholder="you@company.com"
-                   class="brand-focus w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm">
+            <label class="label">Email Address <span class="text-red-500">*</span></label>
+            <input type="email" name="email" required placeholder="you@company.com" class="field brand-focus">
           </div>
           <div class="flex justify-end pt-2">
-            <button type="submit" class="brand-btn px-8 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-2">
-              <i class="fas fa-search"></i> Track Ticket
-            </button>
+            <button type="submit" class="brand-btn px-8 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-2"><i class="fas fa-search"></i> Track Ticket</button>
           </div>
         </form>
       </div>
     </div>
 
-    <!-- Submit form -->
     <div id="panel-submit">
-      <div class="bg-white rounded-2xl shadow-sm border border-gray-100">
+      <div class="surface">
         <form method="post" action="/web/tickets/guest" autocomplete="off" enctype="multipart/form-data" class="p-6 sm:p-8 space-y-8">
-
-          <!-- Personal Information -->
           <div>
-            <h2 class="text-lg font-semibold text-gray-900 mb-4 section-title">Your Information</h2>
+            <h2 class="text-lg font-semibold text-gray-900 mb-4 section-title">Step 1 — Your Information</h2>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1.5">First Name <span class="text-red-500">*</span></label>
-                <input type="text" name="guest_name" required placeholder="John"
-                       class="brand-focus w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm">
+                <label class="label">First Name <span class="text-red-500">*</span></label>
+                <input type="text" name="guest_name" required placeholder="John" class="field brand-focus">
               </div>
               <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1.5">Last Name <span class="text-red-500">*</span></label>
-                <input type="text" name="guest_surname" required placeholder="Doe"
-                       class="brand-focus w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm">
+                <label class="label">Last Name <span class="text-red-500">*</span></label>
+                <input type="text" name="guest_surname" required placeholder="Doe" class="field brand-focus">
               </div>
               <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1.5">Email Address <span class="text-red-500">*</span></label>
-                <input type="email" name="guest_email" required placeholder="john@company.com"
-                       class="brand-focus w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm">
+                <label class="label">Email Address <span class="text-red-500">*</span></label>
+                <input type="email" name="guest_email" required placeholder="john@company.com" class="field brand-focus">
               </div>
               <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1.5">Phone Number <span class="text-red-500">*</span></label>
-                <input type="tel" name="guest_phone" required placeholder="+27 82 123 4567"
-                       class="brand-focus w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm">
+                <label class="label">Phone Number <span class="text-red-500">*</span></label>
+                <input type="tel" name="guest_phone" required placeholder="+27 82 123 4567" class="field brand-focus">
               </div>
               <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1.5">Company <span class="text-red-500">*</span></label>
-                <input type="text" name="guest_company" required placeholder="Acme Corp"
-                       class="brand-focus w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm">
+                <label class="label">Company <span class="text-red-500">*</span></label>
+                <input type="text" name="guest_company" required placeholder="Acme Corp" value="{{ sp.company_name if sp and sp.company_name else '' }}" class="field brand-focus">
+                {% if is_client_portal and sp.company_name %}
+                <p class="hint"><i class="fas fa-wand-magic-sparkles mr-1"></i>Auto-filled from {{ sp.host }}</p>
+                {% endif %}
               </div>
               <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1.5">Office / Extension</label>
-                <input type="text" name="guest_office_number" placeholder="Ext. 1234"
-                       class="brand-focus w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm">
+                <label class="label">Office / Extension</label>
+                <input type="text" name="guest_office_number" placeholder="Ext. 1234" class="field brand-focus">
               </div>
               <div class="sm:col-span-2">
-                <label class="block text-sm font-medium text-gray-700 mb-1.5">Branch / Location</label>
-                <input type="text" name="guest_branch" placeholder="e.g. Head Office, Cape Town Branch"
-                       class="brand-focus w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm">
+                <label class="label">Branch / Location</label>
+                <input type="text" name="guest_branch" placeholder="e.g. Head Office, Cape Town Branch" class="field brand-focus">
               </div>
             </div>
           </div>
 
-          <!-- Ticket Details -->
           <div>
-            <h2 class="text-lg font-semibold text-gray-900 mb-4 section-title">Issue Details</h2>
+            <h2 class="text-lg font-semibold text-gray-900 mb-4 section-title">Step 2 — Issue Type &amp; Details</h2>
             <div class="space-y-4">
               <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1.5">Subject <span class="text-red-500">*</span></label>
-                <input type="text" name="subject" required placeholder="Brief summary of your issue"
-                       class="brand-focus w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm">
+                <label class="label" for="issue-type-select">Issue Type <span class="text-red-500">*</span></label>
+                <select name="issue_type" id="issue-type-select" required class="field brand-focus">
+                  <option value="">-- Select issue type --</option>
+                  <option value="it">IT Issue (PC, Email, Network, Software, Account)</option>
+                  <option value="printer">Printer Issue (Jam, Toner, Offline, Scan, Error Code)</option>
+                </select>
+                <p class="hint">Choose the issue type to see a clean template for the right details.</p>
+              </div>
+
+              <div id="it-template-fields" class="hidden-panel rounded-xl border border-slate-200 bg-slate-50 p-4 sm:p-5 space-y-4">
+                <div class="flex items-center gap-2 text-sm font-semibold text-slate-700"><i class="fas fa-laptop-code brand-text"></i>IT Issue Template</div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label class="label">Affected System / Area</label>
+                    <select name="it_system" class="field brand-focus">
+                      <option value="">Select an area</option>
+                      <option>Computer / Laptop</option>
+                      <option>Email / Outlook</option>
+                      <option>Internet / Wi-Fi / Network</option>
+                      <option>Software / Application</option>
+                      <option>Password / Account Access</option>
+                      <option>Phone / VoIP</option>
+                      <option>Other</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="label">Computer Name / AnyDesk ID</label>
+                    <input type="text" name="it_device" placeholder="e.g. LAPTOP-01 or AnyDesk 123 456 789" class="field brand-focus">
+                  </div>
+                  <div>
+                    <label class="label">Error Message</label>
+                    <input type="text" name="it_error" placeholder="Exact error message, if any" class="field brand-focus">
+                  </div>
+                  <div>
+                    <label class="label">When did this start / Users affected</label>
+                    <input type="text" name="it_started" placeholder="e.g. Today 09:00, 3 users affected" class="field brand-focus">
+                  </div>
+                </div>
+              </div>
+
+              <div id="printer-template-fields" class="hidden-panel rounded-xl border border-slate-200 bg-slate-50 p-4 sm:p-5 space-y-4">
+                <div class="flex items-center gap-2 text-sm font-semibold text-slate-700"><i class="fas fa-print brand-text"></i>Printer Issue Template</div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label class="label">Printer Problem</label>
+                    <select name="printer_problem" class="field brand-focus">
+                      <option value="">Select a problem</option>
+                      <option>Won't Print / Offline</option>
+                      <option>Paper Jam</option>
+                      <option>Toner / Ink Low or Empty</option>
+                      <option>Scan-to-Email / Scanning</option>
+                      <option>Print Quality / Lines / Smudges</option>
+                      <option>Error Code on Screen</option>
+                      <option>Printer Setup / Driver</option>
+                      <option>Other</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="label">Printer Make &amp; Model</label>
+                    <input type="text" name="printer_model" placeholder="e.g. HP LaserJet Pro M404dn" class="field brand-focus">
+                  </div>
+                  <div>
+                    <label class="label">Serial Number / Asset Tag</label>
+                    <input type="text" name="printer_serial" placeholder="Serial or asset tag" class="field brand-focus">
+                  </div>
+                  <div>
+                    <label class="label">Printer Location / Floor</label>
+                    <input type="text" name="printer_location" placeholder="e.g. 2nd Floor, Reception" class="field brand-focus">
+                  </div>
+                  <div class="sm:col-span-2">
+                    <label class="label">Error Code on Screen</label>
+                    <input type="text" name="printer_error_code" placeholder="e.g. 13.B9.A" class="field brand-focus">
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label class="label">Subject <span class="text-red-500">*</span></label>
+                <input type="text" name="subject" required placeholder="Brief summary of your issue" class="field brand-focus">
               </div>
               <div>
-                <div class="flex items-center justify-between mb-1.5">
-                  <label class="block text-sm font-medium text-gray-700">Description <span class="text-red-500">*</span></label>
-                  <button type="button" onclick="fillTemplate()"
-                          class="text-xs brand-text hover:opacity-80 font-medium flex items-center gap-1">
-                    <i class="fas fa-magic"></i> Use template
-                  </button>
+                <div class="flex items-center justify-between mb-1.5 gap-3">
+                  <label class="label mb-0">Description <span class="text-red-500">*</span></label>
+                  <button type="button" onclick="fillTemplate()" class="text-xs brand-text hover:opacity-80 font-medium flex items-center gap-1 whitespace-nowrap"><i class="fas fa-magic"></i> Fill issue template</button>
                 </div>
-                <textarea name="description" required rows="7" id="desc-field"
-                          class="brand-focus w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm resize-y"
-                          placeholder="Please describe your issue in detail — what happened, any error messages, and when it started."></textarea>
+                <textarea name="description" required rows="8" id="desc-field" class="field brand-focus resize-y" placeholder="Please describe your issue in detail — what happened, any error messages, and when it started."></textarea>
               </div>
             </div>
           </div>
 
-          <!-- Attachments -->
           <div>
-            <h2 class="text-lg font-semibold text-gray-900 mb-4 section-title">Attachments <span class="text-gray-400 font-normal text-sm ml-1">(optional)</span></h2>
+            <h2 class="text-lg font-semibold text-gray-900 mb-4 section-title">Step 3 — Attachments <span class="text-gray-400 font-normal text-sm ml-1">(optional)</span></h2>
             <div class="brand-bg-light rounded-xl p-4 mb-4">
-              <p class="text-sm font-medium brand-text mb-3 flex items-center gap-2">
-                <i class="fas fa-lightbulb"></i>
-                A screenshot really helps us understand your issue faster!
-              </p>
-              <div class="flex flex-wrap gap-4 text-sm text-gray-600">
-                <button type="button" onclick="toggle('desktop-tips')" class="flex items-center gap-1.5 hover:text-gray-900 transition-colors">
-                  <i class="fas fa-desktop text-xs"></i> Computer tips
-                  <i class="fas fa-chevron-down text-xs" id="desktop-chev"></i>
-                </button>
-                <button type="button" onclick="toggle('mobile-tips')" class="flex items-center gap-1.5 hover:text-gray-900 transition-colors">
-                  <i class="fas fa-mobile-alt text-xs"></i> Phone tips
-                  <i class="fas fa-chevron-down text-xs" id="mobile-chev"></i>
-                </button>
-              </div>
-              <div id="desktop-tips" class="hidden mt-3 text-sm text-gray-600 space-y-1 pl-4 border-l-2 border-gray-200">
-                <p><strong>Windows:</strong> <kbd class="bg-white px-1.5 py-0.5 rounded text-xs border">Win</kbd>+<kbd class="bg-white px-1.5 py-0.5 rounded text-xs border">Shift</kbd>+<kbd class="bg-white px-1.5 py-0.5 rounded text-xs border">S</kbd> then paste</p>
-                <p><strong>Mac:</strong> <kbd class="bg-white px-1.5 py-0.5 rounded text-xs border">⌘</kbd>+<kbd class="bg-white px-1.5 py-0.5 rounded text-xs border">Shift</kbd>+<kbd class="bg-white px-1.5 py-0.5 rounded text-xs border">4</kbd></p>
-              </div>
-              <div id="mobile-tips" class="hidden mt-3 text-sm text-gray-600 space-y-1 pl-4 border-l-2 border-gray-200">
-                <p><strong>iPhone:</strong> Side button + Volume Up together</p>
-                <p><strong>Android:</strong> Power + Volume Down together</p>
-              </div>
+              <p class="text-sm font-medium brand-text mb-1 flex items-center gap-2"><i class="fas fa-lightbulb"></i>A screenshot or photo helps us resolve the issue faster.</p>
+              <p class="text-xs text-slate-600">Any file type up to 10 MB each. Active or unknown types are stored as safe downloads.</p>
             </div>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-              <label class="border-2 border-dashed border-gray-200 rounded-xl p-4 cursor-pointer hover:border-gray-400 transition-colors flex flex-col items-center gap-2 text-center">
+              <label class="border-2 border-dashed border-gray-200 rounded-xl p-4 cursor-pointer hover:border-gray-400 transition-colors flex flex-col items-center gap-2 text-center bg-white">
                 <i class="fas fa-file-upload text-2xl text-gray-400"></i>
                 <span class="text-sm font-medium text-gray-700">Upload Files</span>
                 <span class="text-xs text-gray-400">Any file type up to 10 MB</span>
@@ -324,50 +332,57 @@
               <p class="font-medium text-gray-700 mb-1.5"><i class="fas fa-check-circle text-green-500 mr-1"></i>Selected files:</p>
               <ul id="file-list" class="space-y-1"></ul>
             </div>
-            <p class="text-xs text-gray-400"><i class="fas fa-info-circle mr-1"></i>Any file type up to 10 MB each. Active or unknown types are stored as safe downloads.</p>
           </div>
 
-          <!-- Submit -->
-          <div class="flex justify-end pt-4 border-t border-gray-100">
-            <button type="submit" class="brand-btn px-10 py-3 rounded-xl font-semibold text-base flex items-center gap-2">
-              <i class="fas fa-paper-plane"></i> Submit Ticket
-            </button>
+          <div class="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 pt-4 border-t border-gray-100">
+            <button type="submit" class="brand-btn px-10 py-3 rounded-xl font-semibold text-base flex items-center justify-center gap-2"><i class="fas fa-paper-plane"></i> Submit Ticket</button>
           </div>
-
         </form>
       </div>
     </div>
     {% endif %}
 
-    <p class="text-center text-xs text-gray-400 mt-6">
-      <i class="fas fa-lock mr-1"></i>Your information is secure and used only for support purposes.
-    </p>
+    <p class="text-center text-xs text-gray-400 mt-6"><i class="fas fa-lock mr-1"></i>Your information is secure and used only for support purposes.</p>
   </div>
 
   <script>
     function showTab(t) {
-      const active = 'brand-btn flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm';
+      const active = 'flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm brand-btn';
       const inactive = 'flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm bg-white text-gray-600 border border-gray-200 hover:border-gray-400 hover:text-gray-900';
-      document.getElementById('tab-submit').className = t === 'submit' ? active : inactive;
-      document.getElementById('tab-track').className  = t === 'track'  ? active : inactive;
-      document.getElementById('tab-submit').innerHTML = t === 'submit'
-        ? '<i class="fas fa-plus-circle"></i> Submit a Ticket'
-        : '<i class="fas fa-plus-circle"></i> Submit a Ticket';
-      document.getElementById('panel-submit').style.display = t === 'submit' ? 'block' : 'none';
-      document.getElementById('panel-track').style.display  = t === 'track'  ? 'block' : 'none';
+      const submitBtn = document.getElementById('tab-submit');
+      const trackBtn = document.getElementById('tab-track');
+      const submitPanel = document.getElementById('panel-submit');
+      const trackPanel = document.getElementById('panel-track');
+      if (!submitBtn || !trackBtn) return;
+      submitBtn.className = t === 'submit' ? active : inactive;
+      trackBtn.className = t === 'track' ? active : inactive;
+      if (submitPanel) submitPanel.style.display = t === 'submit' ? 'block' : 'none';
+      if (trackPanel) trackPanel.style.display = t === 'track' ? 'block' : 'none';
     }
 
-    function toggle(id) {
-      const el = document.getElementById(id);
-      el.classList.toggle('hidden');
-      const chev = document.getElementById(id.replace('-tips', '-chev'));
-      if (chev) chev.className = el.classList.contains('hidden') ? 'fas fa-chevron-down text-xs' : 'fas fa-chevron-up text-xs';
+    function updateIssuePanels() {
+      const sel = document.getElementById('issue-type-select');
+      const type = sel ? sel.value : '';
+      const it = document.getElementById('it-template-fields');
+      const pr = document.getElementById('printer-template-fields');
+      if (it) it.style.display = type === 'it' ? 'block' : 'none';
+      if (pr) pr.style.display = type === 'printer' ? 'block' : 'none';
     }
 
     function fillTemplate() {
       const f = document.getElementById('desc-field');
-      const tpl = `What I was trying to do:\n[Describe what you were doing]\n\nWhat happened:\n[What went wrong / error messages]\n\nSteps to reproduce:\n1. \n2. \n3. \n\nWhen did this start happening:\n[Date / time]`;
-      if (!f.value.trim() || confirm('Replace current text with template?')) { f.value = tpl; f.focus(); }
+      const type = (document.getElementById('issue-type-select') || {}).value || '';
+      let tpl = `What I was trying to do:\n[Describe what you were doing]\n\nWhat happened:\n[What went wrong / error messages]\n\nSteps to reproduce:\n1. \n2. \n3. \n\nWhen did this start happening:\n[Date / time]`;
+      if (type === 'it') {
+        tpl = `Affected system / application:\n[PC, Email, Network, Software, Account]\n\nWhat you were doing:\n[Describe the task]\n\nWhat happened / error message:\n[Exact error or symptoms]\n\nWhen it started / who is affected:\n[Date/time, number of users]\n\nTroubleshooting already tried:\n[Restarted, checked cables, etc.]`;
+      } else if (type === 'printer') {
+        tpl = `Printer make/model and location:\n[Model, floor/office]\n\nProblem:\n[Jam, toner, offline, scan, quality, error code]\n\nError code on screen:\n[Code or N/A]\n\nWhen it started / how often:\n[Date/time, frequency]\n\nWhat you've already tried:\n[Restarted printer, cleared jam, replaced toner, etc.]`;
+      }
+      if (!f) return;
+      if (!f.value.trim() || confirm('Replace current description with the selected issue template?')) {
+        f.value = tpl;
+        f.focus();
+      }
     }
 
     function updateFiles() {
@@ -375,31 +390,56 @@
       const cam = document.getElementById('camera-input');
       const list = document.getElementById('file-list');
       const prev = document.getElementById('file-preview');
+      if (!list || !prev) return;
       list.innerHTML = '';
       let has = false;
       const add = (files, icon, color) => {
         for (const f of files) {
           has = true;
           const li = document.createElement('li');
-          li.innerHTML = `<i class="${icon} ${color} mr-1"></i>${f.name} <span class="text-gray-400">(${(f.size/1024).toFixed(1)} KB)</span>`;
-          list.appendChild(li);
+        const size = (f.size / 1024).toFixed(1);
+        const iconEl = document.createElement('i');
+        iconEl.className = `${icon} ${color} mr-1`;
+        li.appendChild(iconEl);
+        li.appendChild(document.createTextNode(`${f.name} `));
+        const sizeSpan = document.createElement('span');
+        sizeSpan.className = 'text-gray-400';
+        sizeSpan.textContent = `(${size} KB)`;
+        li.appendChild(sizeSpan);
+        list.appendChild(li);
         }
       };
-      if (up.files.length) add(up.files, 'fas fa-file', 'text-blue-500');
+      if (up && up.files.length) add(up.files, 'fas fa-file', 'text-blue-500');
       if (cam && cam.files.length) add(cam.files, 'fas fa-camera', 'text-green-500');
       prev.classList.toggle('hidden', !has);
     }
 
     async function detectCamera() {
+      const opt = document.getElementById('camera-option');
+      if (!opt) return;
       const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
-      if (isMobile) { document.getElementById('camera-option').classList.remove('hidden'); return; }
+      if (isMobile) { opt.classList.remove('hidden'); return; }
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
-        if (devices.some(d => d.kind === 'videoinput')) document.getElementById('camera-option').classList.remove('hidden');
-      } catch(e) {}
+        if (devices.some(d => d.kind === 'videoinput')) opt.classList.remove('hidden');
+      } catch (e) {}
     }
 
-    document.addEventListener('DOMContentLoaded', () => { showTab('submit'); detectCamera(); });
+    document.addEventListener('DOMContentLoaded', () => {
+      showTab('submit');
+      detectCamera();
+      updateIssuePanels();
+      const sel = document.getElementById('issue-type-select');
+      if (sel) sel.addEventListener('change', updateIssuePanels);
+      try {
+        const prefill = sessionStorage.getItem('bubbles_prefill');
+        if (prefill) {
+          const desc = document.getElementById('desc-field');
+          if (desc && !desc.value.trim()) desc.value = prefill;
+          sessionStorage.removeItem('bubbles_prefill');
+        }
+      } catch (e) {}
+    });
   </script>
 </body>
 </html>
