@@ -52,12 +52,13 @@
     </script>
     
     <style>
-      /* ── FONTS (all 5 theme fonts pre-loaded) ── */
-      @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&family=Nunito:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700&family=Poppins:wght@300;400;500;600;700&display=swap');
+      {# Fetch only the active theme's font: all five families meant 25 weights on every page. #}
+      {% set theme = workspace.gui_theme if workspace and workspace.gui_theme else 'crimson' %}
+      {% set theme_font = {'ocean': 'Poppins', 'forest': 'DM Sans', 'midnight': 'Nunito', 'ember': 'Outfit'}.get(theme, 'Inter') %}
+      @import url('https://fonts.googleapis.com/css2?family={{ theme_font|replace(' ', '+') }}:wght@300;400;500;600;700&display=swap');
 
       /* ── THEME CSS VARIABLES ── */
       :root {
-        {% set theme = workspace.gui_theme if workspace and workspace.gui_theme else 'crimson' %}
         {% if theme == 'ocean' %}
         --font:'Poppins'; --ac:#0284c7; --ac-d:#0369a1; --ac-h:#0ea5e9;
         --ac-40:rgba(2,132,199,0.40); --ac-28:rgba(2,132,199,0.28);
@@ -163,7 +164,7 @@
 
       /* Apple Sonoma-style airy body — uses theme variables */
       body {
-        background: linear-gradient(145deg, var(--bg-a) 0%, var(--bg-b) 40%, var(--bg-a) 100%) fixed !important;
+        background: linear-gradient(145deg, var(--bg-a) 0%, var(--bg-b) 40%, var(--bg-a) 100%) !important;
       }
 
       /* ── SIDEBAR: deep charcoal vibrancy — uses theme variables ── */
@@ -171,8 +172,8 @@
         background:
           linear-gradient(180deg, rgba(255,255,255,0.07) 0%, rgba(255,255,255,0) 28%),
           linear-gradient(160deg, var(--sb-a) 0%, var(--sb-b) 55%, var(--sb-a) 100%) !important;
-        backdrop-filter: blur(40px) saturate(200%);
-        -webkit-backdrop-filter: blur(40px) saturate(200%);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
         box-shadow: 2px 0 40px rgba(0,0,0,0.6),
                     inset 1px 0 0 rgba(255,255,255,0.06),
                     inset -1px 0 0 rgba(0,0,0,0.2) !important;
@@ -216,8 +217,8 @@
         position: relative;
         z-index: 20;
         background: rgba(246,248,255,0.80) !important;
-        backdrop-filter: blur(40px) saturate(220%);
-        -webkit-backdrop-filter: blur(40px) saturate(220%);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
         border-bottom: 0.5px solid rgba(0,0,0,0.08) !important;
         box-shadow: 0 1px 0 rgba(255,255,255,0.95),
                     0 4px 28px rgba(0,0,0,0.06) !important;
@@ -261,15 +262,16 @@
                     inset 0 1px 2px rgba(0,0,0,0.03) !important;
       }
 
-      /* ── CONTENT CARDS: Apple vibrancy material ── */
+      /* ── CONTENT CARDS: crisp translucent material ── */
+      /* No backdrop-filter on page cards: a 40px blur on a 10,000px+ ticket
+         allocates huge compositor textures and stalls scrolling. Keep the
+         border/shadow for depth, but use a flat translucent background. */
       /* No transform on hover — transforms create stacking contexts that can
          trap child dropdowns/modals behind sibling elements. */
       #page-content .bg-white.rounded-xl,
       #page-content .bg-white.rounded-lg,
       #page-content .bg-white.rounded-2xl {
-        background: rgba(255,255,255,0.76) !important;
-        backdrop-filter: blur(40px) saturate(200%);
-        -webkit-backdrop-filter: blur(40px) saturate(200%);
+        background: rgba(255,255,255,0.92) !important;
         border-radius: 16px !important;
         border: 0.5px solid rgba(255,255,255,0.85) !important;
         box-shadow:
@@ -377,8 +379,8 @@
 
       .bg-white.shadow-xl {
         background: rgba(248,250,255,0.92) !important;
-        backdrop-filter: blur(40px) saturate(220%);
-        -webkit-backdrop-filter: blur(40px) saturate(220%);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
         border-radius: 14px !important;
         border: 0.5px solid rgba(0,0,0,0.09) !important;
         box-shadow:
@@ -405,8 +407,8 @@
       /* ── MOBILE MENU BUTTON: glass ── */
       #mobile-menu-button {
         background: rgba(255,255,255,0.18) !important;
-        backdrop-filter: blur(24px);
-        -webkit-backdrop-filter: blur(24px);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
         border: 0.5px solid rgba(255,255,255,0.30);
         box-shadow: 0 2px 16px rgba(0,0,0,0.35),
                     inset 0 1px 0 rgba(255,255,255,0.22);
@@ -908,8 +910,9 @@
         }
       }
       
-      // Check for new notifications every 10 seconds
+      // Check for new notifications every 10 seconds while the tab is visible.
       async function checkNotifications() {
+        if (document.hidden) return;
         try {
           const response = await fetch('/web/notifications/unread');
           const notifications = await response.json();
@@ -1109,9 +1112,13 @@
       `;
       document.head.appendChild(style);
       
-      // Start checking for notifications
+      // Start checking for notifications; hidden tabs do no network/popup work.
       checkNotifications();
-      setInterval(checkNotifications, 10000); // Check every 10 seconds
+      setInterval(checkNotifications, 10000); // Check every 10 seconds (guarded above)
+      // One refresh when the user comes back, not a second polling loop.
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) checkNotifications();
+      });
     </script>
 
     <!-- Mobile Sidebar Toggle Script -->

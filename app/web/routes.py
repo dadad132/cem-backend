@@ -288,7 +288,9 @@ templates.env.filters['tidy_text'] = lambda text: _tidy_email_text(text) or ''
 # show their start, with "Show the full message".
 TICKET_COMMENTS_SHOWN = 30
 TICKET_HISTORY_SHOWN = 20
+TICKET_DESCRIPTION_CLIP_CHARS = 3000
 templates.env.globals['comment_clip_chars'] = 5000
+templates.env.globals['description_clip_chars'] = TICKET_DESCRIPTION_CLIP_CHARS
 
 router = APIRouter(tags=['web'])
 
@@ -15859,6 +15861,64 @@ def _htmx_login_redirect() -> HTMLResponse:
     return HTMLResponse('', headers={'HX-Redirect': '/web/login'})
 
 
+@router.get('/tickets/{ticket_id}/description/full', response_class=HTMLResponse)
+async def web_ticket_description_full(
+    request: Request, ticket_id: int, db: AsyncSession = Depends(get_session)
+):
+    """The whole description, for "Show full description" on the ticket page."""
+    user, ticket, workspace = await _ticket_part_access(request, db, ticket_id)
+    if not user:
+        return _htmx_login_redirect()
+    if not ticket:
+        return HTMLResponse('', status_code=404)
+    return templates.TemplateResponse('tickets/_description.html', {
+        'request': request,
+        'workspace': workspace,
+        'ticket': ticket,
+        'show_full': True,
+    }, headers={'Cache-Control': 'no-store, private'})
+
+
+@router.get('/tickets/{ticket_id}/description/summary', response_class=HTMLResponse)
+async def web_ticket_description_summary(
+    request: Request, ticket_id: int, db: AsyncSession = Depends(get_session)
+):
+    """The clipped description again, for "Show less"."""
+    user, ticket, workspace = await _ticket_part_access(request, db, ticket_id)
+    if not user:
+        return _htmx_login_redirect()
+    if not ticket:
+        return HTMLResponse('', status_code=404)
+    return templates.TemplateResponse('tickets/_description.html', {
+        'request': request,
+        'workspace': workspace,
+        'ticket': ticket,
+        'show_full': False,
+    }, headers={'Cache-Control': 'no-store, private'})
+
+
+@router.get('/tickets/{ticket_id}/description/raw', response_class=JSONResponse)
+async def web_ticket_description_raw(
+    request: Request, ticket_id: int, db: AsyncSession = Depends(get_session)
+):
+    """The untrimmed edit field, loaded only by an admin who opens Edit Ticket.
+
+    Never put a 20k-character description in the initial page: the edit drawer
+    fetches it on demand, and only after a successful fetch may Save be used.
+    """
+    user, ticket, _workspace = await _ticket_part_access(request, db, ticket_id)
+    if not user:
+        return JSONResponse({'error': 'Not authenticated'}, status_code=401)
+    if not user.is_admin:
+        return JSONResponse({'error': 'Admin access required'}, status_code=403)
+    if not ticket:
+        return JSONResponse({'error': 'Ticket not found'}, status_code=404)
+    return JSONResponse(
+        {'description': ticket.description or ''},
+        headers={'Cache-Control': 'no-store, private'},
+    )
+
+
 @router.get('/tickets/{ticket_id}/comments/older', response_class=HTMLResponse)
 async def web_ticket_older_comments(
     request: Request, ticket_id: int, before: int, db: AsyncSession = Depends(get_session)
@@ -17467,6 +17527,17 @@ async def web_tickets_edit(request: Request, ticket_id: int, db: AsyncSession = 
     if not subject:
         request.session['error_message'] = 'The ticket was not saved: it needs a subject.'
         return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+
+    description = text('description')
+    # A long description is lazy-loaded into the edit drawer. An empty value
+    # means the fetch never populated it; never clear the stored text in that
+    # case, even if a submit bypasses the disabled Save button.
+    if len(ticket.description or '') > TICKET_DESCRIPTION_CLIP_CHARS and not description:
+        request.session['error_message'] = (
+            'The ticket was not saved: the full description did not load. Reopen Edit Ticket and try again.'
+        )
+        return RedirectResponse(f'/web/tickets/{ticket_id}', status_code=303)
+
     start = _parse_datetime_local(form.get('scheduled_date'))
     end = _parse_datetime_local(form.get('due_date'))
     if start and end and end < start:
@@ -17492,7 +17563,7 @@ async def web_tickets_edit(request: Request, ticket_id: int, db: AsyncSession = 
     changes = []  # (history action, old, new)
     updates = {
         'subject': subject,
-        'description': text('description'),
+        'description': description,
         'priority': form.get('priority') if form.get('priority') in TICKET_PRIORITIES else ticket.priority,
         'category': form.get('category') if form.get('category') in TICKET_CATEGORIES else ticket.category,
     }

@@ -1,7 +1,8 @@
 // CEM Service Worker for PWA
-const CACHE_NAME = 'cem-cache-v1';
+const CACHE_NAME = 'cem-cache-v2';
+// Only immutable static assets are worth precaching. Web pages, API replies,
+// attachments and notification polls must never be cloned into Cache Storage.
 const urlsToCache = [
-  '/web/login',
   '/static/manifest.json'
 ];
 
@@ -17,29 +18,37 @@ self.addEventListener('install', (event) => {
   self.skipWaiting();
 });
 
-// Fetch event - Network first, fallback to cache
+// Fetch event - only same-origin /static/ GETs are cached. Everything else is
+// left to the browser so huge ticket pages, photos and API replies are never
+// cloned into RAM or accumulated in Cache Storage.
 self.addEventListener('fetch', (event) => {
-  event.respondWith(
-    fetch(event.request)
+  if (event.request.method !== 'GET') return;
+
+  let url;
+  try {
+    url = new URL(event.request.url);
+  } catch (e) {
+    return;
+  }
+  if (url.origin !== self.location.origin || !url.pathname.startsWith('/static/')) return;
+
+  // Cache by pathname, not by full URL: ?v=3/?v=4 would otherwise pile up as
+  // separate entries forever in Cache Storage.
+  const cacheKey = new Request(url.origin + url.pathname, { method: 'GET' });
+
+  const network = fetch(event.request);
+  // waitUntil must be registered while the event is still dispatching. It
+  // clones only successful static responses and does not delay the response.
+  event.waitUntil(
+    network
       .then((response) => {
-        // Clone the response
-        const responseClone = response.clone();
-        
-        // Cache successful responses
-        if (response.status === 200) {
-          caches.open(CACHE_NAME)
-            .then((cache) => {
-              cache.put(event.request, responseClone);
-            });
-        }
-        
-        return response;
+        if (response.status !== 200) return undefined;
+        return caches.open(CACHE_NAME)
+          .then((cache) => cache.put(cacheKey, response.clone()));
       })
-      .catch(() => {
-        // Fallback to cache
-        return caches.match(event.request);
-      })
+      .catch(() => undefined)
   );
+  event.respondWith(network.catch(() => caches.match(cacheKey)));
 });
 
 // Activate event - Clean up old caches
