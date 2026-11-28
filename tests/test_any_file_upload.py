@@ -657,13 +657,14 @@ def test_dropzone_default_accepts_any_file_type_but_honors_explicit_accept():
 
 def test_general_upload_templates_no_longer_restrict_the_file_picker():
     detail = (TEMPLATES_DIR / 'tickets' / 'detail.html').read_text(encoding='utf-8')
+    attachment_cards = (TEMPLATES_DIR / 'tickets' / '_attachments_page.html').read_text(encoding='utf-8')
     assert "accept='image/*'" not in detail
     assert 'photoGalleryInput' in detail
     assert 'Drop photos or files here, or click to browse' in detail
     assert 'Any file type up to 15 MB each' in detail
     assert 'Any file type up to 10 MB each' in detail
     assert 'file(s)' in detail and '/web/tickets/{{ ticket.id }}/photos' in detail
-    assert "attachment.mime_type == 'text/csv'" in detail
+    assert "attachment.mime_type == 'text/csv'" in attachment_cards
     assert 'photoCameraInput" accept="image/*" capture="environment"' in detail
 
     guest = (TEMPLATES_DIR / 'tickets' / 'guest.html').read_text(encoding='utf-8')

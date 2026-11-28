@@ -53,6 +53,9 @@ watchfiles==1.1.1
 reportlab==4.2.5
 openpyxl>=3.1.0
 
+# Image processing (attachment thumbnails)
+Pillow==13.0.0
+
 # AI / LLM Integration
 anthropic>=0.40.0
 openai>=1.0.0

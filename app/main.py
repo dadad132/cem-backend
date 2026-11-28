@@ -2,9 +2,11 @@ from fastapi import Depends, FastAPI, Request
 # restart trigger: updated timestamp
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+from urllib.parse import unquote
+import posixpath
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 try:
@@ -218,6 +220,39 @@ if ProxyHeadersMiddleware is not None:
         h.strip() for h in (settings.forwarded_allow_ips or "").split(",") if h.strip()
     ] or ["127.0.0.1", "::1"]
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_proxies)
+
+
+class PrivateUploadCacheMiddleware(BaseHTTPMiddleware):
+    """The thumbnail cache lives under /uploads but is never publicly served.
+
+    /uploads is a static mount with no session or workspace checks, so the
+    private .thumbs directory must be denied before StaticFiles sees it.
+    """
+
+    @staticmethod
+    def _is_private_thumbnail(request: Request) -> bool:
+        # Check a normalized form of both the decoded and raw ASGI paths:
+        # StaticFiles resolves dot segments, so a literal string prefix check
+        # can be bypassed with %2e, // or ../ variants.
+        candidates = []
+        for raw in (
+            request.scope.get('path', ''),
+            request.scope.get('raw_path', b'').decode('latin-1'),
+        ):
+            decoded = unquote(unquote(raw)).replace('\\', '/')
+            candidates.append(posixpath.normpath(decoded))
+        return any(
+            path == '/uploads/.thumbs' or path.startswith('/uploads/.thumbs/')
+            for path in candidates
+        )
+
+    async def dispatch(self, request: Request, call_next):
+        if self._is_private_thumbnail(request):
+            return Response(status_code=404)
+        return await call_next(request)
+
+
+app.add_middleware(PrivateUploadCacheMiddleware)
 
 # Import templates from web routes to get the enhanced version with workspace injection
 from app.web.routes import templates

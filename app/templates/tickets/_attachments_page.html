@@ -1,0 +1,101 @@
+{# One page of ticket photos/files, then a button for the next older page.
+   Included by the ticket page and by "Show more files". #}
+{% for attachment in attachments %}
+{% set is_photo = attachment.mime_type and attachment.mime_type.startswith('image/') %}
+{% set can_delete = user.is_admin or (attachment.uploaded_by_id and attachment.uploaded_by_id == user.id) %}
+{% if is_photo %}
+<!-- Photo: picture on top, details underneath -->
+<div class="tk-attachment-card border border-gray-200 rounded-lg overflow-hidden">
+    <a href="/web/tickets/attachments/{{ attachment.id }}/preview" target="_blank" title="Open photo"
+       class="block bg-gray-100" style="aspect-ratio: 4 / 3">
+        <img src="/web/tickets/attachments/{{ attachment.id }}/preview?thumb=1" alt="{{ attachment.filename }}" loading="lazy" decoding="async"
+             class="w-full h-full object-cover"
+             onerror="this.nextElementSibling.style.display = 'flex'; this.remove()">
+        {# shown if the browser cannot show this photo (e.g. HEIC outside Safari) #}
+        <span class="w-full h-full items-center justify-center" style="display: none">
+            <i class="fas fa-image text-blue-600 text-3xl"></i>
+        </span>
+    </a>
+    <div class="p-3 flex items-start gap-2">
+        <div class="flex-1 min-w-0">
+            <a href="/web/tickets/attachments/{{ attachment.id }}/download"
+               class="text-sm font-medium text-blue-600 hover:text-blue-800 truncate block"
+               title="{{ attachment.filename }}">{{ attachment.filename }}</a>
+            <p class="text-xs text-gray-500">
+                {{ (attachment.file_size / 1024)|round(1) }} KB &middot;
+                {{ attachment.uploaded_at | localtime('%b %d, %Y') }}
+            </p>
+        </div>
+        {% if can_delete %}
+        <button type="button" data-name="{{ attachment.filename }}"
+                onclick="deleteAttachment({{ attachment.id }}, this.dataset.name)"
+                class="text-red-400 hover:text-red-600 p-1" title="Delete photo">
+            <i class="fas fa-trash"></i>
+        </button>
+        {% endif %}
+    </div>
+</div>
+{% else %}
+<div class="tk-attachment-card border border-gray-200 rounded-lg p-3 hover:bg-gray-50 transition">
+    <div class="flex items-start gap-3">
+        <!-- File type icon -->
+        {% if attachment.mime_type == 'application/pdf' %}
+            <div class="flex-shrink-0 w-12 h-12 bg-red-100 rounded-lg flex items-center justify-center">
+                <i class="fas fa-file-pdf text-red-600 text-xl"></i>
+            </div>
+        {% elif attachment.mime_type and 'word' in attachment.mime_type %}
+            <div class="flex-shrink-0 w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
+                <i class="fas fa-file-word text-blue-600 text-xl"></i>
+            </div>
+        {% elif attachment.mime_type and ('excel' in attachment.mime_type or 'spreadsheet' in attachment.mime_type) %}
+            <div class="flex-shrink-0 w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center">
+                <i class="fas fa-file-excel text-green-600 text-xl"></i>
+            </div>
+        {% elif attachment.mime_type == 'text/csv' %}
+            <div class="flex-shrink-0 w-12 h-12 bg-emerald-100 rounded-lg flex items-center justify-center">
+                <i class="fas fa-file-csv text-emerald-600 text-xl"></i>
+            </div>
+        {% elif attachment.mime_type and 'zip' in attachment.mime_type %}
+            <div class="flex-shrink-0 w-12 h-12 bg-yellow-100 rounded-lg flex items-center justify-center">
+                <i class="fas fa-file-archive text-yellow-600 text-xl"></i>
+            </div>
+        {% else %}
+            <div class="flex-shrink-0 w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center">
+                <i class="fas fa-file text-gray-600 text-xl"></i>
+            </div>
+        {% endif %}
+
+        <div class="flex-1 min-w-0">
+            <a href="/web/tickets/attachments/{{ attachment.id }}/download"
+               class="text-sm font-medium text-blue-600 hover:text-blue-800 truncate block"
+               title="{{ attachment.filename }}">
+                {{ attachment.filename|truncate(25) }}
+            </a>
+            <p class="text-xs text-gray-500">
+                {{ (attachment.file_size / 1024)|round(1) }} KB
+            </p>
+            <p class="text-xs text-gray-400">
+                {{ attachment.uploaded_at | localtime('%b %d, %Y') }}
+            </p>
+        </div>
+
+        {% if can_delete %}
+        <!-- Delete attachment button (name passed as data, never as script) -->
+        <button type="button" data-name="{{ attachment.filename }}"
+                onclick="deleteAttachment({{ attachment.id }}, this.dataset.name)"
+                class="text-red-400 hover:text-red-600"
+                title="Delete attachment">
+            <i class="fas fa-trash"></i>
+        </button>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+{% endfor %}
+{% if older_attachments and attachments %}
+<button type="button" class="tk-load-more tk-load-more-block col-span-full"
+        hx-get="/web/tickets/{{ ticket.id }}/attachments/more?before={{ (attachments|last).id }}"
+        hx-target="this" hx-swap="outerHTML" hx-disabled-elt="this">
+    <i class="fas fa-chevron-down mr-1"></i>Show more files ({{ older_attachments }})
+</button>
+{% endif %}

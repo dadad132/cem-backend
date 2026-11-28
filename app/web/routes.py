@@ -22,6 +22,7 @@ import inspect
 import os
 import secrets
 import uuid
+import weakref
 import asyncio
 import logging
 
@@ -45,6 +46,7 @@ from app.core.attachment_upload import (
     attachment_rejection_reason, clean_upload_name,
     photo_type as _photo_type, validate_attachment,
 )
+from app.core.thumbnails import delete_thumbnail, get_or_create_thumbnail
 from app.core import project_quotation as quotations
 from app.core.project_quotation import (
     validate_quotation, store_quotation, safe_quotation_path,
@@ -288,8 +290,31 @@ templates.env.filters['tidy_text'] = lambda text: _tidy_email_text(text) or ''
 # show their start, with "Show the full message".
 TICKET_COMMENTS_SHOWN = 30
 TICKET_HISTORY_SHOWN = 20
+TICKET_ATTACHMENTS_SHOWN = 12
 TICKET_DESCRIPTION_CLIP_CHARS = 3000
+# Pillow decoding is memory-heavy: wait in the event loop (not in a worker)
+# so at most two thumbnails are generated at once without starving the shared
+# thread pool used by backups and mail. One semaphore per running loop keeps
+# pytest's sequential event loops independent.
+_THUMBNAIL_SEMAPHORES = weakref.WeakKeyDictionary()
 templates.env.globals['comment_clip_chars'] = 5000
+
+
+def _thumbnail_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    semaphore = _THUMBNAIL_SEMAPHORES.get(loop)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(2)
+        _THUMBNAIL_SEMAPHORES[loop] = semaphore
+    return semaphore
+
+
+async def _generate_thumbnail(file_path: Path):
+    """Bound expensive Pillow work before it reaches a worker thread."""
+    async with _thumbnail_semaphore():
+        return await asyncio.to_thread(
+            get_or_create_thumbnail, file_path, uploads_root=BASE_DIR / 'uploads'
+        )
 templates.env.globals['description_clip_chars'] = TICKET_DESCRIPTION_CLIP_CHARS
 
 router = APIRouter(tags=['web'])
@@ -15706,10 +15731,11 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
     comment_count = len(comments) + older_comments
     comment_authors = await _comment_authors(db, comments)
 
-    # Get attachments
-    attachments = (await db.execute(
-        select(TicketAttachment).where(TicketAttachment.ticket_id == ticket_id)
-    )).scalars().all()
+    # Only the newest attachments: big tickets can hold hundreds of photos.
+    attachments, older_attachments = await _ticket_attachments_page(
+        db, ticket_id, TICKET_ATTACHMENTS_SHOWN
+    )
+    attachment_count = len(attachments) + older_attachments
 
     # Newest history only; "Show older history" loads the rest
     history, older_history = await _ticket_rows_page(
@@ -15780,6 +15806,8 @@ async def web_tickets_detail(request: Request, ticket_id: int, db: AsyncSession 
         'older_comments': older_comments,
         'comment_authors': comment_authors,
         'attachments': attachments,
+        'attachment_count': attachment_count,
+        'older_attachments': older_attachments,
         'history': history,
         'older_history': older_history,
         'users': users,
@@ -15818,6 +15846,30 @@ async def _ticket_rows_page(db: AsyncSession, model, ticket_id: int, limit: int,
     from sqlalchemy import func
     total = (await db.execute(select(func.count()).select_from(model).where(*conditions))).scalar() or 0
     return rows, total - len(rows)
+
+
+async def _ticket_attachments_page(db: AsyncSession, ticket_id: int, limit: int, before=None):
+    """A page of a ticket's files, newest first, plus how many older ones remain."""
+    from app.models.ticket import TicketAttachment
+
+    conditions = [TicketAttachment.ticket_id == ticket_id]
+    if before is not None:
+        conditions.append(or_(
+            TicketAttachment.uploaded_at < before.uploaded_at,
+            and_(
+                TicketAttachment.uploaded_at == before.uploaded_at,
+                TicketAttachment.id < before.id,
+            ),
+        ))
+    rows = (await db.execute(
+        select(TicketAttachment).where(*conditions)
+        .order_by(TicketAttachment.uploaded_at.desc(), TicketAttachment.id.desc())
+        .limit(limit)
+    )).scalars().all()
+    total = (await db.execute(
+        select(func.count()).select_from(TicketAttachment).where(*conditions)
+    )).scalar() or 0
+    return rows, max(0, total - len(rows))
 
 
 async def _comment_authors(db: AsyncSession, comments) -> dict:
@@ -15947,6 +15999,36 @@ async def web_ticket_older_comments(
         'comment_authors': await _comment_authors(db, comments),
         'comment_time_fmt': comment_time_fmt,
     })
+
+
+@router.get('/tickets/{ticket_id}/attachments/more', response_class=HTMLResponse)
+async def web_ticket_attachments_more(
+    request: Request, ticket_id: int, before: int, db: AsyncSession = Depends(get_session)
+):
+    """The next page of ticket files for "Show more files" on the ticket page."""
+    from app.models.ticket import TicketAttachment
+
+    user, ticket, _workspace = await _ticket_part_access(request, db, ticket_id)
+    if not user:
+        return _htmx_login_redirect()
+    anchor = ticket and (await db.execute(
+        select(TicketAttachment).where(
+            TicketAttachment.id == before, TicketAttachment.ticket_id == ticket_id
+        )
+    )).scalar_one_or_none()
+    if not anchor:
+        return HTMLResponse('', status_code=404)
+
+    attachments, older_attachments = await _ticket_attachments_page(
+        db, ticket_id, TICKET_ATTACHMENTS_SHOWN, before=anchor
+    )
+    return templates.TemplateResponse('tickets/_attachments_page.html', {
+        'request': request,
+        'user': user,
+        'ticket': ticket,
+        'attachments': attachments,
+        'older_attachments': older_attachments,
+    }, headers={'Cache-Control': 'no-store, private'})
 
 
 @router.get('/tickets/{ticket_id}/comments/{comment_id}/full', response_class=HTMLResponse)
@@ -17758,6 +17840,7 @@ async def web_ticket_attachment_download(
 async def web_ticket_attachment_preview(
     request: Request,
     attachment_id: int,
+    thumb: int = 0,
     db: AsyncSession = Depends(get_session)
 ):
     """Preview a ticket attachment (images only)"""
@@ -17800,15 +17883,26 @@ async def web_ticket_attachment_preview(
     if not file_path:
         raise HTTPException(status_code=404, detail="File not found on disk")
 
+    # Pillow runs in a worker: decoding a large photo must not stall the event
+    # loop. A failed/unsafe thumbnail simply falls back to the original file.
+    preview_path = file_path
+    media_type = attachment.mime_type
+    if thumb:
+        thumbnail = await _generate_thumbnail(file_path)
+        if thumbnail:
+            preview_path = thumbnail
+            media_type = 'image/jpeg'
+
     display_name = clean_upload_name(attachment.filename)
     return FileResponse(
-        path=str(file_path),
+        path=str(preview_path),
         filename=display_name,
-        media_type=attachment.mime_type,
+        media_type=media_type,
         headers={
             'Content-Disposition': f'inline; filename="{display_name}"',
             'X-Content-Type-Options': 'nosniff',
             'Content-Security-Policy': "default-src 'none'",
+            'Cache-Control': 'private, max-age=86400',
         },
     )
 
@@ -17871,6 +17965,12 @@ async def web_ticket_attachment_delete(
     # Delete file from disk only when the stored path stays inside uploads/.
     file_path = _resolve_stored_upload(attachment.file_path)
     if file_path:
+        # Clean the cache while the source still exists: its current cache key
+        # can then be matched even if a sidecar was never written.
+        try:
+            delete_thumbnail(file_path, uploads_root=BASE_DIR / 'uploads')
+        except Exception as e:
+            logger.error(f"Failed to delete attachment thumbnail {file_path}: {e}")
         try:
             file_path.unlink(missing_ok=True)
         except OSError as e:
@@ -20078,6 +20178,10 @@ async def web_admin_storage_delete_archived(request: Request, db: AsyncSession =
                 file_path = _resolve_stored_upload(att.file_path)
                 if not file_path:
                     continue
+                try:
+                    delete_thumbnail(file_path, uploads_root=BASE_DIR / 'uploads')
+                except Exception as e:
+                    logger.warning(f"Could not delete attachment thumbnail {att.file_path}: {e}")
                 try:
                     file_path.unlink(missing_ok=True)
                     logger.info(f"Deleted attachment file: {att.file_path}")

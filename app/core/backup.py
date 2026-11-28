@@ -107,7 +107,14 @@ class DatabaseBackup:
                 # Collect files first so we can track progress
                 files_to_add = []
                 if self.uploads_dir.exists():
-                    files_to_add = [f for f in self.uploads_dir.rglob('*') if f.is_file()]
+                    # Never back up the private thumbnail cache (or a writer's
+                    # temp file); it is regenerated on demand from attachments.
+                    files_to_add = [
+                        f for f in self.uploads_dir.rglob('*')
+                        if f.is_file()
+                        and '.thumbs' not in f.relative_to(self.uploads_dir).parts
+                        and not f.name.startswith('.tmp-')
+                    ]
                 total_files = len(files_to_add) + 1  # +1 for database
                 
                 # Create ZIP archive with database + attachments
